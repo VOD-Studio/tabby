@@ -1,4 +1,5 @@
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
@@ -184,7 +185,7 @@ pub struct ProxiesView {
 const FRESH_FRAMES: u8 = 3;
 
 /// One row of the connections table.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ConnectionRow {
     pub connection: models::Connection,
     /// What it moved since the frame before; `None` when it was not in that
@@ -194,21 +195,198 @@ pub struct ConnectionRow {
     pub fresh: bool,
 }
 
-/// Table, cursor and pause state of the connections page.
+impl ConnectionRow {
+    /// The name the table shows: the host, else the address it went to;
+    /// empty when the kernel gave neither.
+    pub fn host(&self) -> &str {
+        let metadata = &self.connection.metadata;
+        if metadata.host.is_empty() {
+            &metadata.destination_ip
+        } else {
+            &metadata.host
+        }
+    }
+
+    fn process(&self) -> &str {
+        &self.connection.metadata.process
+    }
+
+    /// Whether any field the filter looks at contains `needle`, which is
+    /// lowercase already.
+    fn matches(&self, needle: &str) -> bool {
+        let connection = &self.connection;
+        let metadata = &connection.metadata;
+        [
+            &metadata.host,
+            &metadata.destination_ip,
+            &metadata.process,
+            &connection.rule,
+            &connection.rule_payload,
+        ]
+        .into_iter()
+        .chain(&connection.chains)
+        .any(|field| field.to_lowercase().contains(needle))
+    }
+}
+
+/// The columns the connections table can be ordered by, left to right as
+/// the table lays them out. The route is not one of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortColumn {
+    Host,
+    Process,
+    Up,
+    Down,
+    Total,
+    Duration,
+}
+
+impl SortColumn {
+    const ALL: [Self; 6] = [
+        Self::Host,
+        Self::Process,
+        Self::Up,
+        Self::Down,
+        Self::Total,
+        Self::Duration,
+    ];
+
+    /// The direction `s` lands on: names A to Z and the newest connection
+    /// first, but the most traffic first.
+    fn ascending_first(self) -> bool {
+        !matches!(self, Self::Up | Self::Down | Self::Total)
+    }
+}
+
+/// The order of the connections table. Ascending runs names A to Z, traffic
+/// from least to most and durations from shortest (newest) to longest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConnectionSort {
+    pub column: SortColumn,
+    pub ascending: bool,
+}
+
+impl Default for ConnectionSort {
+    /// Newest first.
+    fn default() -> Self {
+        Self {
+            column: SortColumn::Duration,
+            ascending: true,
+        }
+    }
+}
+
+impl ConnectionSort {
+    /// `s`: the next of the `shown` columns to the right, wrapping around,
+    /// in its first direction. Columns a narrow terminal hides are skipped,
+    /// even when the table is sorted by one of them.
+    fn next(self, shown: &[SortColumn]) -> Self {
+        let all = SortColumn::ALL;
+        let at = all.iter().position(|&c| c == self.column).unwrap_or(0);
+        let column = (1..=all.len())
+            .map(|step| all[(at + step) % all.len()])
+            .find(|column| shown.contains(column))
+            .unwrap_or(self.column);
+        Self {
+            column,
+            ascending: column.ascending_first(),
+        }
+    }
+
+    /// `S`: same column, the other way round.
+    fn reversed(self) -> Self {
+        Self {
+            ascending: !self.ascending,
+            ..self
+        }
+    }
+
+    /// Orders two values in this direction. A missing value goes last
+    /// either way: reversing the whole comparison would bring them to the
+    /// top.
+    fn order<T>(self, a: Option<T>, b: Option<T>, cmp: impl FnOnce(T, T) -> Ordering) -> Ordering {
+        match (a, b) {
+            (Some(a), Some(b)) if self.ascending => cmp(a, b),
+            (Some(a), Some(b)) => cmp(b, a),
+            (Some(_), None) => Ordering::Less,
+            (None, Some(_)) => Ordering::Greater,
+            (None, None) => Ordering::Equal,
+        }
+    }
+
+    /// Sorts `rows` in this order. Ties go by id: the kernel sends the
+    /// connections in a different order every frame, and the table must not
+    /// shuffle.
+    fn sort(self, rows: &mut Vec<ConnectionRow>) {
+        let number: fn(&ConnectionRow) -> Option<i128> = match self.column {
+            SortColumn::Host => return self.sort_by_text(rows, ConnectionRow::host),
+            SortColumn::Process => return self.sort_by_text(rows, ConnectionRow::process),
+            SortColumn::Up => |row| row.rate.map(|rate| i128::from(rate.up)),
+            SortColumn::Down => |row| row.rate.map(|rate| i128::from(rate.down)),
+            SortColumn::Total => {
+                |row| Some(i128::from(row.connection.upload) + i128::from(row.connection.download))
+            }
+            // Started later is shorter so far.
+            SortColumn::Duration => |row| row.connection.start.map(|start| -start.as_nanosecond()),
+        };
+        rows.sort_by(|a, b| {
+            self.order(number(a), number(b), |a, b| a.cmp(&b))
+                .then_with(|| a.connection.id.cmp(&b.connection.id))
+        });
+    }
+
+    /// Sorts by a name, compared as the proxies page compares node names:
+    /// lowercased, digit runs by value. An empty name counts as missing.
+    fn sort_by_text(self, rows: &mut Vec<ConnectionRow>, text: fn(&ConnectionRow) -> &str) {
+        // Lowercased once per row, not once per comparison.
+        let mut keyed: Vec<(Option<String>, ConnectionRow)> = rows
+            .drain(..)
+            .map(|row| {
+                let key = text(&row).to_lowercase();
+                ((!key.is_empty()).then_some(key), row)
+            })
+            .collect();
+        keyed.sort_by(|(a_key, a), (b_key, b)| {
+            self.order(a_key.as_deref(), b_key.as_deref(), natural_cmp)
+                .then_with(|| a.connection.id.cmp(&b.connection.id))
+        });
+        rows.extend(keyed.into_iter().map(|(_, row)| row));
+    }
+}
+
+/// What the connection detail popup shows, while it is open.
+#[derive(Debug)]
+pub struct Detail {
+    /// The connection as of the last table update that had it.
+    pub row: ConnectionRow,
+    /// When that update was taken; its duration counts up to this.
+    pub as_of: Option<Timestamp>,
+    /// The table updated without it: the connection has ended.
+    pub closed: bool,
+}
+
+/// Table, cursor, order, filter and pause state of the connections page.
 #[derive(Debug, Default)]
 pub struct ConnectionsView {
-    /// The table, newest connection first, as of the last frame it was
-    /// updated for. `None` until the first frame, and again while the stream
-    /// is down.
+    /// The table, in `sort` order and unfiltered, as of the last frame it
+    /// was updated for. `None` until the first frame, and again while the
+    /// stream is down.
     pub rows: Option<Vec<ConnectionRow>>,
     /// When `rows` was taken. Durations count up to it rather than to the
     /// clock, so a paused table keeps still.
     pub as_of: Option<Timestamp>,
-    /// Index into `rows`.
+    /// Index into [`ConnectionsView::visible`].
     pub cursor: usize,
     pub scroll: Scroll,
     /// The table stays as it is; frames only keep the baseline up to date.
     pub paused: bool,
+    pub sort: ConnectionSort,
+    /// Case-insensitive substring one of a row's fields must contain.
+    pub filter: Input,
+    /// The filter box has the keyboard.
+    pub typing: bool,
+    /// The connection in the detail popup, while it is open.
+    pub detail: Option<Detail>,
     /// Totals of the last frame, whether or not it reached the table: the
     /// frame after is measured against it, so resuming shows one frame's
     /// traffic rather than everything moved while paused.
@@ -219,8 +397,9 @@ pub struct ConnectionsView {
 
 impl ConnectionsView {
     /// Takes in a frame: rates, highlights and baseline always, the table
-    /// unless it is paused. The first frame after (re)connecting is let
-    /// through even then: a table that was never filled has nothing to freeze.
+    /// (and the popup's connection with it) unless it is paused. The first
+    /// frame after (re)connecting is let through even then: a table that was
+    /// never filled has nothing to freeze.
     fn apply(&mut self, frame: ConnectionSnapshot, now: Timestamp) {
         // Everything is new then; lighting up the whole table says nothing.
         let first = self.rows.is_none();
@@ -253,37 +432,97 @@ impl ConnectionsView {
                 rate,
             })
             .collect();
-        // The kernel sends them in no particular order, and a different one
-        // every frame. Without a fixed order the table would shuffle.
-        rows.sort_by(|a, b| {
-            b.connection
-                .start
-                .cmp(&a.connection.start)
-                .then_with(|| a.connection.id.cmp(&b.connection.id))
-        });
-        self.cursor = anchor
-            .map_or(0, |(id, index)| {
-                rows.iter()
-                    .position(|row| row.connection.id == id)
-                    .unwrap_or(index)
-            })
-            .min(rows.len().saturating_sub(1));
+        self.sort.sort(&mut rows);
+        if let Some(detail) = &mut self.detail {
+            match rows
+                .iter()
+                .find(|row| row.connection.id == detail.row.connection.id)
+            {
+                Some(row) => {
+                    detail.row = row.clone();
+                    detail.as_of = Some(now);
+                }
+                // What it last had stays up, its clock stopped there.
+                None => detail.closed = true,
+            }
+        }
         self.rows = Some(rows);
         self.as_of = Some(now);
+        self.restore(anchor);
+    }
+
+    /// The rows that pass the filter, in table order.
+    pub fn visible(&self) -> Vec<&ConnectionRow> {
+        let Some(rows) = &self.rows else {
+            return vec![];
+        };
+        let needle = self.filter.value().to_lowercase();
+        rows.iter()
+            .filter(|row| needle.is_empty() || row.matches(&needle))
+            .collect()
+    }
+
+    /// The connection under the cursor.
+    pub fn selected_connection(&self) -> Option<&ConnectionRow> {
+        let visible = self.visible();
+        let last = visible.len().checked_sub(1)?;
+        visible.get(self.cursor.min(last)).copied()
     }
 
     /// The id and position of the connection under the cursor.
     fn anchor(&self) -> Option<(String, usize)> {
-        let rows = self.rows.as_ref()?;
-        let index = self.cursor.min(rows.len().checked_sub(1)?);
-        Some((rows[index].connection.id.clone(), index))
+        let visible = self.visible();
+        let index = self.cursor.min(visible.len().checked_sub(1)?);
+        Some((visible[index].connection.id.clone(), index))
     }
 
-    /// The stream is gone: the table and what it was measured against go
-    /// with it. Pausing is the user's setting and stays.
+    /// Puts the cursor back on the connection of `anchor`. When that one is
+    /// gone or filtered out, it stays at the same position, within the
+    /// list.
+    fn restore(&mut self, anchor: Option<(String, usize)>) {
+        let visible = self.visible();
+        self.cursor = anchor
+            .map_or(0, |(id, index)| {
+                visible
+                    .iter()
+                    .position(|row| row.connection.id == id)
+                    .unwrap_or(index)
+            })
+            .min(visible.len().saturating_sub(1));
+    }
+
+    /// Reorders the table, paused or not, keeping the cursor on its row.
+    fn set_sort(&mut self, sort: ConnectionSort) {
+        let anchor = self.anchor();
+        self.sort = sort;
+        if let Some(rows) = &mut self.rows {
+            sort.sort(rows);
+        }
+        self.restore(anchor);
+    }
+
+    /// Changes the filter, keeping the cursor on its row.
+    fn edit_filter(&mut self, edit: impl FnOnce(&mut Input)) {
+        let anchor = self.anchor();
+        edit(&mut self.filter);
+        self.restore(anchor);
+    }
+
+    /// Drops the filter and gives the keyboard back.
+    fn clear_filter(&mut self) {
+        self.edit_filter(Input::reset);
+        self.typing = false;
+    }
+
+    /// The stream is gone: the table, what it was measured against and the
+    /// popup's connection go with it. Pausing, the order and the filter are
+    /// the user's settings and stay.
     fn reset(&mut self) {
         *self = Self {
             paused: self.paused,
+            sort: self.sort,
+            filter: std::mem::take(&mut self.filter),
+            typing: self.typing,
             ..Self::default()
         };
     }
@@ -302,17 +541,21 @@ pub enum Action {
     /// `m`: switch to the next proxy mode.
     CycleMode,
     Cursor(Move),
-    /// `Enter`: acts on the item under the cursor.
+    /// `Enter`: acts on the item under the cursor: picks a node, opens a
+    /// connection's details.
     Confirm,
     /// `t`: delay-test the node under the cursor.
     TestNode,
     /// `T`: delay-test every member of the selected group.
     TestGroup,
-    /// `s`: next node ordering.
+    /// `s`: next node ordering, or next column the connections are sorted
+    /// by.
     CycleSort,
+    /// `S`: sort the connections the other way round.
+    ReverseSort,
     /// `p`: freeze or resume the connections table.
     TogglePause,
-    /// `/`: start typing a node filter.
+    /// `/`: start typing the current page's filter.
     StartFilter,
     /// A key typed into the filter box.
     FilterInput(KeyEvent),
@@ -390,6 +633,8 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let alt = key.modifiers.contains(KeyModifiers::ALT);
+            // The pages with a sortable, filterable list.
+            let filtered = matches!(page, Page::Proxies | Page::Connections);
             match key.code {
                 KeyCode::Char('c') if ctrl => Some(Action::Quit),
                 KeyCode::Char('d') if ctrl => Some(Action::Cursor(Move::HalfDown)),
@@ -412,8 +657,9 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('l') if page == Page::Proxies => Some(Action::Cursor(Move::Right)),
                 KeyCode::Char('t') if page == Page::Proxies => Some(Action::TestNode),
                 KeyCode::Char('T') if page == Page::Proxies => Some(Action::TestGroup),
-                KeyCode::Char('s') if page == Page::Proxies => Some(Action::CycleSort),
-                KeyCode::Char('/') if page == Page::Proxies => Some(Action::StartFilter),
+                KeyCode::Char('s') if filtered => Some(Action::CycleSort),
+                KeyCode::Char('S') if page == Page::Connections => Some(Action::ReverseSort),
+                KeyCode::Char('/') if filtered => Some(Action::StartFilter),
                 KeyCode::Char('p') if page == Page::Connections => Some(Action::TogglePause),
                 KeyCode::Char('m') => Some(Action::CycleMode),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
@@ -449,6 +695,8 @@ pub struct Toast {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overlay {
     Help,
+    /// Details of one connection, kept in [`ConnectionsView::detail`].
+    Connection,
 }
 
 /// Bookkeeping while the controller is unreachable.
@@ -671,15 +919,19 @@ impl App {
                 self.dirty = true;
             }
             Action::ToggleHelp => {
+                // The connection popup is not swapped for the help.
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
                     None => Some(Overlay::Help),
+                    other => other,
                 };
                 self.dirty = true;
             }
             Action::Dismiss => {
-                if self.overlay.take().is_none() && self.page == Page::Proxies {
-                    self.clear_filter();
+                match self.overlay.take() {
+                    Some(Overlay::Connection) => self.connections_view.detail = None,
+                    Some(Overlay::Help) => {}
+                    None => self.clear_filter(),
                 }
                 self.dirty = true;
             }
@@ -694,28 +946,49 @@ impl App {
             Action::TestNode => self.test_node(),
             Action::TestGroup => self.test_group(),
             Action::CycleSort => {
-                self.proxies_view.sort = self.proxies_view.sort.next();
-                self.proxies_view.node = None;
+                match self.page {
+                    Page::Proxies => {
+                        self.proxies_view.sort = self.proxies_view.sort.next();
+                        self.proxies_view.node = None;
+                    }
+                    Page::Connections => {
+                        let shown: Vec<SortColumn> = connections::sort_columns(self.size).collect();
+                        let view = &mut self.connections_view;
+                        view.set_sort(view.sort.next(&shown));
+                    }
+                    _ => {}
+                }
+                self.dirty = true;
+            }
+            Action::ReverseSort => {
+                let view = &mut self.connections_view;
+                view.set_sort(view.sort.reversed());
                 self.dirty = true;
             }
             Action::TogglePause => {
                 self.connections_view.paused = !self.connections_view.paused;
                 self.dirty = true;
             }
-            Action::StartFilter => {
-                self.proxies_view.typing = true;
-                self.dirty = true;
-            }
+            Action::StartFilter => self.set_typing(true),
             Action::FilterInput(key) => {
-                self.proxies_view.filter.handle_event(&Event::Key(key));
-                self.proxies_view.node = None;
+                let event = Event::Key(key);
+                match self.page {
+                    Page::Proxies => {
+                        self.proxies_view.filter.handle_event(&event);
+                        self.proxies_view.node = None;
+                    }
+                    Page::Connections => self.connections_view.edit_filter(|filter| {
+                        filter.handle_event(&event);
+                    }),
+                    _ => {}
+                }
                 self.dirty = true;
             }
-            Action::FilterAccept => {
-                self.proxies_view.typing = false;
+            Action::FilterAccept => self.set_typing(false),
+            Action::FilterClear => {
+                self.clear_filter();
                 self.dirty = true;
             }
-            Action::FilterClear => self.clear_filter(),
             Action::Refresh => {
                 // A failed request shows as loading again while it is retried.
                 if matches!(self.version, Some(Err(_))) {
@@ -856,16 +1129,50 @@ impl App {
     fn move_in_connections(&mut self, movement: Move) {
         let half = (self.connections_capacity() / 2).max(1);
         let view = &mut self.connections_view;
-        let len = view.rows.as_ref().map_or(0, Vec::len);
+        let len = view.visible().len();
         view.cursor = movement.apply(view.cursor, len, half);
         self.dirty = true;
     }
 
-    /// Drops the node filter and gives the keyboard back.
+    /// Whether the current page's filter box has the keyboard.
+    pub fn typing(&self) -> bool {
+        match self.page {
+            Page::Proxies => self.proxies_view.typing,
+            Page::Connections => self.connections_view.typing,
+            _ => false,
+        }
+    }
+
+    /// The current page's filter, on pages that have one.
+    pub fn filter(&self) -> Option<&Input> {
+        match self.page {
+            Page::Proxies => Some(&self.proxies_view.filter),
+            Page::Connections => Some(&self.connections_view.filter),
+            _ => None,
+        }
+    }
+
+    /// Gives the keyboard to the current page's filter box, or back.
+    fn set_typing(&mut self, typing: bool) {
+        match self.page {
+            Page::Proxies => self.proxies_view.typing = typing,
+            Page::Connections => self.connections_view.typing = typing,
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// Drops the current page's filter and gives the keyboard back.
     fn clear_filter(&mut self) {
-        self.proxies_view.filter.reset();
-        self.proxies_view.typing = false;
-        self.proxies_view.node = None;
+        match self.page {
+            Page::Proxies => {
+                self.proxies_view.filter.reset();
+                self.proxies_view.typing = false;
+                self.proxies_view.node = None;
+            }
+            Page::Connections => self.connections_view.clear_filter(),
+            _ => {}
+        }
     }
 
     /// The selected group's members that pass the filter, in display order.
@@ -926,18 +1233,32 @@ impl App {
             .min(nodes.len().saturating_sub(1))
     }
 
-    /// `Enter` on the proxies page: from the group list, moves into the nodes;
-    /// on a node, switches the group to it.
+    /// `Enter`: on the proxies page, from the group list, moves into the
+    /// nodes; on a node, switches the group to it. On the connections page,
+    /// opens the details of the connection under the cursor.
     fn confirm(&mut self) {
-        if self.page != Page::Proxies || self.selected_group().is_none() {
-            return;
-        }
-        match self.proxies_view.focus {
-            Pane::Groups => {
-                self.proxies_view.focus = Pane::Nodes;
+        match self.page {
+            Page::Proxies if self.selected_group().is_some() => match self.proxies_view.focus {
+                Pane::Groups => {
+                    self.proxies_view.focus = Pane::Nodes;
+                    self.dirty = true;
+                }
+                Pane::Nodes => self.select_node(),
+            },
+            Page::Connections => {
+                let view = &mut self.connections_view;
+                let Some(row) = view.selected_connection() else {
+                    return;
+                };
+                view.detail = Some(Detail {
+                    row: row.clone(),
+                    as_of: view.as_of,
+                    closed: false,
+                });
+                self.overlay = Some(Overlay::Connection);
                 self.dirty = true;
             }
-            Pane::Nodes => self.select_node(),
+            _ => {}
         }
     }
 
@@ -1172,6 +1493,10 @@ impl App {
                         self.connections = None;
                         self.connection_history.clear();
                         self.connections_view.reset();
+                        // Its connection went with the table.
+                        if self.overlay == Some(Overlay::Connection) {
+                            self.overlay = None;
+                        }
                     }
                     Stream::Memory => {
                         self.memory = None;
@@ -2101,13 +2426,32 @@ mod tests {
         for page in Page::ALL {
             assert_eq!(press('m', page, false), Some(Action::CycleMode), "{page:?}");
         }
-        assert_eq!(
-            press('m', Page::Proxies, true),
-            Some(Action::FilterInput(KeyEvent::new(
-                KeyCode::Char('m'),
-                KeyModifiers::NONE
-            )))
-        );
+        // Page keys, the mode key and page numbers all go into the box of
+        // the page being filtered, with nothing else happening.
+        for page in [Page::Proxies, Page::Connections] {
+            let (mut app, _rx) = app_without_controller();
+            app.page = page;
+            app.update(press('/', page, app.typing()).unwrap());
+            for key in ['p', 's', 'S', 'm', '5'] {
+                let action = press(key, page, app.typing());
+                assert_eq!(
+                    action,
+                    Some(Action::FilterInput(KeyEvent::new(
+                        KeyCode::Char(key),
+                        KeyModifiers::NONE
+                    ))),
+                    "{page:?} {key}"
+                );
+                app.update(action.unwrap());
+            }
+            assert_eq!(app.filter().unwrap().value(), "psSm5", "{page:?}");
+            assert_eq!(app.page, page);
+            assert!(!app.connections_view.paused);
+            assert_eq!(app.connections_view.sort, ConnectionSort::default());
+            assert_eq!(app.proxies_view.sort, Sort::Default);
+            // `m` would have complained that there is no mode yet.
+            assert!(app.toasts.is_empty());
+        }
     }
 
     #[tokio::test]
@@ -2423,5 +2767,386 @@ mod tests {
         app.size = Size::new(100, 40);
         app.update(Action::Cursor(Move::HalfDown));
         assert_eq!(app.connections_view.cursor, 6 + 16);
+    }
+
+    /// A connection that started `secs` past 10:00:00 UTC, going to `host`
+    /// from `process`.
+    fn named(id: &str, secs: &str, host: &str, process: &str) -> Connection {
+        let mut connection = flow(id, secs, 0, 0);
+        connection.metadata.host = host.to_owned();
+        connection.metadata.process = process.to_owned();
+        connection
+    }
+
+    fn visible_ids(app: &App) -> Vec<&str> {
+        app.connections_view
+            .visible()
+            .into_iter()
+            .map(|row| row.connection.id.as_str())
+            .collect()
+    }
+
+    fn selected_id(app: &App) -> &str {
+        &app.connections_view
+            .selected_connection()
+            .unwrap()
+            .connection
+            .id
+    }
+
+    fn sort_by(app: &mut App, column: SortColumn, ascending: bool) {
+        app.connections_view
+            .set_sort(ConnectionSort { column, ascending });
+    }
+
+    fn key(ch: char) -> Action {
+        Action::FilterInput(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE))
+    }
+
+    /// Types `text` into the current page's filter and accepts it.
+    fn type_filter(app: &mut App, text: &str) {
+        app.update(Action::StartFilter);
+        for ch in text.chars() {
+            app.update(key(ch));
+        }
+        app.update(Action::FilterAccept);
+    }
+
+    /// Two frames, so the connections of the first have a rate in the
+    /// second; `n` only comes up in the second and has none.
+    fn sortable_table() -> App {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        let a = named("a", "03", "B.example", "curl");
+        let b = named("b", "", "a10.example", "");
+        let c = named("c", "05", "a9.example", "Wget");
+        let n = named("n", "09", "", "aria2");
+        feed(&mut app, vec![a.clone(), b.clone(), c.clone()]);
+        let moved = |mut connection: Connection, upload, download| {
+            connection.upload = upload;
+            connection.download = download;
+            connection
+        };
+        feed(
+            &mut app,
+            vec![
+                moved(n, 5, 5),
+                moved(a, 300, 10),
+                moved(c, 200, 20),
+                moved(b, 100, 30),
+            ],
+        );
+        app
+    }
+
+    #[test]
+    fn every_column_sorts_both_ways_with_missing_values_last() {
+        let mut app = sortable_table();
+        // Missing: `n` has no host (nor address) and no rate, `b` no
+        // process and no start. Totals are never missing.
+        for (column, ascending, descending) in [
+            (SortColumn::Host, ["c", "b", "a", "n"], ["a", "b", "c", "n"]),
+            (
+                SortColumn::Process,
+                ["n", "a", "c", "b"],
+                ["c", "a", "n", "b"],
+            ),
+            (SortColumn::Up, ["b", "c", "a", "n"], ["a", "c", "b", "n"]),
+            (SortColumn::Down, ["a", "c", "b", "n"], ["b", "c", "a", "n"]),
+            (
+                SortColumn::Total,
+                ["n", "b", "c", "a"],
+                ["a", "c", "b", "n"],
+            ),
+            // Ascending is the newest first.
+            (
+                SortColumn::Duration,
+                ["n", "c", "a", "b"],
+                ["a", "c", "n", "b"],
+            ),
+        ] {
+            sort_by(&mut app, column, true);
+            assert_eq!(table_ids(&app), ascending, "{column:?} ascending");
+            sort_by(&mut app, column, false);
+            assert_eq!(table_ids(&app), descending, "{column:?} descending");
+        }
+    }
+
+    #[test]
+    fn equal_values_go_by_id_in_either_direction() {
+        let (mut app, _rx) = app_without_controller();
+        let same = |id| named(id, "01", "same.example", "curl");
+        let frame = vec![same("y"), same("x"), same("z")];
+        feed(&mut app, frame.clone());
+        feed(&mut app, frame);
+        for column in SortColumn::ALL {
+            for ascending in [true, false] {
+                sort_by(&mut app, column, ascending);
+                assert_eq!(table_ids(&app), ["x", "y", "z"], "{column:?} {ascending}");
+            }
+        }
+    }
+
+    #[test]
+    fn s_moves_right_in_that_column_s_direction_and_capital_s_only_flips_it() {
+        let mut app = sortable_table();
+        let sort = |app: &App| {
+            let sort = app.connections_view.sort;
+            (sort.column, sort.ascending)
+        };
+        assert_eq!(sort(&app), (SortColumn::Duration, true));
+        app.update(Action::ReverseSort);
+        assert_eq!(sort(&app), (SortColumn::Duration, false));
+        for expected in [
+            (SortColumn::Host, true),
+            (SortColumn::Process, true),
+            (SortColumn::Up, false),
+        ] {
+            app.update(Action::CycleSort);
+            assert_eq!(sort(&app), expected);
+        }
+        app.update(Action::ReverseSort);
+        assert_eq!(sort(&app), (SortColumn::Up, true));
+        // The next column starts over in its own direction.
+        app.update(Action::CycleSort);
+        assert_eq!(sort(&app), (SortColumn::Down, false));
+        app.update(Action::CycleSort);
+        assert_eq!(sort(&app), (SortColumn::Total, false));
+        app.update(Action::CycleSort);
+        assert_eq!(sort(&app), (SortColumn::Duration, true));
+    }
+
+    #[test]
+    fn a_narrow_terminal_skips_the_columns_it_hides() {
+        let mut app = sortable_table();
+        app.size = Size::new(69, 24);
+        let mut seen = vec![];
+        for _ in 0..4 {
+            app.update(Action::CycleSort);
+            seen.push(app.connections_view.sort.column);
+        }
+        assert_eq!(
+            seen,
+            [
+                SortColumn::Host,
+                SortColumn::Up,
+                SortColumn::Down,
+                SortColumn::Duration
+            ]
+        );
+        // Sorted by a column that went out of sight: on to the next shown.
+        sort_by(&mut app, SortColumn::Process, true);
+        app.update(Action::CycleSort);
+        assert_eq!(app.connections_view.sort.column, SortColumn::Up);
+    }
+
+    #[test]
+    fn the_cursor_keeps_its_connection_through_sorting_filtering_and_frames() {
+        let mut app = sortable_table();
+        // Newest first: n, c, a, b. `n` came in above the cursor's `c`.
+        assert_eq!(table_ids(&app), ["n", "c", "a", "b"]);
+        assert_eq!(selected_id(&app), "c");
+        app.update(Action::CycleSort);
+        assert_eq!(table_ids(&app), ["c", "b", "a", "n"]);
+        assert_eq!(selected_id(&app), "c");
+
+        // Rows above it filtered away: it moves up with its connection.
+        app.update(Action::Cursor(Move::Down));
+        assert_eq!(selected_id(&app), "b");
+        app.update(Action::StartFilter);
+        app.update(key('E'));
+        assert_eq!(visible_ids(&app), ["c", "b", "a"]);
+        assert_eq!(selected_id(&app), "b");
+        for ch in "xAMPLE".chars() {
+            app.update(key(ch));
+        }
+        app.update(Action::Dismiss);
+        type_filter(&mut app, "A10");
+        assert_eq!(visible_ids(&app), ["b"]);
+        assert_eq!(app.connections_view.cursor, 0);
+        app.update(Action::Dismiss);
+        assert_eq!(visible_ids(&app), ["c", "b", "a", "n"]);
+        assert_eq!(selected_id(&app), "b");
+
+        // A new frame puts a connection ahead of it.
+        let mut frame: Vec<Connection> = rows(&app)
+            .iter()
+            .map(|row| row.connection.clone())
+            .collect();
+        frame.push(named("d", "07", "a1.example", ""));
+        feed(&mut app, frame);
+        assert_eq!(table_ids(&app), ["d", "c", "b", "a", "n"]);
+        assert_eq!(selected_id(&app), "b");
+    }
+
+    #[test]
+    fn a_filtered_out_cursor_stays_at_its_position() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        feed(
+            &mut app,
+            vec![
+                named("a", "04", "keep.example", ""),
+                named("b", "03", "keep.example", ""),
+                named("c", "02", "drop.example", ""),
+                named("d", "01", "keep.example", ""),
+            ],
+        );
+        app.update(Action::Cursor(Move::Down));
+        app.update(Action::Cursor(Move::Down));
+        assert_eq!(selected_id(&app), "c");
+        type_filter(&mut app, "keep");
+        assert_eq!(visible_ids(&app), ["a", "b", "d"]);
+        assert_eq!(selected_id(&app), "d");
+        // Past the end of what is left: the last row.
+        app.update(Action::Dismiss);
+        app.update(Action::Cursor(Move::Bottom));
+        type_filter(&mut app, "drop");
+        assert_eq!(selected_id(&app), "c");
+    }
+
+    #[test]
+    fn the_filter_matches_any_field_whatever_the_case() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        let with = |id: &str, edit: fn(&mut Connection)| {
+            let mut connection = flow(id, "01", 0, 0);
+            edit(&mut connection);
+            connection
+        };
+        feed(
+            &mut app,
+            vec![
+                with("host", |c| c.metadata.host = "Www.Example.COM".to_owned()),
+                with("ip", |c| {
+                    c.metadata.destination_ip = "203.0.113.77".to_owned();
+                }),
+                with("process", |c| c.metadata.process = "Firefox".to_owned()),
+                with("rule", |c| c.rule = "GeoSite".to_owned()),
+                with("payload", |c| c.rule_payload = "Netflix".to_owned()),
+                with("chain", |c| {
+                    c.chains = vec!["香港 01".to_owned(), "Auto".to_owned()];
+                }),
+            ],
+        );
+        for (needle, id) in [
+            ("example.com", "host"),
+            ("113.77", "ip"),
+            ("FIREFOX", "process"),
+            ("geosite", "rule"),
+            ("NetFlix", "payload"),
+            ("香港", "chain"),
+            ("auto", "chain"),
+        ] {
+            type_filter(&mut app, needle);
+            assert_eq!(visible_ids(&app), [id], "{needle}");
+            app.update(Action::Dismiss);
+        }
+    }
+
+    #[test]
+    fn the_filter_only_hides_rows() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        feed(
+            &mut app,
+            vec![
+                named("a", "02", "a.example", ""),
+                named("b", "01", "b.example", ""),
+            ],
+        );
+        type_filter(&mut app, "a.");
+        let mut b = named("b", "01", "b.example", "");
+        b.download = 700;
+        feed(&mut app, vec![named("a", "02", "a.example", ""), b]);
+        assert_eq!(visible_ids(&app), ["a"]);
+        // The overview counts what is open, not what is shown.
+        assert_eq!(app.connections.unwrap().active, 2);
+        // The hidden row was measured all along.
+        app.update(Action::Dismiss);
+        assert_eq!(row(&app, "b").rate, Some(Rate { up: 0, down: 700 }));
+
+        // Paused, the filter works on the frozen rows.
+        app.update(Action::TogglePause);
+        feed(&mut app, vec![named("c", "03", "c.example", "")]);
+        type_filter(&mut app, "c.");
+        assert_eq!(visible_ids(&app), Vec::<&str>::new());
+        app.update(Action::Dismiss);
+        type_filter(&mut app, "b.");
+        assert_eq!(visible_ids(&app), ["b"]);
+    }
+
+    #[test]
+    fn sorting_while_paused_reorders_the_frozen_rows_at_once() {
+        let mut app = sortable_table();
+        app.update(Action::TogglePause);
+        app.update(Action::ReverseSort);
+        assert_eq!(table_ids(&app), ["a", "c", "n", "b"]);
+    }
+
+    #[test]
+    fn the_popup_shows_the_cursor_s_connection_and_follows_the_table() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        feed(&mut app, vec![]);
+        app.update(Action::Confirm);
+        assert_eq!(app.overlay, None);
+
+        let (a, mut b) = (flow("a", "02", 0, 0), flow("b", "01", 0, 0));
+        feed(&mut app, vec![a.clone(), b.clone()]);
+        app.update(Action::Cursor(Move::Down));
+        app.update(Action::Confirm);
+        assert_eq!(app.overlay, Some(Overlay::Connection));
+        let detail = |app: &App| {
+            let detail = app.connections_view.detail.as_ref().unwrap();
+            (
+                detail.row.connection.id.clone(),
+                detail.row.connection.download,
+                detail.row.rate,
+                detail.closed,
+            )
+        };
+        assert_eq!(detail(&app), ("b".to_owned(), 0, None, false));
+
+        b.download = 500;
+        feed(&mut app, vec![a.clone(), b.clone()]);
+        let rate = Some(Rate { up: 0, down: 500 });
+        assert_eq!(detail(&app), ("b".to_owned(), 500, rate, false));
+        let as_of = app.connections_view.detail.as_ref().unwrap().as_of;
+
+        // Paused: the popup holds still with the table.
+        app.connections_view.paused = true;
+        b.download = 900;
+        feed(&mut app, vec![a.clone(), b]);
+        assert_eq!(detail(&app), ("b".to_owned(), 500, rate, false));
+
+        // Gone: what it last had stays, and its clock stops there.
+        app.connections_view.paused = false;
+        feed(&mut app, vec![a]);
+        assert_eq!(detail(&app), ("b".to_owned(), 500, rate, true));
+        assert_eq!(app.connections_view.detail.as_ref().unwrap().as_of, as_of);
+
+        app.update(Action::Dismiss);
+        assert_eq!(app.overlay, None);
+        assert!(app.connections_view.detail.is_none());
+    }
+
+    #[tokio::test]
+    async fn the_popup_ignores_other_keys_and_closes_with_the_stream() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        connect(&mut app, Stream::Connections);
+        feed(&mut app, vec![flow("a", "01", 0, 0)]);
+        app.update(Action::Confirm);
+        for action in [Action::ToggleHelp, Action::CycleSort, Action::StartFilter] {
+            app.update(action);
+        }
+        assert_eq!(app.overlay, Some(Overlay::Connection));
+        assert_eq!(app.connections_view.sort, ConnectionSort::default());
+        assert!(!app.typing());
+
+        disconnect(&mut app, Stream::Connections);
+        assert_eq!(app.overlay, None);
+        assert!(app.connections_view.detail.is_none());
     }
 }

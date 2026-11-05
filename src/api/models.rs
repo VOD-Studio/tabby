@@ -119,8 +119,8 @@ pub struct Traffic {
 /// One `/connections` frame, also the reply of `GET /connections`: the
 /// totals since the kernel started and the connections open right now.
 ///
-/// Only what the stat cards and the connections table show is read; the
-/// detail popup adds the rest.
+/// Only what the stat cards, the connections table and its detail popup
+/// show is read.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
@@ -149,6 +149,10 @@ pub struct Connection {
     pub chains: Vec<String>,
     /// The type of the rule that matched, without its payload.
     pub rule: String,
+    /// What the rule matched on (`example.com` for a domain suffix rule);
+    /// empty for rules without one, such as `Match`.
+    #[serde(rename = "rulePayload")]
+    pub rule_payload: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -160,9 +164,22 @@ pub struct Metadata {
     pub host: String,
     #[serde(rename = "destinationIP")]
     pub destination_ip: String,
+    /// A string in both mihomo and original Clash, as are the other ports.
+    #[serde(rename = "destinationPort")]
+    pub destination_port: String,
+    #[serde(rename = "sourceIP")]
+    pub source_ip: String,
+    #[serde(rename = "sourcePort")]
+    pub source_port: String,
+    /// How it came in: `HTTPS`, `Socks5`, `Tun` …
+    #[serde(rename = "type")]
+    pub kind: String,
     /// The local process that opened it. mihomo only, and only when it can
     /// tell; empty otherwise.
     pub process: String,
+    /// Where that process's executable lives; empty along with `process`.
+    #[serde(rename = "processPath")]
+    pub process_path: String,
 }
 
 /// What a connection had transferred in total, as of one frame.
@@ -548,26 +565,39 @@ mod tests {
     }
 
     #[test]
-    fn reads_what_the_table_shows_from_a_mihomo_connection() {
+    fn reads_what_the_table_and_detail_show_from_a_mihomo_connection() {
         let snapshot = mihomo_snapshot();
         let first = &snapshot.connections[0];
         assert_eq!(first.id, "00000000-0000-4000-8000-000000000001");
         assert_eq!(first.metadata.host, "www.example.com");
         assert_eq!(first.metadata.destination_ip, "203.0.113.10");
+        assert_eq!(first.metadata.destination_port, "443");
+        assert_eq!(first.metadata.source_ip, "127.0.0.1");
+        assert_eq!(first.metadata.source_port, "34238");
+        assert_eq!(first.metadata.kind, "HTTPS");
         assert_eq!(first.metadata.process, "");
+        assert_eq!(first.metadata.process_path, "");
         assert_eq!((first.upload, first.download), (296_708, 27_027));
         assert_eq!(first.chains, ["Node 1", "Auto", "Proxy"]);
         assert_eq!(first.rule, "RuleSet");
+        assert_eq!(first.rule_payload, "example.com");
         // Nanoseconds and an offset: 16:30 at +08:00 is 08:30 UTC.
         assert_eq!(
             first.start,
             Some("2026-11-05T08:30:00Z".parse::<Timestamp>().unwrap())
         );
-        // No host: the table falls back to the address.
+        // No host: the table falls back to the address. `Match` has no
+        // payload.
         let udp = &snapshot.connections[3];
         assert_eq!(udp.metadata.host, "");
         assert_eq!(udp.metadata.destination_ip, "198.51.100.53");
+        assert_eq!(udp.metadata.destination_port, "53");
+        assert_eq!(udp.metadata.kind, "Socks5");
         assert_eq!(udp.chains, ["Node 4", "Auto", "Proxy"]);
+        assert_eq!(
+            (udp.rule.as_str(), udp.rule_payload.as_str()),
+            ("Match", "")
+        );
     }
 
     #[test]
@@ -575,7 +605,8 @@ mod tests {
         // Original Clash has no `process`; the second connection's `start`
         // is not a timestamp at all, the third one's is not even a string.
         let json = r#"{"connections":[
-            {"id":"a","metadata":{"host":"h"},"upload":1,"download":2,
+            {"id":"a","metadata":{"host":"h","process":"curl","processPath":"/usr/bin/curl"},
+             "upload":1,"download":2,
              "start":"2026-11-05T16:30:00.5+08:00","chains":["DIRECT"],"rule":"Match"},
             {"id":"b","metadata":{"host":"h"},"upload":3,"download":4,
              "start":"yesterday","chains":["Proxy"],"rule":"Match"},
@@ -586,13 +617,23 @@ mod tests {
             panic!("three connections expected");
         };
         assert!(a.start.is_some());
-        assert_eq!(a.metadata.process, "");
+        assert_eq!(
+            (
+                a.metadata.process.as_str(),
+                a.metadata.process_path.as_str()
+            ),
+            ("curl", "/usr/bin/curl")
+        );
         assert_eq!(b.start, None);
         assert_eq!(
             (b.id.as_str(), b.upload, b.download, b.chains.as_slice()),
             ("b", 3, 4, ["Proxy".to_owned()].as_slice())
         );
         assert_eq!(b.rule, "Match");
+        // Fields the kernel left out are empty, not a failed frame.
+        assert_eq!(b.metadata.process, "");
+        assert_eq!(b.metadata.destination_port, "");
+        assert_eq!(b.rule_payload, "");
         assert_eq!((c.start, c.upload, c.chains.len()), (None, 5, 0));
     }
 

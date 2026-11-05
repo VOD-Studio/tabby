@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::Rect,
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, BorderType, Clear, Padding},
 };
 
@@ -19,19 +19,27 @@ pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
 }
 
 /// Draws an overlay panel over `area`: wipes what is underneath, then a rounded
-/// border in `border`, optionally titled. Returns the inner area to draw
-/// content into.
-pub fn panel(frame: &mut Frame, area: Rect, border: Color, title: Option<&str>) -> Rect {
+/// border in `border`, optionally titled, with `status` after the title in
+/// its own style. Returns the inner area to draw content into.
+pub fn panel(
+    frame: &mut Frame,
+    area: Rect,
+    border: Color,
+    title: Option<&str>,
+    status: Option<Span<'static>>,
+) -> Rect {
     let style = Style::new().fg(border);
     let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(style)
         .padding(Padding::horizontal(1));
     if let Some(title) = title {
-        block = block.title(Line::styled(
+        let mut spans = vec![Span::styled(
             format!(" {title} "),
             style.add_modifier(Modifier::BOLD),
-        ));
+        )];
+        spans.extend(status);
+        block = block.title(Line::from(spans));
     }
     let inner = block.inner(area);
     frame.render_widget(Clear, area);

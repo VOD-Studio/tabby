@@ -33,7 +33,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             height: 3,
         }
         .intersection(area);
-        let inner = popup::panel(frame, rect, color, None);
+        let inner = popup::panel(frame, rect, color, None, None);
         frame.render_widget(Paragraph::new(line.style(Style::new().fg(color))), inner);
         y = y.saturating_add(3);
     }

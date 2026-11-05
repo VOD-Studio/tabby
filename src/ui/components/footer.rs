@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use tui_input::Input;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Overlay, Page, Pane};
@@ -30,9 +31,14 @@ fn help_hints() -> Vec<Hint> {
     vec![hint("Esc/?", "关闭帮助"), hint("q", "退出")]
 }
 
+/// Keys while the connection detail popup is open.
+fn detail_hints() -> Vec<Hint> {
+    vec![hint("Esc", "关闭"), hint("q", "退出")]
+}
+
 /// Keys that only work on the given page.
 fn page_hints(app: &App) -> Vec<Hint> {
-    match app.page {
+    let mut hints = match app.page {
         Page::Proxies => {
             let mut hints = vec![
                 hint("Enter", "选择"),
@@ -61,12 +67,13 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 Pane::Groups => hint("l", "进入节点"),
                 Pane::Nodes => hint("h", "最左列回分组"),
             });
-            if !app.proxies_view.filter.value().is_empty() {
-                hints.push(hint("Esc", "清除过滤"));
-            }
             hints
         }
         Page::Connections => vec![
+            hint("Enter", "详情"),
+            hint("s", "排序"),
+            hint("S", "反转"),
+            hint("/", "过滤"),
             hint("j/k", "移动"),
             hint("g/G", "首尾"),
             hint(
@@ -79,7 +86,14 @@ fn page_hints(app: &App) -> Vec<Hint> {
             ),
         ],
         _ => vec![],
+    };
+    if app
+        .filter()
+        .is_some_and(|filter| !filter.value().is_empty())
+    {
+        hints.push(hint("Esc", "清除过滤"));
     }
+    hints
 }
 
 /// Keys that work on every page.
@@ -96,6 +110,7 @@ fn global_hints(page: Page) -> Vec<Hint> {
 fn hints(app: &App) -> Vec<Hint> {
     match app.overlay {
         Some(Overlay::Help) => help_hints(),
+        Some(Overlay::Connection) => detail_hints(),
         None => {
             let mut hints = page_hints(app);
             hints.extend(global_hints(app.page));
@@ -114,8 +129,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let hints_area = divider.inner(area);
     frame.render_widget(divider, area);
 
-    if app.page == Page::Proxies && app.proxies_view.typing {
-        render_filter(frame, hints_area, app);
+    if let Some(filter) = app.filter().filter(|_| app.typing()) {
+        render_filter(frame, hints_area, app, filter);
         return;
     }
     let hints = hints(app);
@@ -140,12 +155,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
 /// The filter box that replaces the hints while typing: `/ text`, with the
 /// terminal cursor at the insertion point.
-fn render_filter(frame: &mut Frame, area: Rect, app: &App) {
+fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
     const PROMPT: &str = "/ ";
     const HINT: &str = "  Enter 确定   Esc 清除";
 
     let theme = app.theme;
-    let input = &app.proxies_view.filter;
     let room = usize::from(area.width).saturating_sub(PROMPT.len() + HINT.width());
     let scroll = input.visual_scroll(room);
 

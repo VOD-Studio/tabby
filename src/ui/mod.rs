@@ -66,6 +66,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     components::footer::render(frame, regions.footer, app);
     match app.overlay {
         Some(Overlay::Help) => components::help::render(frame, frame.area(), app),
+        Some(Overlay::Connection) => connections::render_detail(frame, frame.area(), app),
         None => {}
     }
     // Below the header row, over whatever lies underneath.

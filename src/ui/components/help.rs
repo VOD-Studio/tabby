@@ -29,6 +29,11 @@ fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
             ("Ctrl+d / Ctrl+u", "翻半页"),
         ],
         Page::Connections => &[
+            ("Enter", "连接详情"),
+            ("s", "切换排序列"),
+            ("S", "反转排序"),
+            ("/", "过滤连接"),
+            ("Esc", "清除过滤"),
             ("j / k / ↓ / ↑", "上下移动"),
             ("g / G", "顶部 / 底部"),
             ("Ctrl+d / Ctrl+u", "翻半页"),
@@ -56,7 +61,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let page = page_keys(app.page);
     let height = u16::try_from(GLOBAL_KEYS.len().max(page.len()) + 2 + 2).unwrap_or(u16::MAX);
     let rect = popup::centered(area, WIDTH, height);
-    let inner = popup::panel(frame, rect, theme.accent, Some("帮助"));
+    let inner = popup::panel(frame, rect, theme.accent, Some("帮助"), None);
     let [left, right] = Layout::horizontal([Constraint::Fill(1), Constraint::Fill(1)]).areas(inner);
 
     let heading =

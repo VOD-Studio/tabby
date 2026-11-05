@@ -1,17 +1,17 @@
-use jiff::Timestamp;
+use jiff::{Timestamp, tz::TimeZone};
 use ratatui::{
     Frame,
-    layout::{Constraint, Layout, Rect},
+    layout::{Constraint, Layout, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Cell, Row, Table},
+    widgets::{Block, BorderType, Cell, Paragraph, Row, Table},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
-    app::{App, ConnectionRow},
+    app::{App, ConnectionRow, ConnectionSort, Detail, SortColumn},
     format,
-    ui::components::states,
+    ui::components::{popup, states},
 };
 
 /// Below this terminal width the process and total columns are left out
@@ -22,7 +22,8 @@ const NARROW: u16 = 70;
 const RATE_WIDTH: u16 = 11;
 /// Widest size: `1023.9 KB`.
 const TOTAL_WIDTH: u16 = 9;
-/// Widest duration below 100 days: `12m05s`, `99d23h`.
+/// Widest duration below 100 days: `12m05s`, `99d23h`. Also exactly
+/// `时长 ▲`.
 const DURATION_WIDTH: u16 = 6;
 /// Columns between the cells.
 const SPACING: u16 = 1;
@@ -88,6 +89,34 @@ impl Column {
     fn right_aligned(self) -> bool {
         matches!(self, Self::Up | Self::Down | Self::Total | Self::Duration)
     }
+
+    /// The order this column stands for; `None` for the route, which does
+    /// not sort.
+    fn sort_column(self) -> Option<SortColumn> {
+        match self {
+            Self::Host => Some(SortColumn::Host),
+            Self::Process => Some(SortColumn::Process),
+            Self::Route => None,
+            Self::Up => Some(SortColumn::Up),
+            Self::Down => Some(SortColumn::Down),
+            Self::Total => Some(SortColumn::Total),
+            Self::Duration => Some(SortColumn::Duration),
+        }
+    }
+}
+
+/// The columns a terminal of `size` shows.
+fn shown(size: Size) -> &'static [Column] {
+    if size.width >= NARROW {
+        &Column::ALL
+    } else {
+        &Column::NARROW
+    }
+}
+
+/// The columns `s` steps through in a terminal of `size`, left to right.
+pub fn sort_columns(size: Size) -> impl Iterator<Item = SortColumn> {
+    shown(size).iter().filter_map(|column| column.sort_column())
 }
 
 fn panel_inner(area: Rect) -> Rect {
@@ -101,8 +130,7 @@ pub fn capacity(body: Rect) -> usize {
 }
 
 /// The columns shown in a table `inner` wide, with their widths.
-fn columns(inner: Rect, wide: bool) -> Vec<(Column, usize)> {
-    let shown: &[Column] = if wide { &Column::ALL } else { &Column::NARROW };
+fn columns(inner: Rect, shown: &[Column]) -> Vec<(Column, usize)> {
     let widths = Layout::horizontal(shown.iter().map(|column| column.constraint()))
         .spacing(SPACING)
         .split(inner);
@@ -121,11 +149,18 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         states::loading(frame, area, app, "等待连接数据…");
         return;
     };
+    let visible = view.visible();
+    let filter = view.filter.value();
 
     let status = if view.paused {
         Span::styled(" ⏸ 已暂停 ", Style::new().fg(theme.warning))
     } else {
         Span::styled(" ● 实时 ", Style::new().fg(theme.success))
+    };
+    let count = if filter.is_empty() {
+        format!("  {} ", rows.len())
+    } else {
+        format!("  {}/{} · 过滤「{filter}」 ", visible.len(), rows.len())
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
@@ -135,34 +170,36 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 " 连接",
                 Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
             ),
-            Span::styled(format!("  {} ", rows.len()), Style::new().fg(theme.muted)),
+            Span::styled(count, Style::new().fg(theme.muted)),
         ]))
         .title(Line::from(status).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
-    if rows.is_empty() {
-        states::empty(frame, inner, app, "当前没有活动连接", &[]);
+    if visible.is_empty() {
+        if filter.is_empty() {
+            states::empty(frame, inner, app, "当前没有活动连接", &[]);
+        } else {
+            states::empty(
+                frame,
+                inner,
+                app,
+                &format!("没有匹配「{filter}」的连接"),
+                &[("Esc", "清除过滤"), ("/", "修改过滤")],
+            );
+        }
         return;
     }
 
-    let columns = columns(inner, app.size.width >= NARROW);
-    let cursor = view.cursor.min(rows.len() - 1);
-    let window = view.scroll.window(cursor, rows.len(), capacity(area));
+    let columns = columns(inner, shown(app.size));
+    let cursor = view.cursor.min(visible.len() - 1);
+    let window = view.scroll.window(cursor, visible.len(), capacity(area));
 
-    let header = Row::new(columns.iter().map(|&(column, width)| {
-        let text = format::truncate(column.label(), width);
-        let span = Span::styled(
-            text.clone(),
-            Style::new().fg(theme.muted).add_modifier(Modifier::BOLD),
-        );
-        Cell::from(aligned(
-            vec![span],
-            text.width(),
-            width,
-            column.right_aligned(),
-        ))
-    }));
+    let header = Row::new(
+        columns
+            .iter()
+            .map(|&(column, width)| Cell::from(heading(app, view.sort, column, width))),
+    );
     // Only the rows in view are built: the kernel can have thousands open.
     let body = window.map(|index| {
         let style = if index == cursor {
@@ -172,9 +209,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         } else {
             Style::new()
         };
-        let cells = columns
-            .iter()
-            .map(|&(column, width)| Cell::from(cell(app, &rows[index], view.as_of, column, width)));
+        let cells = columns.iter().map(|&(column, width)| {
+            Cell::from(cell(app, visible[index], view.as_of, column, width))
+        });
         Row::new(cells).style(style)
     });
     let widths = columns
@@ -186,6 +223,31 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .column_spacing(SPACING),
         inner,
     );
+}
+
+/// A column's header: muted, or accent with `▲` / `▼` at the end when the
+/// table is sorted by it. The arrow is kept when the label has to give.
+fn heading(app: &App, sort: ConnectionSort, column: Column, width: usize) -> Line<'static> {
+    let theme = app.theme;
+    let sorted = column.sort_column() == Some(sort.column);
+    let text = if sorted {
+        let arrow = if sort.ascending { '▲' } else { '▼' };
+        let spaced = format!("{} {arrow}", column.label());
+        if spaced.width() <= width {
+            spaced
+        } else {
+            format!(
+                "{}{arrow}",
+                format::truncate(column.label(), width.saturating_sub(1))
+            )
+        }
+    } else {
+        format::truncate(column.label(), width)
+    };
+    let color = if sorted { theme.accent } else { theme.muted };
+    let used = text.width();
+    let span = Span::styled(text, Style::new().fg(color).add_modifier(Modifier::BOLD));
+    aligned(vec![span], used, width, column.right_aligned())
 }
 
 /// `spans`, `used` columns wide, padded to `width`.
@@ -213,21 +275,15 @@ fn cell(
         (vec![Span::styled(text, style)], used)
     };
     let (spans, used) = match column {
-        Column::Host => {
-            let metadata = &connection.metadata;
-            let name = [&metadata.host, &metadata.destination_ip]
-                .into_iter()
-                .find(|name| !name.is_empty());
-            match name {
-                // A connection that just opened stands out for a few frames.
-                Some(name) if row.fresh => text(
-                    name,
-                    Style::new().fg(theme.success).add_modifier(Modifier::BOLD),
-                ),
-                Some(name) => text(name, plain),
-                None => text(NO_VALUE, muted),
-            }
-        }
+        Column::Host => match row.host() {
+            "" => text(NO_VALUE, muted),
+            // A connection that just opened stands out for a few frames.
+            name if row.fresh => text(
+                name,
+                Style::new().fg(theme.success).add_modifier(Modifier::BOLD),
+            ),
+            name => text(name, plain),
+        },
         Column::Process => match connection.metadata.process.as_str() {
             "" => text(NO_VALUE, muted),
             process => text(process, plain),
@@ -255,20 +311,24 @@ fn cell(
     aligned(spans, used, width, column.right_aligned())
 }
 
-/// `RuleSet → Proxy → Auto → Node 1`: the rule type in muted, then the route
-/// from the outermost group to the node, which is how the kernel lists it
-/// back to front.
-fn route(app: &App, row: &ConnectionRow, width: usize) -> (Vec<Span<'static>>, usize) {
-    let theme = app.theme;
-    let muted = Style::new().fg(theme.muted);
-    let chain = row
-        .connection
+/// The route from the outermost group to the node, which is how the kernel
+/// lists it back to front; empty when it gave none.
+fn chain(row: &ConnectionRow) -> String {
+    row.connection
         .chains
         .iter()
         .rev()
         .map(String::as_str)
         .collect::<Vec<_>>()
-        .join(" → ");
+        .join(" → ")
+}
+
+/// `RuleSet → Proxy → Auto → Node 1`: the rule type in muted, then the
+/// route.
+fn route(app: &App, row: &ConnectionRow, width: usize) -> (Vec<Span<'static>>, usize) {
+    let theme = app.theme;
+    let muted = Style::new().fg(theme.muted);
+    let chain = chain(row);
     let chain = if chain.is_empty() {
         NO_VALUE.to_owned()
     } else {
@@ -328,4 +388,232 @@ fn rate(app: &App, bytes_per_frame: Option<u64>, color: Color) -> (Vec<Span<'sta
 fn elapsed(start: Option<Timestamp>, as_of: Option<Timestamp>) -> Option<u64> {
     let secs = as_of?.duration_since(start?).as_secs();
     Some(u64::try_from(secs).unwrap_or(0))
+}
+
+/// Widest the detail popup gets, borders included.
+const DETAIL_WIDTH: u16 = 72;
+
+/// Columns of the detail popup's name column: `开始时间` and a gap of two.
+const NAME_WIDTH: usize = 10;
+
+/// `ip:port`, with an IPv6 address in brackets (`[2001:db8::1]:443`); just
+/// the address when there is no port, nothing when there is no address.
+fn address(ip: &str, port: &str) -> String {
+    if ip.is_empty() || port.is_empty() {
+        ip.to_owned()
+    } else if ip.contains(':') {
+        format!("[{ip}]:{port}")
+    } else {
+        format!("{ip}:{port}")
+    }
+}
+
+/// The connection detail popup: one row per property, names muted on the
+/// left, values wrapped to the width that is left.
+pub fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(detail) = &app.connections_view.detail else {
+        return;
+    };
+    let theme = app.theme;
+    let muted = Style::new().fg(theme.muted);
+    let width = DETAIL_WIDTH.min(area.width);
+    // Borders and the panel's padding take two columns a side.
+    let value_width = usize::from(width.saturating_sub(4))
+        .saturating_sub(NAME_WIDTH)
+        .max(1);
+
+    let mut lines = vec![];
+    for (name, value) in detail_rows(app, detail) {
+        for (index, part) in wrap(value, value_width).into_iter().enumerate() {
+            let name = if index == 0 { name } else { "" };
+            let padding = " ".repeat(NAME_WIDTH.saturating_sub(name.width()));
+            let mut spans = vec![Span::styled(format!("{name}{padding}"), muted)];
+            spans.extend(part);
+            lines.push(Line::from(spans));
+        }
+    }
+
+    let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
+    let rect = popup::centered(area, width, height);
+    let status = detail
+        .closed
+        .then(|| Span::styled("已关闭 ", Style::new().fg(theme.error)));
+    let inner = popup::panel(frame, rect, theme.accent, Some("连接详情"), status);
+
+    let rows = usize::from(inner.height);
+    if lines.len() > rows {
+        lines.truncate(rows);
+        if let Some(last) = lines.pop() {
+            // What fits ahead of the ellipsis: the first line of a wrap that
+            // leaves it a column.
+            let budget = usize::from(inner.width).saturating_sub(1);
+            let mut spans = wrap(last.spans, budget.max(1)).swap_remove(0);
+            spans.push(Span::styled("…", muted));
+            lines.push(Line::from(spans));
+        }
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+/// The popup's rows as `(name, value)`; a missing value is a muted dash.
+fn detail_rows(app: &App, detail: &Detail) -> Vec<(&'static str, Vec<Span<'static>>)> {
+    let theme = app.theme;
+    let muted = Style::new().fg(theme.muted);
+    let plain = Style::new().fg(theme.fg);
+    let text = |value: String| {
+        if value.is_empty() {
+            vec![Span::styled(NO_VALUE, muted)]
+        } else {
+            vec![Span::styled(value, plain)]
+        }
+    };
+    let connection = &detail.row.connection;
+    let metadata = &connection.metadata;
+
+    let network = [metadata.network.to_uppercase(), metadata.kind.clone()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ");
+    let process = match (metadata.process.as_str(), metadata.process_path.as_str()) {
+        ("", "") => vec![Span::styled(NO_VALUE, muted)],
+        (process, "") => vec![Span::styled(process.to_owned(), plain)],
+        ("", path) => vec![Span::styled(path.to_owned(), muted)],
+        (process, path) => vec![
+            Span::styled(process.to_owned(), plain),
+            Span::styled(format!(" {path}"), muted),
+        ],
+    };
+    let rule = match (connection.rule.as_str(), connection.rule_payload.as_str()) {
+        (rule, "") => rule.to_owned(),
+        (rule, payload) => format!("{rule}({payload})"),
+    };
+    let start = connection.start.map_or_else(String::new, |start| {
+        start
+            .to_zoned(TimeZone::system())
+            .strftime("%Y-%m-%d %H:%M:%S")
+            .to_string()
+    });
+    let duration =
+        elapsed(connection.start, detail.as_of).map_or_else(String::new, format::duration);
+    let rate = detail.row.rate;
+    // A connection routed by its domain name may not have been resolved:
+    // the name is where it goes then, and the port is still worth seeing.
+    let destination = if metadata.destination_ip.is_empty() {
+        &metadata.host
+    } else {
+        &metadata.destination_ip
+    };
+
+    vec![
+        ("主机", text(metadata.host.clone())),
+        (
+            "目标",
+            text(address(destination, &metadata.destination_port)),
+        ),
+        (
+            "来源",
+            text(address(&metadata.source_ip, &metadata.source_port)),
+        ),
+        ("网络", text(network)),
+        ("进程", process),
+        ("规则", text(rule)),
+        ("链路", text(chain(&detail.row))),
+        ("开始时间", text(start)),
+        ("时长", text(duration)),
+        (
+            "上传",
+            traffic(app, connection.upload, rate.map(|rate| rate.up), theme.c1),
+        ),
+        (
+            "下载",
+            traffic(
+                app,
+                connection.download,
+                rate.map(|rate| rate.down),
+                theme.c2,
+            ),
+        ),
+    ]
+}
+
+/// `5.0 MB · 1.0 MB/s`: what moved so far and the current rate, numbers in
+/// `color`.
+fn traffic(app: &App, total: u64, rate_now: Option<u64>, color: Color) -> Vec<Span<'static>> {
+    let muted = Style::new().fg(app.theme.muted);
+    let (number, unit) = format::bytes(total);
+    let mut spans = vec![
+        Span::styled(number, Style::new().fg(color)),
+        Span::styled(format!(" {unit} · "), muted),
+    ];
+    spans.extend(rate(app, rate_now, color).0);
+    spans
+}
+
+/// Breaks `spans` into lines at most `width` columns wide, each piece keeping
+/// its style. Wide characters are never split; a space a line would start
+/// with is dropped.
+fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
+    let mut lines: Vec<Vec<Span<'static>>> = vec![vec![]];
+    let mut used = 0;
+    for span in spans {
+        let mut piece = String::new();
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if used > 0 && used + ch_width > width {
+                if !piece.is_empty() {
+                    lines
+                        .last_mut()
+                        .unwrap_or_else(|| unreachable!())
+                        .push(Span::styled(std::mem::take(&mut piece), span.style));
+                }
+                lines.push(vec![]);
+                used = 0;
+            }
+            if used == 0 && ch == ' ' && lines.len() > 1 {
+                continue;
+            }
+            piece.push(ch);
+            used += ch_width;
+        }
+        if !piece.is_empty() {
+            lines
+                .last_mut()
+                .unwrap_or_else(|| unreachable!())
+                .push(Span::styled(piece, span.style));
+        }
+    }
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn addresses_bracket_ipv6_and_drop_a_missing_port() {
+        assert_eq!(address("203.0.113.10", "443"), "203.0.113.10:443");
+        assert_eq!(address("2001:db8::1", "443"), "[2001:db8::1]:443");
+        assert_eq!(address("203.0.113.10", ""), "203.0.113.10");
+        assert_eq!(address("2001:db8::1", ""), "2001:db8::1");
+        assert_eq!(address("", "443"), "");
+    }
+
+    fn texts(lines: &[Vec<Span<'static>>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|line| line.iter().map(|span| span.content.as_ref()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn wrapping_keeps_wide_characters_whole_and_styles_apart() {
+        let muted = Style::new().fg(Color::DarkGray);
+        let lines = wrap(vec![Span::raw("abc"), Span::styled("本 de", muted)], 4);
+        // `本` would straddle the edge of the first line: it moves down whole.
+        assert_eq!(texts(&lines), ["abc", "本 d", "e"]);
+        assert_eq!(lines[1][0].style, muted);
+        // A line does not start with the space it broke at.
+        assert_eq!(texts(&wrap(vec![Span::raw("ab cd")], 2)), ["ab", "cd"]);
+    }
 }
