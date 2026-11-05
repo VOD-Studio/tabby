@@ -1,4 +1,5 @@
 pub mod components;
+pub mod overview;
 pub mod proxies;
 pub mod scroll;
 pub mod text;
@@ -92,8 +93,9 @@ pub fn page_title(page: Page) -> &'static str {
 fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
     match app.page {
         Page::Overview => {
-            if ready(frame, area, app, app.configs.as_ref(), "正在连接控制器…").is_some() {
-                draw_unbuilt(frame, area, app);
+            if let Some(configs) = ready(frame, area, app, app.configs.as_ref(), "正在连接控制器…")
+            {
+                overview::render(frame, area, app, configs);
             }
         }
         Page::Proxies => {

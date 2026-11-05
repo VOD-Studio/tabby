@@ -44,6 +44,60 @@ pub struct Configs {
     pub tun: Option<Tun>,
 }
 
+impl Configs {
+    /// The proxy mode, or `None` for a value tabby does not know.
+    pub fn mode(&self) -> Option<Mode> {
+        Mode::parse(&self.mode)
+    }
+}
+
+/// How the kernel routes traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    Rule,
+    Global,
+    Direct,
+}
+
+impl Mode {
+    /// In the order `m` cycles through them.
+    pub const ALL: [Self; 3] = [Self::Rule, Self::Global, Self::Direct];
+
+    /// Reads the kernel's spelling. Case does not matter: some Clash
+    /// versions report `Rule`. Anything else (the old `script`) is `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|mode| text.eq_ignore_ascii_case(mode.name()))
+    }
+
+    /// The spelling the API takes.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Rule => "rule",
+            Self::Global => "global",
+            Self::Direct => "direct",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rule => "规则",
+            Self::Global => "全局",
+            Self::Direct => "直连",
+        }
+    }
+
+    /// The mode `m` switches to from this one.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Rule => Self::Global,
+            Self::Global => Self::Direct,
+            Self::Direct => Self::Rule,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Tun {
@@ -277,6 +331,28 @@ mod tests {
         assert_eq!(frame, Traffic { up: 0, down: 7 });
         let frame: Traffic = serde_json::from_str("{}").unwrap();
         assert_eq!(frame, Traffic::default());
+    }
+
+    #[test]
+    fn mode_ignores_case_and_rejects_unknown_values() {
+        for (text, mode) in [
+            ("rule", Some(Mode::Rule)),
+            ("Rule", Some(Mode::Rule)),
+            ("GLOBAL", Some(Mode::Global)),
+            ("dIrEcT", Some(Mode::Direct)),
+            ("script", None),
+            ("", None),
+            (" rule", None),
+        ] {
+            assert_eq!(Mode::parse(text), mode, "{text:?}");
+        }
+    }
+
+    #[test]
+    fn modes_cycle_through_all_three() {
+        assert_eq!(Mode::Rule.next(), Mode::Global);
+        assert_eq!(Mode::Global.next(), Mode::Direct);
+        assert_eq!(Mode::Direct.next(), Mode::Rule);
     }
 
     fn group_names(proxies: &Proxies) -> Vec<&str> {

@@ -13,7 +13,7 @@ use crate::{
         backoff,
         client::ApiClient,
         error::ApiError,
-        models::{Configs, CoreKind, Delay, GLOBAL, Proxies, Proxy, Traffic, Version},
+        models::{Configs, CoreKind, Delay, GLOBAL, Mode, Proxies, Proxy, Traffic, Version},
         stream::{Event as StreamEvent, Stream, Streams},
     },
     config::Settings,
@@ -185,6 +185,8 @@ pub enum Action {
     NextPage,
     PrevPage,
     Refresh,
+    /// `m`: switch to the next proxy mode.
+    CycleMode,
     Cursor(Move),
     /// `Enter`: acts on the item under the cursor.
     Confirm,
@@ -211,7 +213,15 @@ pub enum Action {
 #[derive(Debug)]
 pub enum Msg {
     Version(Result<Version, ApiError>),
-    Configs(Result<Configs, ApiError>),
+    /// Reply to a `/configs` fetch. `refetch` marks the one that follows a
+    /// mode switch, whose failure must not take the data on screen away.
+    Configs {
+        seq: u64,
+        refetch: bool,
+        result: Result<Configs, ApiError>,
+    },
+    /// Reply to `PATCH /configs` switching the mode.
+    ModeSet(Result<(), ApiError>),
     /// Reply to a `/proxies` fetch. `refetch` marks one made while data is
     /// already on screen, whose failure must not take that data away.
     Proxies {
@@ -288,6 +298,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('T') if page == Page::Proxies => Some(Action::TestGroup),
                 KeyCode::Char('s') if page == Page::Proxies => Some(Action::CycleSort),
                 KeyCode::Char('/') if page == Page::Proxies => Some(Action::StartFilter),
+                KeyCode::Char('m') => Some(Action::CycleMode),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -351,6 +362,21 @@ struct Links {
     outage: bool,
 }
 
+/// Progress of a mode switch. Pressing `m` again before it ends would race
+/// two requests, so it waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModeSwitch {
+    Idle,
+    /// `PATCH /configs` is in flight.
+    Patching,
+    /// Patched; waiting for the `/configs` fetch with this number (or a
+    /// later one), which says what the kernel now runs.
+    Refetching(u64),
+}
+
+/// Traffic samples kept for the chart: one per second of the last minute.
+pub const TRAFFIC_HISTORY: usize = 60;
+
 /// Application state. Only the main loop mutates it.
 #[derive(Debug)]
 pub struct App {
@@ -363,6 +389,11 @@ pub struct App {
     pub configs: Option<Result<Configs, ApiError>>,
     pub proxies: Option<Result<Proxies, ApiError>>,
     pub proxies_view: ProxiesView,
+    /// `/configs` fetches issued so far; numbers them.
+    config_fetches: u64,
+    /// The newest `/configs` fetch whose reply has been applied.
+    applied_config: u64,
+    mode_switch: ModeSwitch,
     /// Nodes with a delay test in flight.
     pub testing: HashSet<String>,
     /// `/proxies` fetches issued so far; numbers them.
@@ -380,6 +411,9 @@ pub struct App {
     links: Links,
     /// The latest `/traffic` frame; `None` while that stream is down.
     pub traffic: Option<Traffic>,
+    /// The latest [`TRAFFIC_HISTORY`] `/traffic` frames, oldest first; empty
+    /// while that stream is down.
+    pub traffic_history: VecDeque<Traffic>,
     /// `Some` from the first failed `/version` probe until one succeeds.
     pub reconnect: Option<Reconnect>,
     /// Set by `r` until the next `/version` reply, which then reports success.
@@ -407,6 +441,9 @@ impl App {
             version: None,
             configs: None,
             proxies: None,
+            config_fetches: 0,
+            applied_config: 0,
+            mode_switch: ModeSwitch::Idle,
             proxies_view: ProxiesView::default(),
             testing: HashSet::new(),
             fetches: 0,
@@ -418,6 +455,7 @@ impl App {
             streams,
             links: Links::default(),
             traffic: None,
+            traffic_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
             reconnect: None,
             refreshing: false,
             should_quit: false,
@@ -430,7 +468,7 @@ impl App {
     /// again repeats the requests; running streams are left alone.
     pub fn start(&mut self) {
         self.fetch_version();
-        self.spawn(|client| async move { Msg::Configs(client.configs().await) });
+        self.fetch_configs(false);
         self.fetch_proxies(false);
         for stream in [Stream::Traffic, Stream::Logs, Stream::Connections] {
             self.streams.start(stream);
@@ -452,6 +490,20 @@ impl App {
                 result: client.proxies().await,
             }
         });
+    }
+
+    /// Fetches `/configs` in the background and returns the fetch's number.
+    fn fetch_configs(&mut self, refetch: bool) -> u64 {
+        self.config_fetches += 1;
+        let seq = self.config_fetches;
+        self.spawn(move |client| async move {
+            Msg::Configs {
+                seq,
+                refetch,
+                result: client.configs().await,
+            }
+        });
+        seq
     }
 
     /// Runs one request in the background; its message arrives on the channel.
@@ -493,6 +545,7 @@ impl App {
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
             Action::Cursor(movement) => self.move_cursor(movement),
+            Action::CycleMode => self.cycle_mode(),
             Action::Confirm => self.confirm(),
             Action::TestNode => self.test_node(),
             Action::TestGroup => self.test_group(),
@@ -537,6 +590,21 @@ impl App {
         }
     }
 
+    /// `m`: asks the kernel for the next mode and, once it agrees, fetches
+    /// `/configs` to show what it really runs. An unknown mode goes to rule.
+    fn cycle_mode(&mut self) {
+        if self.mode_switch != ModeSwitch::Idle {
+            return;
+        }
+        let Some(Ok(configs)) = &self.configs else {
+            self.toast(ToastKind::Error, "尚未获取到当前模式".to_owned());
+            return;
+        };
+        let target = configs.mode().map_or(Mode::Rule, Mode::next);
+        self.mode_switch = ModeSwitch::Patching;
+        self.spawn(move |client| async move { Msg::ModeSet(client.set_mode(target).await) });
+    }
+
     /// Keeps the group cursor sensible when the mode change added or removed
     /// `GLOBAL` at the head of the list: entering global mode lands on it,
     /// leaving stays on the group that was selected.
@@ -554,7 +622,7 @@ impl App {
     }
 
     pub fn is_global_mode(&self) -> bool {
-        matches!(&self.configs, Some(Ok(configs)) if configs.mode == "global")
+        matches!(&self.configs, Some(Ok(configs)) if configs.mode() == Some(Mode::Global))
     }
 
     /// Groups the proxies page lists. `GLOBAL` only counts in global mode,
@@ -757,16 +825,53 @@ impl App {
         self.version = Some(result);
     }
 
+    /// Swaps in a `/configs` reply from fetch `seq`, and ends the mode
+    /// switch if this is the refetch it waited for (or a later one).
+    fn apply_configs(&mut self, seq: u64, refetch: bool, result: Result<Configs, ApiError>) {
+        self.applied_config = seq;
+        if matches!(self.mode_switch, ModeSwitch::Refetching(awaited) if seq >= awaited) {
+            self.mode_switch = ModeSwitch::Idle;
+        }
+        self.note_failure(&result);
+        // A failed refetch keeps the mode on screen; the toast says why.
+        if refetch && result.is_err() && matches!(self.configs, Some(Ok(_))) {
+            return;
+        }
+        let was_global = self.is_global_mode();
+        let selected = self.selected_group().map(|group| group.name.clone());
+        self.configs = Some(result);
+        self.follow_mode_change(was_global, selected);
+    }
+
+    /// The kernel's answer to `PATCH /configs`: on success, asks what it now
+    /// runs rather than assuming.
+    fn apply_mode_set(&mut self, result: Result<(), ApiError>) {
+        match result {
+            Ok(()) => {
+                let seq = self.fetch_configs(true);
+                self.mode_switch = ModeSwitch::Refetching(seq);
+            }
+            Err(err) => {
+                self.mode_switch = ModeSwitch::Idle;
+                self.toast(
+                    ToastKind::Error,
+                    format!("切换模式失败：{}", describe(&err)),
+                );
+            }
+        }
+    }
+
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Version(result) => self.apply_version(result),
-            Msg::Configs(result) => {
-                self.note_failure(&result);
-                let was_global = self.is_global_mode();
-                let selected = self.selected_group().map(|group| group.name.clone());
-                self.configs = Some(result);
-                self.follow_mode_change(was_global, selected);
-            }
+            // A reply older than one already applied would roll the mode back.
+            Msg::Configs { seq, .. } if seq < self.applied_config => {}
+            Msg::Configs {
+                seq,
+                refetch,
+                result,
+            } => self.apply_configs(seq, refetch, result),
+            Msg::ModeSet(result) => self.apply_mode_set(result),
             // A reply older than one already applied would roll the page back.
             Msg::Proxies { seq, .. } if seq < self.applied_fetch => {}
             Msg::Proxies {
@@ -893,6 +998,7 @@ impl App {
                 let was_up = self.links.up.remove(&stream);
                 if stream == Stream::Traffic {
                     self.traffic = None;
+                    self.traffic_history.clear();
                 }
                 if was_up && self.links.up.is_empty() {
                     self.links.outage = true;
@@ -901,7 +1007,13 @@ impl App {
                     }
                 }
             }
-            StreamEvent::Traffic(traffic) => self.traffic = Some(*traffic),
+            StreamEvent::Traffic(traffic) => {
+                self.traffic = Some(*traffic);
+                if self.traffic_history.len() == TRAFFIC_HISTORY {
+                    self.traffic_history.pop_front();
+                }
+                self.traffic_history.push_back(*traffic);
+            }
         }
     }
 
@@ -1199,9 +1311,13 @@ mod tests {
     /// An app on a controller nobody listens on, so requests it spawns fail
     /// fast instead of reaching a real kernel.
     fn app_without_controller() -> (App, mpsc::Receiver<Msg>) {
+        app_at("http://127.0.0.1:1")
+    }
+
+    fn app_at(url: &str) -> (App, mpsc::Receiver<Msg>) {
         let (tx, rx) = mpsc::channel(16);
         let overrides = crate::config::Overrides {
-            url: Some("http://127.0.0.1:1".to_owned()),
+            url: Some(url.to_owned()),
             ..Default::default()
         };
         let settings = crate::config::Config::default()
@@ -1340,11 +1456,21 @@ mod tests {
         assert!(app.toasts.is_empty());
     }
 
+    /// Delivers a `/configs` reply with the next fetch number.
     fn set_mode(app: &mut App, mode: &str) {
-        app.handle_msg(Msg::Configs(Ok(Configs {
-            mode: mode.to_owned(),
-            ..Configs::default()
-        })));
+        app.config_fetches += 1;
+        configs_reply(app, app.config_fetches, mode);
+    }
+
+    fn configs_reply(app: &mut App, seq: u64, mode: &str) {
+        app.handle_msg(Msg::Configs {
+            seq,
+            refetch: false,
+            result: Ok(Configs {
+                mode: mode.to_owned(),
+                ..Configs::default()
+            }),
+        });
     }
 
     fn group_names(app: &App) -> Vec<&str> {
@@ -1609,22 +1735,23 @@ mod tests {
         stream_event(app, stream, StreamEvent::Disconnected);
     }
 
-    /// How many `/version`, `/configs` and `/proxies` requests the app made,
-    /// counted from the replies they leave on the channel. Dropping the app
-    /// first stops its streams, so the channel closes once the requests are
-    /// answered and nothing can still be on its way.
-    async fn requests_made(app: App, mut rx: mpsc::Receiver<Msg>) -> (usize, usize, usize) {
+    /// How many `/version`, `/configs`, `/proxies` and mode `PATCH` requests
+    /// the app made, counted from the replies they leave on the channel.
+    /// Dropping the app first stops its streams, so the channel closes once
+    /// the requests are answered and nothing can still be on its way.
+    async fn requests_made(app: App, mut rx: mpsc::Receiver<Msg>) -> (usize, usize, usize, usize) {
         drop(app);
-        let (mut versions, mut configs, mut proxies) = (0, 0, 0);
+        let (mut versions, mut configs, mut proxies, mut modes) = (0, 0, 0, 0);
         while let Some(msg) = rx.recv().await {
             match msg {
                 Msg::Version(_) => versions += 1,
-                Msg::Configs(_) => configs += 1,
+                Msg::Configs { .. } => configs += 1,
                 Msg::Proxies { .. } => proxies += 1,
+                Msg::ModeSet(_) => modes += 1,
                 _ => {}
             }
         }
-        (versions, configs, proxies)
+        (versions, configs, proxies, modes)
     }
 
     #[tokio::test]
@@ -1635,7 +1762,7 @@ mod tests {
         // One stream still up: the controller is evidently there, no probe.
         disconnect(&mut app, Stream::Traffic);
         disconnect(&mut app, Stream::Logs);
-        assert_eq!(requests_made(app, rx).await, (1, 0, 0));
+        assert_eq!(requests_made(app, rx).await, (1, 0, 0, 0));
     }
 
     #[tokio::test]
@@ -1645,7 +1772,7 @@ mod tests {
         // A stream reporting a hang-up it never connected for.
         disconnect(&mut app, Stream::Traffic);
         // Only what `start` asked for: no extra probe on top.
-        assert_eq!(requests_made(app, rx).await, (1, 1, 1));
+        assert_eq!(requests_made(app, rx).await, (1, 1, 1, 0));
     }
 
     #[tokio::test]
@@ -1654,7 +1781,7 @@ mod tests {
         for stream in [Stream::Traffic, Stream::Logs, Stream::Connections] {
             connect(&mut app, stream);
         }
-        assert_eq!(requests_made(app, rx).await, (0, 0, 0));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
     }
 
     #[tokio::test]
@@ -1667,7 +1794,7 @@ mod tests {
         connect(&mut app, Stream::Traffic);
         // One probe for the outage, then version, configs and proxies, as a
         // REST retry would ask for them.
-        assert_eq!(requests_made(app, rx).await, (2, 1, 1));
+        assert_eq!(requests_made(app, rx).await, (2, 1, 1, 0));
     }
 
     #[tokio::test]
@@ -1680,7 +1807,7 @@ mod tests {
         // The banner already retries on its own schedule. Recovery still
         // refetches, which is what clears it.
         connect(&mut app, Stream::Traffic);
-        assert_eq!(requests_made(app, rx).await, (1, 1, 1));
+        assert_eq!(requests_made(app, rx).await, (1, 1, 1, 0));
     }
 
     #[tokio::test]
@@ -1710,5 +1837,147 @@ mod tests {
         let (mut mihomo, _rx) = app_without_controller();
         mihomo.handle_msg(Msg::Version(Ok(version(true))));
         assert!(mihomo.streams.started(Stream::Memory));
+    }
+
+    #[tokio::test]
+    async fn traffic_history_keeps_the_newest_minute_and_clears_with_its_stream() {
+        let (mut app, _rx) = app_without_controller();
+        connect(&mut app, Stream::Traffic);
+        for up in 0..70 {
+            let frame = Traffic { up, down: 0 };
+            stream_event(&mut app, Stream::Traffic, StreamEvent::Traffic(frame));
+        }
+        assert_eq!(app.traffic_history.len(), TRAFFIC_HISTORY);
+        assert_eq!(app.traffic_history.front().unwrap().up, 10);
+        assert_eq!(app.traffic_history.back().unwrap().up, 69);
+
+        // Another stream going down leaves the chart alone.
+        connect(&mut app, Stream::Logs);
+        disconnect(&mut app, Stream::Logs);
+        assert_eq!(app.traffic_history.len(), TRAFFIC_HISTORY);
+        disconnect(&mut app, Stream::Traffic);
+        assert!(app.traffic_history.is_empty());
+    }
+
+    fn press(key: char, page: Page, typing: bool) -> Option<Action> {
+        let event = Event::Key(KeyEvent::new(KeyCode::Char(key), KeyModifiers::NONE));
+        action_for(&event, page, typing)
+    }
+
+    #[test]
+    fn m_switches_mode_on_every_page_except_while_typing_a_filter() {
+        for page in Page::ALL {
+            assert_eq!(press('m', page, false), Some(Action::CycleMode), "{page:?}");
+        }
+        assert_eq!(
+            press('m', Page::Proxies, true),
+            Some(Action::FilterInput(KeyEvent::new(
+                KeyCode::Char('m'),
+                KeyModifiers::NONE
+            )))
+        );
+    }
+
+    #[tokio::test]
+    async fn m_sends_one_patch_until_the_refetch_answers() {
+        let (mut app, rx) = app_without_controller();
+        set_mode(&mut app, "rule");
+        app.update(Action::CycleMode);
+        // The patch is in flight.
+        app.update(Action::CycleMode);
+        app.update(Action::CycleMode);
+
+        // Patched: the refetch (number 2) is in flight.
+        app.handle_msg(Msg::ModeSet(Ok(())));
+        app.update(Action::CycleMode);
+
+        // An older fetch answering first says nothing about the new mode.
+        configs_reply(&mut app, 1, "rule");
+        app.update(Action::CycleMode);
+
+        configs_reply(&mut app, 2, "global");
+        assert!(app.is_global_mode());
+        // Now free: the next press patches again.
+        app.update(Action::CycleMode);
+        assert_eq!(requests_made(app, rx).await, (0, 1, 0, 2));
+    }
+
+    #[tokio::test]
+    async fn a_failed_patch_or_refetch_frees_the_key_and_keeps_the_mode() {
+        let (mut app, rx) = app_without_controller();
+        set_mode(&mut app, "rule");
+        app.update(Action::CycleMode);
+        app.handle_msg(Msg::ModeSet(Err(http(500))));
+        assert_eq!(app.toasts.len(), 1);
+        assert!(matches!(app.configs, Some(Ok(_))));
+
+        app.update(Action::CycleMode);
+        app.handle_msg(Msg::ModeSet(Ok(())));
+        app.handle_msg(Msg::Configs {
+            seq: 2,
+            refetch: true,
+            result: Err(http(500)),
+        });
+        // The old mode stays up rather than an error page over the overview.
+        assert!(matches!(&app.configs, Some(Ok(configs)) if configs.mode == "rule"));
+        app.update(Action::CycleMode);
+        assert_eq!(requests_made(app, rx).await, (0, 1, 0, 3));
+    }
+
+    #[tokio::test]
+    async fn a_late_reply_cannot_roll_the_mode_back() {
+        let (mut app, _rx) = app_without_controller();
+        // Fetch 1 was asked for at start-up and is slow; fetch 2 follows the switch.
+        configs_reply(&mut app, 2, "global");
+        configs_reply(&mut app, 1, "rule");
+        assert!(app.is_global_mode());
+    }
+
+    #[tokio::test]
+    async fn m_without_configs_only_complains() {
+        for configs in [None, Some(Err(ApiError::Timeout))] {
+            let (mut app, rx) = app_without_controller();
+            app.configs = configs;
+            app.update(Action::CycleMode);
+            assert_eq!(app.toasts.back().unwrap().text, "尚未获取到当前模式");
+            assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+        }
+    }
+
+    #[tokio::test]
+    async fn m_asks_the_kernel_for_the_next_mode_whatever_the_case() {
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+        for (current, next) in [
+            ("rule", "global"),
+            ("Global", "direct"),
+            ("DIRECT", "rule"),
+            // A mode tabby does not know goes back to rule.
+            ("script", "rule"),
+        ] {
+            let server = MockServer::start().await;
+            Mock::given(method("PATCH"))
+                .respond_with(ResponseTemplate::new(204))
+                .mount(&server)
+                .await;
+            let (mut app, mut rx) = app_at(&server.uri());
+            set_mode(&mut app, current);
+            app.update(Action::CycleMode);
+            assert!(matches!(rx.recv().await, Some(Msg::ModeSet(Ok(())))));
+
+            let requests = server.received_requests().await.unwrap();
+            assert_eq!(requests.len(), 1, "{current}");
+            assert_eq!(requests[0].url.path(), "/configs");
+            let body: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
+            assert_eq!(body, serde_json::json!({ "mode": next }), "{current}");
+        }
+    }
+
+    #[test]
+    fn mixed_case_global_still_leads_the_group_list() {
+        let (mut app, _) = app_with_proxies();
+        set_mode(&mut app, "Global");
+        assert!(app.is_global_mode());
+        assert_eq!(group_names(&app)[0], GLOBAL);
     }
 }

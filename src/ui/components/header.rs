@@ -35,10 +35,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     if let Some(Ok(configs)) = &app.configs
         && !configs.mode.is_empty()
     {
+        // A mode tabby does not know is shown as the kernel spells it.
+        let tag = configs
+            .mode()
+            .map_or_else(|| configs.mode.clone(), |mode| mode.name().to_uppercase());
         left.push(Span::raw("  "));
         // Reversed, so the pill is accent-filled in any palette.
         left.push(Span::styled(
-            format!(" {} ", configs.mode.to_uppercase()),
+            format!(" {tag} "),
             Style::new()
                 .fg(theme.accent)
                 .add_modifier(bold | Modifier::REVERSED),

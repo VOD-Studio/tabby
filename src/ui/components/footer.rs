@@ -71,13 +71,14 @@ fn page_hints(app: &App) -> Vec<Hint> {
 }
 
 /// Keys that work on every page.
-fn global_hints() -> Vec<Hint> {
-    vec![
-        hint("1-7/Tab", "切换页面"),
-        hint("r", "刷新"),
-        hint("?", "帮助"),
-        hint("q", "退出"),
-    ]
+fn global_hints(page: Page) -> Vec<Hint> {
+    let mut hints = vec![hint("1-7/Tab", "切换页面")];
+    // Only where it has something to show; the proxies bar is already full.
+    if page == Page::Overview {
+        hints.push(hint("m", "切换模式"));
+    }
+    hints.extend([hint("r", "刷新"), hint("?", "帮助"), hint("q", "退出")]);
+    hints
 }
 
 fn hints(app: &App) -> Vec<Hint> {
@@ -85,7 +86,7 @@ fn hints(app: &App) -> Vec<Hint> {
         Some(Overlay::Help) => help_hints(),
         None => {
             let mut hints = page_hints(app);
-            hints.extend(global_hints());
+            hints.extend(global_hints(app.page));
             hints
         }
     }

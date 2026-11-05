@@ -33,10 +33,11 @@ fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
 }
 
 /// Keys that work on every page, as `(key, what it does)`.
-const GLOBAL_KEYS: [(&str, &str); 5] = [
+const GLOBAL_KEYS: [(&str, &str); 6] = [
     ("1-7", "跳到第 N 页"),
     ("Tab / Shift+Tab", "下一页 / 上一页"),
     ("r", "刷新"),
+    ("m", "切换代理模式"),
     ("?", "打开 / 关闭帮助"),
     ("q / Ctrl+C", "退出"),
 ];

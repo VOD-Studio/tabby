@@ -90,6 +90,19 @@ pub fn rate(bytes_per_second: u64) -> (String, &'static str) {
     (number, RATE_UNITS[unit])
 }
 
+/// The largest unit `bytes` reaches, as its size in bytes and its name
+/// (`(1 << 20, "MB")`); anything under 1 KB is in bytes. Unlike [`rate`] this
+/// does not round up into the next unit: the axis labels of a chart count in
+/// whole units of it.
+pub fn unit_for(bytes: u64) -> (u64, &'static str) {
+    let index = (0..RATE_UNITS.len())
+        .rev()
+        .find(|&index| bytes >> (10 * index) > 0)
+        .unwrap_or(0);
+    let name = RATE_UNITS[index].trim_end_matches("/s");
+    (1 << (10 * index), name)
+}
+
 /// Scales `bytes` down to the largest unit that keeps the number below 1024,
 /// returning it and the unit's index (0 = B, 3 = GB).
 ///

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     error::ApiError,
-    models::{Configs, Proxies, Version},
+    models::{Configs, Mode, Proxies, Version},
 };
 
 /// Everything except RFC 3986 unreserved characters is escaped, so a name can
@@ -124,6 +124,17 @@ impl ApiClient {
         Ok(())
     }
 
+    /// `PATCH base/seg1/seg2/…` with a JSON body, ignoring the reply body.
+    async fn patch_json<B: Serialize + ?Sized>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<(), ApiError> {
+        let request = self.http.patch(self.url(segments)).json(body);
+        Self::check(request.send().await?).await?;
+        Ok(())
+    }
+
     /// `GET /version`.
     pub async fn version(&self) -> Result<Version, ApiError> {
         self.get_json(&["version"]).await
@@ -132,6 +143,12 @@ impl ApiClient {
     /// `GET /configs`.
     pub async fn configs(&self) -> Result<Configs, ApiError> {
         self.get_json(&["configs"]).await
+    }
+
+    /// `PATCH /configs`: switches the proxy mode. Replies 204.
+    pub async fn set_mode(&self, mode: Mode) -> Result<(), ApiError> {
+        self.patch_json(&["configs"], &serde_json::json!({ "mode": mode.name() }))
+            .await
     }
 
     /// `GET /proxies`.
@@ -275,6 +292,21 @@ mod tests {
             .select_proxy("节点/选择 #1", "🚀 a/b#c")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn set_mode_patches_configs_with_the_lowercase_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("PATCH"))
+            .and(path("/configs"))
+            .and(body_json(json!({"mode": "global"})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&server.uri(), None).unwrap();
+        client.set_mode(Mode::Global).await.unwrap();
     }
 
     #[tokio::test]
