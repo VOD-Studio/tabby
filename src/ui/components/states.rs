@@ -28,27 +28,31 @@ pub fn loading(frame: &mut Frame, area: Rect, app: &App, message: &str) {
 }
 
 /// Centered failure notice: what failed, why, and how to retry.
-pub fn error(frame: &mut Frame, area: Rect, app: &App, title: &str, detail: &str) {
+pub fn error(frame: &mut Frame, area: Rect, app: &App, title: &str, detail: Option<&str>) {
     let theme = app.theme;
     let detail_width = usize::from(area.width.saturating_sub(4));
-    let lines = vec![
-        Line::styled(
-            format!("✗ {title}"),
-            Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
+    let mut lines = vec![Line::styled(
+        format!("✗ {title}"),
+        Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
+    )];
+    if let Some(detail) = detail {
+        lines.push(Line::styled(
+            truncate(detail, detail_width),
+            Style::new().fg(theme.muted),
+        ));
+    }
+    lines.push(Line::from(vec![
+        Span::styled("按 ", Style::new().fg(theme.muted)),
+        Span::styled(
+            "r",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         ),
-        Line::styled(truncate(detail, detail_width), Style::new().fg(theme.muted)),
-        Line::from(vec![
-            Span::styled("按 ", Style::new().fg(theme.muted)),
-            Span::styled(
-                "r",
-                Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" 重试", Style::new().fg(theme.muted)),
-        ]),
-    ];
+        Span::styled(" 重试", Style::new().fg(theme.muted)),
+    ]));
+    let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     frame.render_widget(
         Paragraph::new(lines).alignment(Alignment::Center),
-        centered_rows(area, 3),
+        centered_rows(area, rows),
     );
 }
 

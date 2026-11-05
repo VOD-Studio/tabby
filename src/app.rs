@@ -14,7 +14,7 @@ use crate::{
         models::{Configs, Version},
     },
     config::Settings,
-    ui::theme::Theme,
+    ui::{text::describe, theme::Theme},
 };
 
 /// The seven top-level pages, in tab order.
@@ -363,17 +363,5 @@ impl App {
     fn set_page(&mut self, page: Page) {
         self.page = page;
         self.dirty = true;
-    }
-}
-
-/// One-line description of a failed request for a toast.
-fn describe(err: &ApiError) -> String {
-    match err {
-        ApiError::Unauthorized => "Secret 错误，请用 --secret 或修改配置".to_owned(),
-        ApiError::NotFound => "接口不存在（404）".to_owned(),
-        ApiError::Http { status, message } => format!("HTTP {status}：{message}"),
-        ApiError::Timeout => "请求超时".to_owned(),
-        ApiError::Connect(_) => "无法连接控制器".to_owned(),
-        ApiError::Decode(_) => "控制器返回了无法解析的数据".to_owned(),
     }
 }

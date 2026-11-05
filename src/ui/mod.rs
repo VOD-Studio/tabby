@@ -1,4 +1,5 @@
 pub mod components;
+pub mod text;
 pub mod theme;
 
 use ratatui::{
@@ -69,8 +70,8 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
                     frame,
                     area,
                     app,
-                    "无法加载概览",
-                    &err.to_string(),
+                    &text::describe(err),
+                    text::detail(err),
                 );
             }
             Some(Ok(_)) => {}
