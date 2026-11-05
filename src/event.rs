@@ -9,7 +9,10 @@ use tokio::{
     time::{MissedTickBehavior, interval},
 };
 
-use crate::app::{App, Msg, action_for, draw};
+use crate::{
+    app::{App, Msg, action_for},
+    ui,
+};
 
 /// Render cadence for repaints deferred by background messages.
 const TICK: Duration = Duration::from_millis(100);
@@ -31,12 +34,12 @@ pub async fn run(
     let mut tick = interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    terminal.draw(|frame| draw(frame, app))?;
+    terminal.draw(|frame| ui::draw(frame, app))?;
     while !app.should_quit() {
         tokio::select! {
             _ = tick.tick() => {
                 if app.take_dirty() {
-                    terminal.draw(|frame| draw(frame, app))?;
+                    terminal.draw(|frame| ui::draw(frame, app))?;
                 }
             }
             Some(msg) = msg_rx.recv() => app.handle_msg(msg),
@@ -46,7 +49,7 @@ pub async fn run(
                     app.update(action);
                 }
                 if app.take_dirty() {
-                    terminal.draw(|frame| draw(frame, app))?;
+                    terminal.draw(|frame| ui::draw(frame, app))?;
                 }
             }
         }

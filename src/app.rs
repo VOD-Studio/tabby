@@ -1,6 +1,7 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{
     Frame,
+    layout::Rect,
     style::{Modifier, Style},
     text::{Line, Span, Text},
     widgets::Paragraph,
@@ -44,15 +45,23 @@ pub fn action_for(event: &Event) -> Option<Action> {
     }
 }
 
+/// Whether the controller has answered the `/version` probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Connection {
+    Connecting,
+    Connected,
+    Disconnected,
+}
+
 /// Application state. Only the main loop mutates it.
 #[derive(Debug)]
 pub struct App {
-    settings: Settings,
-    theme: Theme,
+    pub settings: Settings,
+    pub theme: Theme,
     client: ApiClient,
     msg_tx: mpsc::Sender<Msg>,
-    version: Option<Result<Version, ApiError>>,
-    configs: Option<Result<Configs, ApiError>>,
+    pub version: Option<Result<Version, ApiError>>,
+    pub configs: Option<Result<Configs, ApiError>>,
     should_quit: bool,
     dirty: bool,
 }
@@ -100,6 +109,14 @@ impl App {
         self.dirty = true;
     }
 
+    pub fn connection(&self) -> Connection {
+        match &self.version {
+            None => Connection::Connecting,
+            Some(Ok(_)) => Connection::Connected,
+            Some(Err(_)) => Connection::Disconnected,
+        }
+    }
+
     pub fn should_quit(&self) -> bool {
         self.should_quit
     }
@@ -111,7 +128,7 @@ impl App {
 }
 
 /// Placeholder screen until the `ui` module lands.
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
     let settings = &app.settings;
     let row = |name: &str, value: String, color| {
@@ -170,5 +187,5 @@ pub fn draw(frame: &mut Frame, app: &App) {
         row("core", core, core_color),
         row("configs", configs, configs_color),
     ]);
-    frame.render_widget(Paragraph::new(text), frame.area());
+    frame.render_widget(Paragraph::new(text), area);
 }
