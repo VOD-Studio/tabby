@@ -169,6 +169,13 @@ impl Proxies {
             group.now = Some(node.to_owned());
         }
     }
+
+    /// Appends a delay test result (0 = failed) to a node's history.
+    pub fn record_delay(&mut self, name: &str, millis: u32) {
+        if let Some(proxy) = self.by_name.get_mut(name) {
+            proxy.history.push(DelayRecord { delay: millis });
+        }
+    }
 }
 
 #[cfg(test)]

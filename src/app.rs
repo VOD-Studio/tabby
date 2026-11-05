@@ -1,5 +1,5 @@
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
@@ -11,7 +11,7 @@ use crate::{
         backoff,
         client::ApiClient,
         error::ApiError,
-        models::{Configs, GLOBAL, Proxies, Proxy, Version},
+        models::{Configs, CoreKind, GLOBAL, Proxies, Proxy, Version},
     },
     config::Settings,
     ui::{scroll::Scroll, text::describe, theme::Theme},
@@ -119,6 +119,10 @@ pub enum Action {
     Focus(Pane),
     /// `Enter`: acts on the item under the cursor.
     Confirm,
+    /// `t`: delay-test the node under the cursor.
+    TestNode,
+    /// `T`: delay-test every member of the selected group.
+    TestGroup,
     ToggleHelp,
     /// `Esc`: closes the topmost overlay.
     Dismiss,
@@ -135,6 +139,16 @@ pub enum Msg {
         group: String,
         node: String,
         result: Result<(), ApiError>,
+    },
+    /// Reply to a single-node delay test.
+    Delay {
+        name: String,
+        result: Result<u32, ApiError>,
+    },
+    /// Reply to a whole-group delay test.
+    GroupDelay {
+        members: Vec<String>,
+        result: Result<HashMap<String, u32>, ApiError>,
     },
 }
 
@@ -162,6 +176,8 @@ pub fn action_for(event: &Event, page: Page) -> Option<Action> {
                 KeyCode::Char('G') => Some(Action::Cursor(Move::Bottom)),
                 KeyCode::Char('h') if page == Page::Proxies => Some(Action::Focus(Pane::Groups)),
                 KeyCode::Char('l') if page == Page::Proxies => Some(Action::Focus(Pane::Nodes)),
+                KeyCode::Char('t') if page == Page::Proxies => Some(Action::TestNode),
+                KeyCode::Char('T') if page == Page::Proxies => Some(Action::TestGroup),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -228,6 +244,8 @@ pub struct App {
     pub configs: Option<Result<Configs, ApiError>>,
     pub proxies: Option<Result<Proxies, ApiError>>,
     pub proxies_view: ProxiesView,
+    /// Nodes with a delay test in flight.
+    pub testing: HashSet<String>,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
     /// Frame counter of the loading spinner; advances while one is visible.
@@ -252,6 +270,7 @@ impl App {
             configs: None,
             proxies: None,
             proxies_view: ProxiesView::default(),
+            testing: HashSet::new(),
             toasts: VecDeque::new(),
             overlay: None,
             spinner: 0,
@@ -304,6 +323,8 @@ impl App {
             Action::PrevPage => self.set_page(self.page.prev()),
             Action::Cursor(movement) => self.move_cursor(movement),
             Action::Confirm => self.confirm(),
+            Action::TestNode => self.test_node(),
+            Action::TestGroup => self.test_group(),
             Action::Focus(pane) => {
                 if self.page == Page::Proxies && self.visible_groups().next().is_some() {
                     self.proxies_view.focus = pane;
@@ -461,6 +482,32 @@ impl App {
                 }
                 Err(err) => self.toast(ToastKind::Error, format!("切换失败：{}", describe(&err))),
             },
+            Msg::Delay { name, result } => {
+                self.testing.remove(&name);
+                match result {
+                    Ok(millis) => self.record_delay(&name, millis),
+                    Err(err) if is_failed_test(&err) => self.record_delay(&name, 0),
+                    Err(err) => {
+                        self.toast(ToastKind::Error, format!("测速失败：{}", describe(&err)));
+                    }
+                }
+            }
+            Msg::GroupDelay { members, result } => {
+                for member in &members {
+                    self.testing.remove(member);
+                }
+                match result {
+                    // Members that failed are simply absent from the reply.
+                    Ok(delays) => {
+                        for member in &members {
+                            self.record_delay(member, delays.get(member).copied().unwrap_or(0));
+                        }
+                    }
+                    Err(err) => {
+                        self.toast(ToastKind::Error, format!("测速失败：{}", describe(&err)));
+                    }
+                }
+            }
         }
         self.dirty = true;
     }
@@ -472,7 +519,7 @@ impl App {
         if self.toasts.len() != shown {
             self.dirty = true;
         }
-        if self.is_loading() {
+        if self.is_loading() || (self.page == Page::Proxies && !self.testing.is_empty()) {
             self.spinner = self.spinner.wrapping_add(1);
             self.dirty = true;
         }
@@ -513,6 +560,81 @@ impl App {
             Page::Proxies => self.proxies.is_none(),
             _ => false,
         }
+    }
+
+    /// Whether the kernel is mihomo (group delay tests and the like need it).
+    pub fn is_mihomo(&self) -> bool {
+        matches!(&self.version, Some(Ok(version)) if version.kind() == CoreKind::Mihomo)
+    }
+
+    fn record_delay(&mut self, name: &str, millis: u32) {
+        if let Some(Ok(proxies)) = &mut self.proxies {
+            proxies.record_delay(name, millis);
+        }
+    }
+
+    /// `t`: delay-test the node under the cursor, or the group's current node
+    /// while the group list has the focus.
+    fn test_node(&mut self) {
+        let Some(group) = self.selected_group() else {
+            return;
+        };
+        let target = match self.proxies_view.focus {
+            Pane::Groups => group.now.clone(),
+            Pane::Nodes => {
+                let members = group.all.as_deref().unwrap_or_default();
+                let index = self
+                    .proxies_view
+                    .node
+                    .unwrap_or_else(|| group.current_index());
+                members
+                    .get(index.min(members.len().saturating_sub(1)))
+                    .cloned()
+            }
+        };
+        let Some(name) = target else {
+            return;
+        };
+        if !self.testing.insert(name.clone()) {
+            return;
+        }
+        let url = self.settings.delay_url.clone();
+        let timeout = self.settings.delay_timeout_ms;
+        self.dirty = true;
+        self.spawn(move |client| async move {
+            let result = client.proxy_delay(&name, &url, timeout).await;
+            Msg::Delay { name, result }
+        });
+    }
+
+    /// `T`: delay-test all members of the selected group at once.
+    fn test_group(&mut self) {
+        if !self.is_mihomo() {
+            self.toast(ToastKind::Error, "整组测速需要 mihomo".to_owned());
+            return;
+        }
+        let Some(group) = self.selected_group() else {
+            return;
+        };
+        let name = group.name.clone();
+        let members: Vec<String> = group
+            .all
+            .iter()
+            .flatten()
+            .filter(|member| !self.testing.contains(*member))
+            .cloned()
+            .collect();
+        if members.is_empty() {
+            return;
+        }
+        self.testing.extend(members.iter().cloned());
+        let url = self.settings.delay_url.clone();
+        let timeout = self.settings.delay_timeout_ms;
+        self.dirty = true;
+        self.spawn(move |client| async move {
+            let result = client.group_delay(&name, &url, timeout).await;
+            Msg::GroupDelay { members, result }
+        });
     }
 
     /// Toasts a failed data request, unless the connection is already known
@@ -569,4 +691,17 @@ impl App {
         self.page = page;
         self.dirty = true;
     }
+}
+
+/// The kernel answers a failed or timed-out delay test with 503 / 504, which
+/// is a result (the node is unreachable), not a failure of the request.
+fn is_failed_test(err: &ApiError) -> bool {
+    matches!(
+        err,
+        ApiError::Timeout
+            | ApiError::Http {
+                status: 503 | 504,
+                ..
+            }
+    )
 }

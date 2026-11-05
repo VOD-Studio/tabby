@@ -11,14 +11,16 @@ use crate::{app::App, format::truncate};
 /// Braille spinner, one frame per 100 ms tick.
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+/// The spinner frame to show right now.
+pub fn spinner_frame(app: &App) -> &'static str {
+    SPINNER[app.spinner % SPINNER.len()]
+}
+
 /// Centered spinner with a message, for a page waiting on data.
 pub fn loading(frame: &mut Frame, area: Rect, app: &App, message: &str) {
     let theme = app.theme;
     let line = Line::from(vec![
-        Span::styled(
-            SPINNER[app.spinner % SPINNER.len()],
-            Style::new().fg(theme.accent),
-        ),
+        Span::styled(spinner_frame(app), Style::new().fg(theme.accent)),
         Span::styled(format!(" {message}"), Style::new().fg(theme.muted)),
     ]);
     frame.render_widget(

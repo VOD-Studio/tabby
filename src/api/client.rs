@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{collections::HashMap, time::Duration};
 
 use color_eyre::{
     Result,
@@ -6,7 +6,7 @@ use color_eyre::{
 };
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
-use serde::{Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     error::ApiError,
@@ -89,7 +89,27 @@ impl ApiClient {
 
     /// `GET base/seg1/seg2/…`, decoded as JSON.
     async fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T, ApiError> {
-        let response = Self::check(self.http.get(self.url(segments)).send().await?).await?;
+        self.get_json_at(self.url(segments)).await
+    }
+
+    /// Like [`Self::get_json`], with percent-encoded query parameters.
+    async fn get_json_query<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&str, &str)],
+    ) -> Result<T, ApiError> {
+        let mut url = self.url(segments);
+        for (index, (key, value)) in query.iter().enumerate() {
+            url.push(if index == 0 { '?' } else { '&' });
+            url.push_str(key);
+            url.push('=');
+            url.extend(utf8_percent_encode(value, PATH_SEGMENT));
+        }
+        self.get_json_at(url).await
+    }
+
+    async fn get_json_at<T: DeserializeOwned>(&self, url: String) -> Result<T, ApiError> {
+        let response = Self::check(self.http.get(url).send().await?).await?;
         Ok(response.json().await?)
     }
 
@@ -124,6 +144,44 @@ impl ApiClient {
         self.put_json(&["proxies", group], &serde_json::json!({ "name": node }))
             .await
     }
+
+    /// `GET /proxies/{name}/delay`: milliseconds to fetch `url` through the
+    /// node. A failed or timed-out test is an HTTP 503 / 504 error.
+    pub async fn proxy_delay(
+        &self,
+        name: &str,
+        url: &str,
+        timeout_ms: u32,
+    ) -> Result<u32, ApiError> {
+        #[derive(Deserialize)]
+        struct Reply {
+            delay: u32,
+        }
+        let timeout = timeout_ms.to_string();
+        let reply: Reply = self
+            .get_json_query(
+                &["proxies", name, "delay"],
+                &[("url", url), ("timeout", &timeout)],
+            )
+            .await?;
+        Ok(reply.delay)
+    }
+
+    /// `GET /group/{name}/delay` (mihomo only): delays of the members that
+    /// answered; the ones that failed are left out.
+    pub async fn group_delay(
+        &self,
+        group: &str,
+        url: &str,
+        timeout_ms: u32,
+    ) -> Result<HashMap<String, u32>, ApiError> {
+        let timeout = timeout_ms.to_string();
+        self.get_json_query(
+            &["group", group, "delay"],
+            &[("url", url), ("timeout", &timeout)],
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -133,7 +191,7 @@ mod tests {
     use serde_json::{Value, json};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{body_json, header, method, path},
+        matchers::{body_json, header, method, path, query_param},
     };
 
     use super::*;
@@ -217,6 +275,30 @@ mod tests {
             .select_proxy("节点/选择 #1", "🚀 a/b#c")
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_delay_encodes_name_and_query() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/proxies/a%2Fb%23c%25d%20e%3Ff/delay"))
+            .and(query_param("url", "https://t.example/generate_204?x=1&y=2"))
+            .and(query_param("timeout", "5000"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"delay": 42})))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&server.uri(), None).unwrap();
+        let delay = client
+            .proxy_delay(
+                "a/b#c%d e?f",
+                "https://t.example/generate_204?x=1&y=2",
+                5000,
+            )
+            .await
+            .unwrap();
+        assert_eq!(delay, 42);
     }
 
     #[tokio::test]

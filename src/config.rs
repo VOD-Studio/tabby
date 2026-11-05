@@ -10,6 +10,12 @@ use serde::Deserialize;
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:9090";
 
+/// Page fetched through a node to measure its delay.
+pub const DEFAULT_DELAY_URL: &str = "https://www.gstatic.com/generate_204";
+
+/// How long a delay test may take before the node counts as failed.
+pub const DEFAULT_DELAY_TIMEOUT_MS: u32 = 5000;
+
 /// Name shown for the connection when no profile is selected.
 const FALLBACK_PROFILE: &str = "default";
 
@@ -28,6 +34,9 @@ pub enum ThemeName {
 pub struct Config {
     default: Option<String>,
     theme: Option<ThemeName>,
+    delay_url: Option<String>,
+    /// Milliseconds.
+    delay_timeout: Option<u32>,
     profiles: BTreeMap<String, Profile>,
 }
 
@@ -63,6 +72,8 @@ pub struct Settings {
     pub url: String,
     pub secret: Option<String>,
     pub theme: ThemeName,
+    pub delay_url: String,
+    pub delay_timeout_ms: u32,
 }
 
 impl Config {
@@ -108,6 +119,12 @@ impl Config {
                 .or_else(|| profile.and_then(|p| p.secret.as_deref()))
                 .map(str::to_owned),
             theme: overrides.theme.or(self.theme).unwrap_or_default(),
+            delay_url: self
+                .delay_url
+                .clone()
+                .filter(|url| !url.is_empty())
+                .unwrap_or_else(|| DEFAULT_DELAY_URL.to_owned()),
+            delay_timeout_ms: self.delay_timeout.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS),
         })
     }
 }
@@ -123,6 +140,8 @@ mod tests {
     const FILE: &str = r#"
 default = "local"
 theme = "tokyo-night"
+delay_url = "http://delay.test/204"
+delay_timeout = 2500
 
 [profiles.local]
 url = "http://local:9090"
@@ -146,6 +165,8 @@ url = "http://router:9090"
                 url: DEFAULT_URL.into(),
                 secret: None,
                 theme: ThemeName::Terminal,
+                delay_url: DEFAULT_DELAY_URL.into(),
+                delay_timeout_ms: DEFAULT_DELAY_TIMEOUT_MS,
             }
         );
     }
@@ -160,6 +181,8 @@ url = "http://router:9090"
                 url: "http://local:9090".into(),
                 secret: Some("file-secret".into()),
                 theme: ThemeName::TokyoNight,
+                delay_url: "http://delay.test/204".into(),
+                delay_timeout_ms: 2500,
             }
         );
     }
@@ -180,6 +203,8 @@ url = "http://router:9090"
                 url: "http://cli:1".into(),
                 secret: Some("cli-secret".into()),
                 theme: ThemeName::CatppuccinMocha,
+                delay_url: "http://delay.test/204".into(),
+                delay_timeout_ms: 2500,
             }
         );
     }

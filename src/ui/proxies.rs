@@ -281,8 +281,13 @@ fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
         ),
     ]);
 
-    let delay = card.proxy.and_then(Proxy::delay);
+    let testing = app.testing.contains(card.name);
+    let delay = card.proxy.and_then(Proxy::delay).filter(|_| !testing);
     let (delay_text, delay_style) = match delay {
+        _ if testing => (
+            format!("{} 测试中", states::spinner_frame(app)),
+            Style::new().fg(theme.muted),
+        ),
         None => ("—".to_owned(), Style::new().fg(theme.muted)),
         Some(0) => (
             "超时".to_owned(),
