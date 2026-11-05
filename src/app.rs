@@ -100,6 +100,10 @@ pub struct ProxiesView {
     /// Index into [`App::visible_groups`].
     pub group: usize,
     pub group_scroll: Scroll,
+    /// Index into the selected group's members; `None` rests on the group's
+    /// current node.
+    pub node: Option<usize>,
+    pub node_scroll: Scroll,
 }
 
 /// A user intent, derived from a terminal event.
@@ -327,6 +331,13 @@ impl App {
             .filter(move |group| global_mode || group.name != GLOBAL)
     }
 
+    /// The group the cursor is on.
+    pub fn selected_group(&self) -> Option<&Proxy> {
+        let len = self.visible_groups().count();
+        self.visible_groups()
+            .nth(self.proxies_view.group.min(len.saturating_sub(1)))
+    }
+
     fn move_cursor(&mut self, movement: Move) {
         if self.page != Page::Proxies {
             return;
@@ -334,11 +345,24 @@ impl App {
         match self.proxies_view.focus {
             Pane::Groups => {
                 let len = self.visible_groups().count();
-                self.proxies_view.group = movement.apply(self.proxies_view.group, len);
-                self.dirty = true;
+                let view = &mut self.proxies_view;
+                let group = movement.apply(view.group, len);
+                if group != view.group {
+                    view.group = group;
+                    view.node = None;
+                }
             }
-            Pane::Nodes => {}
+            Pane::Nodes => {
+                let Some(group) = self.selected_group() else {
+                    return;
+                };
+                let len = group.all.as_ref().map_or(0, Vec::len);
+                let current = group.current_index();
+                let view = &mut self.proxies_view;
+                view.node = Some(movement.apply(view.node.unwrap_or(current), len));
+            }
         }
+        self.dirty = true;
     }
 
     pub fn handle_msg(&mut self, msg: Msg) {

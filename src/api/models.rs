@@ -69,6 +69,7 @@ pub struct Proxy {
     pub now: Option<String>,
     /// Delay test results, oldest first.
     pub history: Vec<DelayRecord>,
+    pub udp: bool,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -83,6 +84,15 @@ impl Proxy {
     /// means never tested.
     pub fn delay(&self) -> Option<u32> {
         self.history.last().map(|record| record.delay)
+    }
+
+    /// Position of [`Proxy::now`] among the members, or 0 when there is none.
+    pub fn current_index(&self) -> usize {
+        self.all
+            .iter()
+            .flatten()
+            .position(|name| Some(name) == self.now.as_ref())
+            .unwrap_or(0)
     }
 }
 

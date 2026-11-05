@@ -33,7 +33,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies) {
     let [left, right] =
         Layout::horizontal([Constraint::Length(GROUPS_WIDTH), Constraint::Fill(1)]).areas(area);
     render_groups(frame, left, app, proxies, &groups, selected);
-    render_nodes(frame, right, app, groups[selected]);
+    render_nodes(frame, right, app, proxies, groups[selected]);
 }
 
 fn panel(app: &App, focused: bool, title: Line<'static>) -> Block<'static> {
@@ -153,21 +153,186 @@ fn group_item(
     vec![first, Line::from(second)]
 }
 
-fn render_nodes(frame: &mut Frame, area: Rect, app: &App, group: &Proxy) {
+/// Narrowest card that still fits a name and a delay.
+const CARD_MIN_WIDTH: u16 = 26;
+const MAX_COLUMNS: u16 = 4;
+
+/// Rows per card: top border, name, details, bottom border (which doubles as
+/// the delay bar).
+const CARD_ROWS: u16 = 4;
+
+/// Delay at which the bar is full; slower nodes are as bad as this one.
+const BAR_FULL_MS: usize = 500;
+
+fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, group: &Proxy) {
     let theme = app.theme;
-    let focused = app.proxies_view.focus == Pane::Nodes;
-    let count = group.all.as_ref().map_or(0, Vec::len);
+    let view = &app.proxies_view;
+    let focused = view.focus == Pane::Nodes;
+    let members = group.all.as_deref().unwrap_or_default();
+    let name_span = Span::styled(
+        format!(" {}", group.name),
+        Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
+    );
+    let kind_span = Span::styled(
+        format!("  {} · {} 个节点 ", group.kind, members.len()),
+        Style::new().fg(theme.muted),
+    );
+
+    let block = panel(app, focused, Line::from(vec![name_span, kind_span]));
+    let inner = block.inner(area);
+    if members.is_empty() {
+        frame.render_widget(block, area);
+        states::empty(frame, inner, app, "该组没有节点", &[("r", "刷新")]);
+        return;
+    }
+
+    let columns = (inner.width / CARD_MIN_WIDTH).clamp(1, MAX_COLUMNS);
+    let card_width = inner.width / columns;
+    let columns = usize::from(columns);
+    let total_rows = members.len().div_ceil(columns);
+    let cursor = view
+        .node
+        .unwrap_or_else(|| group.current_index())
+        .min(members.len() - 1);
+    let rows = view.node_scroll.window(
+        cursor / columns,
+        total_rows,
+        usize::from(inner.height / CARD_ROWS),
+    );
+
+    let first = rows.start * columns + 1;
+    let last = (rows.end * columns).min(members.len());
+    let mut counter = format!(" {first}–{last} / {} ", members.len());
+    if rows.start > 0 {
+        counter.insert(1, '▴');
+    }
+    if rows.end < total_rows {
+        counter.push('▾');
+    }
+    let block = block.title(Line::styled(counter, Style::new().fg(theme.muted)).right_aligned());
+    frame.render_widget(block, area);
+
+    for (row, row_index) in rows.enumerate() {
+        for column in 0..columns {
+            let index = row_index * columns + column;
+            let Some(name) = members.get(index) else {
+                break;
+            };
+            let column_x = u16::try_from(column).unwrap_or(0) * card_width;
+            let rect = Rect {
+                x: inner.x + column_x,
+                y: inner.y + u16::try_from(row).unwrap_or(0) * CARD_ROWS,
+                width: card_width,
+                height: CARD_ROWS,
+            };
+            let card = Card {
+                name,
+                proxy: proxies.get(name),
+                current: group.now.as_ref() == Some(name),
+                cursor: focused && index == cursor,
+            };
+            render_card(frame, rect, app, &card);
+        }
+    }
+}
+
+struct Card<'a> {
+    name: &'a str,
+    proxy: Option<&'a Proxy>,
+    /// The group routes through this node.
+    current: bool,
+    /// The cursor is on this card.
+    cursor: bool,
+}
+
+fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
+    let theme = app.theme;
+    let border = Style::new().fg(if card.current {
+        theme.accent
+    } else {
+        theme.muted
+    });
+    let mut block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(border);
+    if card.cursor {
+        block = block.style(theme.surface);
+    }
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    let width = usize::from(inner.width);
+
+    let mark = if card.current { "✓" } else { " " };
+    let name = truncate(card.name, width.saturating_sub(2));
+    let padding = width.saturating_sub(name.width() + 1);
     let title = Line::from(vec![
         Span::styled(
-            format!(" {}", group.name),
-            Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
+            name,
+            Style::new().fg(theme.fg).add_modifier(if card.current {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            }),
         ),
+        Span::raw(" ".repeat(padding)),
         Span::styled(
-            format!("  {} · {count} 个节点 ", group.kind),
-            Style::new().fg(theme.muted),
+            mark,
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         ),
     ]);
-    frame.render_widget(panel(app, focused, title), area);
+
+    let delay = card.proxy.and_then(Proxy::delay);
+    let (delay_text, delay_style) = match delay {
+        None => ("—".to_owned(), Style::new().fg(theme.muted)),
+        Some(0) => (
+            "超时".to_owned(),
+            Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
+        ),
+        Some(ms) => (
+            format!("{ms} ms"),
+            Style::new()
+                .fg(theme.delay(ms))
+                .add_modifier(Modifier::BOLD),
+        ),
+    };
+    let kind = card.proxy.map_or_else(String::new, |proxy| {
+        if proxy.udp {
+            format!("{} · UDP", proxy.kind)
+        } else {
+            proxy.kind.clone()
+        }
+    });
+    let kind = truncate(&kind, width.saturating_sub(delay_text.width() + 1));
+    let gap = width.saturating_sub(kind.width() + delay_text.width());
+    let details = Line::from(vec![
+        Span::styled(kind, Style::new().fg(theme.muted)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(delay_text, delay_style),
+    ]);
+    frame.render_widget(Paragraph::new(vec![title, details]), inner);
+
+    // The bottom border becomes the delay bar.
+    let bar_width = usize::from(rect.width.saturating_sub(2));
+    let filled = match delay {
+        Some(ms) if ms > 0 => {
+            (usize::try_from(ms).unwrap_or(BAR_FULL_MS).min(BAR_FULL_MS) * bar_width / BAR_FULL_MS)
+                .max(1)
+        }
+        _ => 0,
+    };
+    let bar_color = delay.map_or(theme.muted, |ms| theme.delay(ms));
+    let bottom = Line::from(vec![
+        Span::styled("╰", border),
+        Span::styled("━".repeat(filled), Style::new().fg(bar_color)),
+        Span::styled("─".repeat(bar_width - filled.min(bar_width)), border),
+        Span::styled("╯", border),
+    ]);
+    let bottom_row = Rect {
+        y: rect.bottom().saturating_sub(1),
+        height: 1,
+        ..rect
+    };
+    frame.render_widget(Paragraph::new(bottom), bottom_row);
 }
 
 /// Short group-type tag shown in the list.
