@@ -1,9 +1,11 @@
+mod api;
 mod app;
 mod config;
 mod event;
 
 use std::panic;
 
+use api::client::ApiClient;
 use app::App;
 use clap::Parser;
 use color_eyre::{
@@ -12,6 +14,7 @@ use color_eyre::{
 };
 use config::{Config, Overrides};
 use directories::ProjectDirs;
+use tokio::sync::mpsc;
 use tracing::level_filters::LevelFilter;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::EnvFilter;
@@ -36,8 +39,13 @@ async fn main() -> Result<()> {
         "starting tabby {}",
         env!("CARGO_PKG_VERSION"),
     );
+    let client = ApiClient::new(&settings.url, settings.secret.as_deref())?;
+    let (msg_tx, msg_rx) = mpsc::channel(event::MSG_BUFFER);
+    let mut app = App::new(settings, client, msg_tx);
+    app.start();
+
     let mut terminal = ratatui::init();
-    let result = event::run(&mut terminal, &mut App::new(settings)).await;
+    let result = event::run(&mut terminal, &mut app, msg_rx).await;
     ratatui::restore();
     result
 }
