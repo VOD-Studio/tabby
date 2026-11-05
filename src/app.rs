@@ -598,6 +598,19 @@ fn log_height(entry: &LogEntry, width: usize) -> usize {
     logs::wrap_message(&entry.message, width).len()
 }
 
+/// Where the log stream stands, as the logs page tells it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogLink {
+    /// Not connected: not yet, or dropped.
+    #[default]
+    Down,
+    /// Resubscribing at another level: the old connection is gone and the
+    /// new one is not in yet. Usually a few dozen milliseconds; for as long
+    /// as the controller is unreachable otherwise.
+    Resubscribing,
+    Live,
+}
+
 /// Buffer, level, pause, filter and scroll state of the logs page.
 ///
 /// Scrolling counts screen rows, so a long message wrapped over several
@@ -616,8 +629,8 @@ pub struct LogsView {
     pub level: LogLevel,
     /// What is shown stays as it is; new lines queue up.
     pub paused: bool,
-    /// The stream is connected. Resubscribing at another level keeps it so.
-    pub live: bool,
+    /// The stream's state.
+    pub link: LogLink,
     /// Case-insensitive substring the message must contain.
     pub filter: Input,
     /// The filter box has the keyboard.
@@ -684,7 +697,7 @@ impl LogsView {
 
     /// Nothing to show yet and no stream to bring any.
     pub fn waiting(&self) -> bool {
-        !self.live && self.entries.is_empty() && self.pending.is_empty()
+        self.link == LogLink::Down && self.entries.is_empty() && self.pending.is_empty()
     }
 
     fn needle(&self) -> String {
@@ -1607,12 +1620,16 @@ impl App {
     /// The old connection goes without a word and the new one reports in by
     /// itself, so this is no outage, no banner and no refetch. Until it is
     /// in, the stream does not count as up: should every other stream drop
-    /// meanwhile, that is still noticed. The page keeps showing it as live.
+    /// meanwhile, that is still noticed. Nor does the page call it live: a
+    /// new connection that never gets in never reports going down either.
     fn cycle_level(&mut self) {
         let level = self.logs_view.level.next();
         self.logs_view.level = level;
         self.streams.set_log_level(level);
         self.links.up.remove(&Stream::Logs);
+        if self.logs_view.link == LogLink::Live {
+            self.logs_view.link = LogLink::Resubscribing;
+        }
         self.dirty = true;
     }
 
@@ -2163,7 +2180,7 @@ impl App {
             StreamEvent::Connected => {
                 self.links.up.insert(stream);
                 if stream == Stream::Logs {
-                    self.logs_view.live = true;
+                    self.logs_view.link = LogLink::Live;
                 }
                 if std::mem::take(&mut self.links.outage) {
                     self.start();
@@ -2195,7 +2212,7 @@ impl App {
                         self.memory_history.clear();
                     }
                     // What came in is history and stays.
-                    Stream::Logs => self.logs_view.live = false,
+                    Stream::Logs => self.logs_view.link = LogLink::Down,
                 }
                 if was_up && self.links.up.is_empty() {
                     self.links.outage = true;
@@ -4270,7 +4287,7 @@ mod tests {
         // The resubscribed stream reports in by itself.
         connect(&mut app, Stream::Logs);
         assert!(app.reconnect.is_none() && !app.links.outage);
-        assert!(app.logs_view.live && app.logs_view.entries.len() == 1);
+        assert!(app.logs_view.link == LogLink::Live && app.logs_view.entries.len() == 1);
         assert!(app.traffic.is_some());
         assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
     }
@@ -4281,9 +4298,35 @@ mod tests {
         app.page = Page::Logs;
         connect(&mut app, Stream::Logs);
         app.update(press('l', Page::Logs, false).unwrap());
-        assert!(app.logs_view.live);
         connect(&mut app, Stream::Logs);
         assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn the_title_is_not_live_until_the_resubscribed_log_is_in() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        let status = |app: &App| logs::status(&app.logs_view, &app.theme).content.into_owned();
+        connect(&mut app, Stream::Logs);
+        assert_eq!(status(&app).trim(), "● 实时");
+        // The new connection may never get in, and would then never report
+        // going down either.
+        app.update(press('l', Page::Logs, false).unwrap());
+        assert_eq!(status(&app).trim(), "◌ 连接中");
+        // Paused, it still does not pass for connected.
+        app.update(press('p', Page::Logs, false).unwrap());
+        assert_eq!(status(&app).trim(), "◌ 连接中");
+        app.update(press('p', Page::Logs, false).unwrap());
+        // Nor does it hide the panel behind a spinner.
+        assert!(!app.is_loading());
+        connect(&mut app, Stream::Logs);
+        assert_eq!(status(&app).trim(), "● 实时");
+        // A stream that was down stays so until it is in.
+        disconnect(&mut app, Stream::Logs);
+        app.update(press('l', Page::Logs, false).unwrap());
+        assert_eq!(status(&app).trim(), "○ 未连接");
+        connect(&mut app, Stream::Logs);
+        assert_eq!(status(&app).trim(), "● 实时");
     }
 
     #[tokio::test]
@@ -4299,7 +4342,7 @@ mod tests {
         };
         stream_event(&mut app, Stream::Logs, StreamEvent::Log(log));
         disconnect(&mut app, Stream::Logs);
-        assert!(!app.logs_view.live && !app.is_loading());
+        assert!(app.logs_view.link == LogLink::Down && !app.is_loading());
         // Kept, the tab a space and the escape dropped.
         assert_eq!(app.logs_view.entries[0].message, "a b[0m");
     }

@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     api::models::{LogKind, LogLevel},
-    app::{App, LogEntry},
+    app::{App, LogEntry, LogLink, LogsView},
     format,
     ui::{components::states, text::wrap, theme::Theme},
 };
@@ -104,6 +104,21 @@ pub fn line(entry: &LogEntry, row: usize, text: String, theme: &Theme) -> Line<'
     ])
 }
 
+/// The right side of the title: whether the stream is connected, and else
+/// whether the view is paused. Nothing claims live while a resubscription
+/// is under way.
+pub fn status(view: &LogsView, theme: &Theme) -> Span<'static> {
+    match view.link {
+        LogLink::Down => Span::styled(" ○ 未连接 ", Style::new().fg(theme.error)),
+        LogLink::Resubscribing => Span::styled(" ◌ 连接中 ", Style::new().fg(theme.muted)),
+        LogLink::Live if view.paused => Span::styled(
+            format!(" ⏸ 已暂停 · 新增 {} 条 ", view.arrived()),
+            Style::new().fg(theme.warning),
+        ),
+        LogLink::Live => Span::styled(" ● 实时 ", Style::new().fg(theme.success)),
+    }
+}
+
 /// The logs page: one panel with the log, newest at the bottom.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
@@ -115,16 +130,6 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let filter = view.filter.value();
     let shown = view.shown_count();
 
-    let status = if !view.live {
-        Span::styled(" ○ 未连接 ", Style::new().fg(theme.error))
-    } else if view.paused {
-        Span::styled(
-            format!(" ⏸ 已暂停 · 新增 {} 条 ", view.arrived()),
-            Style::new().fg(theme.warning),
-        )
-    } else {
-        Span::styled(" ● 实时 ", Style::new().fg(theme.success))
-    };
     let count = if filter.is_empty() {
         format!(" · {} ", view.entries.len())
     } else {
@@ -148,7 +153,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(count, muted),
         ]))
-        .title(Line::from(status).right_aligned());
+        .title(Line::from(status(view, &theme)).right_aligned());
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
