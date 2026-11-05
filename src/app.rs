@@ -141,7 +141,7 @@ pub enum Sort {
     /// The order of the configuration.
     #[default]
     Default,
-    /// Fastest first; nodes without a result go last.
+    /// Fastest first, then timed out, failed and untested nodes.
     Delay,
     Name,
 }
@@ -635,7 +635,9 @@ impl App {
                     .and_then(Proxy::delay)
                 {
                     Some(Delay::Millis(millis)) => (0, millis),
-                    _ => (1, 0),
+                    Some(Delay::Timeout) => (1, 0),
+                    Some(Delay::Failed) => (2, 0),
+                    None => (3, 0),
                 }
             }),
         }
