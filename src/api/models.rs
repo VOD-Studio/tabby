@@ -154,4 +154,33 @@ mod tests {
         assert_eq!(configs.mode, "rule");
         assert!(configs.tun.is_none());
     }
+
+    fn group_names(proxies: &Proxies) -> Vec<&str> {
+        proxies.groups().map(|group| group.name.as_str()).collect()
+    }
+
+    #[test]
+    fn mihomo_groups_follow_configuration_order() {
+        let proxies: Proxies =
+            serde_json::from_str(include_str!("../../tests/fixtures/mihomo_proxies.json")).unwrap();
+        // The JSON object is alphabetical; the order comes from GLOBAL.all.
+        assert_eq!(
+            group_names(&proxies),
+            ["节点选择", "自动选择", "故障转移", "负载均衡", "GLOBAL"]
+        );
+        let selector = proxies.groups().next().unwrap();
+        let members = selector.all.as_ref().unwrap();
+        assert!(members.iter().any(|name| name == "a/b#c%d e?f"));
+        assert!(members.iter().any(|name| name == "🚀 emoji 节点"));
+    }
+
+    #[test]
+    fn clash_sample_parses_with_fewer_fields() {
+        let proxies: Proxies =
+            serde_json::from_str(include_str!("../../tests/fixtures/clash_proxies.json")).unwrap();
+        assert_eq!(
+            group_names(&proxies),
+            ["节点选择", "自动选择", "故障转移", "负载均衡", "GLOBAL"]
+        );
+    }
 }

@@ -1,0 +1,429 @@
+{
+    "proxies": {
+        "COMPATIBLE": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "1f53104f-836d-4d37-a4a3-ab344c22a480",
+            "interface": "",
+            "mptcp": false,
+            "name": "COMPATIBLE",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Compatible",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "DIRECT": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "b3f811f3-7cae-4920-8878-2adfdf65f81e",
+            "interface": "",
+            "mptcp": false,
+            "name": "DIRECT",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Direct",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "GLOBAL": {
+            "alive": true,
+            "all": [
+                "DIRECT",
+                "REJECT",
+                "香港 01",
+                "日本 02",
+                "a/b#c%d e?f",
+                "🚀 emoji 节点",
+                "dead",
+                "节点选择",
+                "自动选择",
+                "故障转移",
+                "负载均衡"
+            ],
+            "dialer-proxy": "",
+            "emptyFallback": "COMPATIBLE",
+            "extra": {},
+            "hidden": false,
+            "history": [],
+            "icon": "",
+            "interface": "",
+            "mptcp": false,
+            "name": "GLOBAL",
+            "now": "DIRECT",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "testUrl": "",
+            "tfo": false,
+            "type": "Selector",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "PASS": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "00000000-0000-0000-0000-000000000000",
+            "interface": "",
+            "mptcp": false,
+            "name": "PASS",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Pass",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "PASS-RULE": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "00000000-0000-0000-0000-000000000000",
+            "interface": "",
+            "mptcp": false,
+            "name": "PASS-RULE",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "PassRule",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "REJECT": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "18027178-3e41-4a81-895f-81152c096b29",
+            "interface": "",
+            "mptcp": false,
+            "name": "REJECT",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Reject",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "REJECT-DROP": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "dd37f26b-2e00-4605-9ec9-a415b9de22fa",
+            "interface": "",
+            "mptcp": false,
+            "name": "REJECT-DROP",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "RejectDrop",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "a/b#c%d e?f": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "37b365dd-a4fe-4f65-86d4-b1f3764a569f",
+            "interface": "",
+            "mptcp": false,
+            "name": "a/b#c%d e?f",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Direct",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "dead": {
+            "alive": false,
+            "dialer-proxy": "",
+            "extra": {
+                "http://127.0.0.1:18100/generate_204": {
+                    "alive": false,
+                    "history": [
+                        {
+                            "time": "2026-11-05T13:27:43.951577832+08:00",
+                            "delay": 0
+                        }
+                    ]
+                }
+            },
+            "history": [
+                {
+                    "time": "2026-11-05T13:27:43.951577832+08:00",
+                    "delay": 0
+                }
+            ],
+            "id": "69c9a15a-c64e-4150-9598-f07b44ff7ef2",
+            "interface": "",
+            "mptcp": false,
+            "name": "dead",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Shadowsocks",
+            "udp": false,
+            "uot": false,
+            "xudp": false
+        },
+        "故障转移": {
+            "alive": true,
+            "all": [
+                "香港 01",
+                "日本 02"
+            ],
+            "dialer-proxy": "",
+            "emptyFallback": "COMPATIBLE",
+            "expectedStatus": "*",
+            "extra": {},
+            "fixed": "",
+            "hidden": false,
+            "history": [],
+            "icon": "",
+            "interface": "",
+            "mptcp": false,
+            "name": "故障转移",
+            "now": "香港 01",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "testUrl": "http://127.0.0.1:18100/generate_204",
+            "tfo": false,
+            "type": "Fallback",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "日本 02": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {
+                "http://127.0.0.1:18100/generate_204": {
+                    "alive": true,
+                    "history": [
+                        {
+                            "time": "2026-11-05T13:27:43.981988587+08:00",
+                            "delay": 30
+                        },
+                        {
+                            "time": "2026-11-05T13:27:44.072802684+08:00",
+                            "delay": 121
+                        },
+                        {
+                            "time": "2026-11-05T13:27:44.10305194+08:00",
+                            "delay": 151
+                        }
+                    ]
+                }
+            },
+            "history": [
+                {
+                    "time": "2026-11-05T13:27:43.981988587+08:00",
+                    "delay": 30
+                },
+                {
+                    "time": "2026-11-05T13:27:44.072802684+08:00",
+                    "delay": 121
+                },
+                {
+                    "time": "2026-11-05T13:27:44.10305194+08:00",
+                    "delay": 151
+                }
+            ],
+            "id": "dda5bbd5-4adf-45f0-ba29-424d3c8b3f2c",
+            "interface": "",
+            "mptcp": false,
+            "name": "日本 02",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Direct",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "自动选择": {
+            "alive": true,
+            "all": [
+                "香港 01",
+                "日本 02",
+                "dead"
+            ],
+            "dialer-proxy": "",
+            "emptyFallback": "COMPATIBLE",
+            "expectedStatus": "*",
+            "extra": {},
+            "fixed": "",
+            "hidden": false,
+            "history": [],
+            "icon": "",
+            "interface": "",
+            "mptcp": false,
+            "name": "自动选择",
+            "now": "日本 02",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "testUrl": "http://127.0.0.1:18100/generate_204",
+            "tfo": false,
+            "type": "URLTest",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "节点选择": {
+            "alive": true,
+            "all": [
+                "自动选择",
+                "故障转移",
+                "香港 01",
+                "日本 02",
+                "a/b#c%d e?f",
+                "🚀 emoji 节点",
+                "dead",
+                "DIRECT"
+            ],
+            "dialer-proxy": "",
+            "emptyFallback": "COMPATIBLE",
+            "extra": {},
+            "hidden": false,
+            "history": [],
+            "icon": "",
+            "interface": "",
+            "mptcp": false,
+            "name": "节点选择",
+            "now": "自动选择",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "testUrl": "",
+            "tfo": false,
+            "type": "Selector",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "负载均衡": {
+            "alive": true,
+            "all": [
+                "香港 01",
+                "日本 02"
+            ],
+            "dialer-proxy": "",
+            "emptyFallback": "COMPATIBLE",
+            "expectedStatus": "*",
+            "extra": {},
+            "hidden": false,
+            "history": [],
+            "icon": "",
+            "interface": "",
+            "mptcp": false,
+            "name": "负载均衡",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "testUrl": "http://127.0.0.1:18100/generate_204",
+            "tfo": false,
+            "type": "LoadBalance",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "香港 01": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {
+                "http://127.0.0.1:18100/generate_204": {
+                    "alive": true,
+                    "history": [
+                        {
+                            "time": "2026-11-05T13:27:44.012265732+08:00",
+                            "delay": 61
+                        },
+                        {
+                            "time": "2026-11-05T13:27:44.042555912+08:00",
+                            "delay": 91
+                        },
+                        {
+                            "time": "2026-11-05T13:27:44.133482626+08:00",
+                            "delay": 181
+                        }
+                    ]
+                }
+            },
+            "history": [
+                {
+                    "time": "2026-11-05T13:27:44.012265732+08:00",
+                    "delay": 61
+                },
+                {
+                    "time": "2026-11-05T13:27:44.042555912+08:00",
+                    "delay": 91
+                },
+                {
+                    "time": "2026-11-05T13:27:44.133482626+08:00",
+                    "delay": 181
+                }
+            ],
+            "id": "258b032c-c76f-449a-8018-6ed9c5785fde",
+            "interface": "",
+            "mptcp": false,
+            "name": "香港 01",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Direct",
+            "udp": true,
+            "uot": false,
+            "xudp": false
+        },
+        "🚀 emoji 节点": {
+            "alive": true,
+            "dialer-proxy": "",
+            "extra": {},
+            "history": [],
+            "id": "d7a9305f-7ec4-4aeb-bbf0-9eb33abbf857",
+            "interface": "",
+            "mptcp": false,
+            "name": "🚀 emoji 节点",
+            "provider-name": "",
+            "routing-mark": 0,
+            "smux": false,
+            "tfo": false,
+            "type": "Shadowsocks",
+            "udp": false,
+            "uot": false,
+            "xudp": false
+        }
+    }
+}

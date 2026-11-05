@@ -1,0 +1,166 @@
+{
+    "proxies": {
+        "DIRECT": {
+            "alive": true,
+            "history": [],
+            "name": "DIRECT",
+            "type": "Direct",
+            "udp": true
+        },
+        "GLOBAL": {
+            "alive": true,
+            "all": [
+                "DIRECT",
+                "REJECT",
+                "香港 01",
+                "日本 02",
+                "a/b#c%d e?f",
+                "🚀 emoji 节点",
+                "dead",
+                "节点选择",
+                "自动选择",
+                "故障转移",
+                "负载均衡"
+            ],
+            "history": [],
+            "name": "GLOBAL",
+            "now": "DIRECT",
+            "type": "Selector",
+            "udp": true
+        },
+        "REJECT": {
+            "alive": true,
+            "history": [],
+            "name": "REJECT",
+            "type": "Reject",
+            "udp": true
+        },
+        "a/b#c%d e?f": {
+            "alive": true,
+            "history": [],
+            "name": "a/b#c%d e?f",
+            "type": "Shadowsocks",
+            "udp": false
+        },
+        "dead": {
+            "alive": false,
+            "history": [
+                {
+                    "time": "2026-11-05T13:27:50.466489597+08:00",
+                    "delay": 0,
+                    "meanDelay": 0
+                }
+            ],
+            "name": "dead",
+            "type": "Shadowsocks",
+            "udp": false
+        },
+        "故障转移": {
+            "alive": true,
+            "all": [
+                "香港 01",
+                "日本 02"
+            ],
+            "history": [],
+            "name": "故障转移",
+            "now": "香港 01",
+            "type": "Fallback",
+            "udp": true
+        },
+        "日本 02": {
+            "alive": false,
+            "history": [
+                {
+                    "time": "2026-11-05T13:27:50.46643035+08:00",
+                    "delay": 0,
+                    "meanDelay": 0
+                },
+                {
+                    "time": "2026-11-05T13:27:50.46648027+08:00",
+                    "delay": 0,
+                    "meanDelay": 0
+                },
+                {
+                    "time": "2026-11-05T13:27:50.466495678+08:00",
+                    "delay": 0,
+                    "meanDelay": 0
+                }
+            ],
+            "name": "日本 02",
+            "type": "Shadowsocks",
+            "udp": false
+        },
+        "自动选择": {
+            "alive": true,
+            "all": [
+                "香港 01",
+                "日本 02",
+                "dead"
+            ],
+            "history": [],
+            "name": "自动选择",
+            "now": "香港 01",
+            "type": "URLTest",
+            "udp": true
+        },
+        "节点选择": {
+            "alive": true,
+            "all": [
+                "自动选择",
+                "故障转移",
+                "香港 01",
+                "日本 02",
+                "a/b#c%d e?f",
+                "🚀 emoji 节点",
+                "dead",
+                "DIRECT"
+            ],
+            "history": [],
+            "name": "节点选择",
+            "now": "自动选择",
+            "type": "Selector",
+            "udp": true
+        },
+        "负载均衡": {
+            "alive": true,
+            "all": [
+                "香港 01",
+                "日本 02"
+            ],
+            "history": [],
+            "name": "负载均衡",
+            "type": "LoadBalance",
+            "udp": true
+        },
+        "香港 01": {
+            "alive": false,
+            "history": [
+                {
+                    "time": "2026-11-05T13:27:50.466416515+08:00",
+                    "delay": 0,
+                    "meanDelay": 0
+                },
+                {
+                    "time": "2026-11-05T13:27:50.466440478+08:00",
+                    "delay": 0,
+                    "meanDelay": 0
+                },
+                {
+                    "time": "2026-11-05T13:27:50.466533006+08:00",
+                    "delay": 0,
+                    "meanDelay": 0
+                }
+            ],
+            "name": "香港 01",
+            "type": "Shadowsocks",
+            "udp": true
+        },
+        "🚀 emoji 节点": {
+            "alive": true,
+            "history": [],
+            "name": "🚀 emoji 节点",
+            "type": "Shadowsocks",
+            "udp": false
+        }
+    }
+}
