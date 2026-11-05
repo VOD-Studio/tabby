@@ -43,11 +43,16 @@ async fn main() -> Result<()> {
     );
     let client = ApiClient::new(&settings.url, settings.secret.as_deref())?;
     let (msg_tx, msg_rx) = mpsc::channel(event::MSG_BUFFER);
-    let mut app = App::new(settings, client, msg_tx);
-    app.start();
 
     let mut terminal = ratatui::init();
-    let result = event::run(&mut terminal, &mut app, msg_rx).await;
+    let result = match terminal.size() {
+        Ok(size) => {
+            let mut app = App::new(settings, client, msg_tx, size);
+            app.start();
+            event::run(&mut terminal, &mut app, msg_rx).await
+        }
+        Err(err) => Err(err.into()),
+    };
     ratatui::restore();
     result
 }

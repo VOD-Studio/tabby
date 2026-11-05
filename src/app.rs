@@ -1,10 +1,10 @@
 use std::{
-    cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use ratatui::layout::{Rect, Size};
 use tokio::sync::mpsc;
 use tui_input::{Input, backend::crossterm::EventHandler};
 
@@ -16,7 +16,7 @@ use crate::{
         models::{Configs, CoreKind, GLOBAL, Proxies, Proxy, Version},
     },
     config::Settings,
-    ui::{scroll::Scroll, text::describe, theme::Theme},
+    ui::{proxies, regions, scroll::Scroll, text::describe, theme::Theme},
 };
 
 /// The seven top-level pages, in tab order.
@@ -73,12 +73,10 @@ pub enum Move {
     HalfDown,
 }
 
-/// Rows covered by half a page (`Ctrl+u` / `Ctrl+d`).
-const HALF_PAGE: usize = 10;
-
 impl Move {
-    /// The cursor position after this move in a list of `len` items.
-    fn apply(self, cursor: usize, len: usize) -> usize {
+    /// The cursor position after this move in a list of `len` items; a half
+    /// page is `half` items.
+    fn apply(self, cursor: usize, len: usize, half: usize) -> usize {
         let last = len.saturating_sub(1);
         let cursor = cursor.min(last);
         match self {
@@ -87,27 +85,43 @@ impl Move {
             Self::Left | Self::Right => cursor,
             Self::Top => 0,
             Self::Bottom => last,
-            Self::HalfUp => cursor.saturating_sub(HALF_PAGE),
-            Self::HalfDown => (cursor + HALF_PAGE).min(last),
+            Self::HalfUp => cursor.saturating_sub(half),
+            Self::HalfDown => (cursor + half).min(last),
         }
     }
 
     /// The cursor position after this move in a grid of `len` cards laid out
-    /// `columns` per row, filled row by row. Moves stay inside the row they
-    /// belong to; `Down` from above a short last row lands on its last card
-    /// when that column is empty.
-    fn apply_grid(self, cursor: usize, len: usize, columns: usize) -> usize {
+    /// `columns` per row, filled row by row; a half page is `half_rows` rows.
+    /// Left and right stay inside their row. Vertical moves keep the column;
+    /// moving down past a short last row lands on the same column of that
+    /// row, or on its last card when that column is empty.
+    fn apply_grid(self, cursor: usize, len: usize, columns: usize, half_rows: usize) -> usize {
         let last = len.saturating_sub(1);
         let cursor = cursor.min(last);
         let columns = columns.max(1);
+        let up = |rows: usize| {
+            cursor
+                .checked_sub(rows * columns)
+                .unwrap_or(cursor % columns)
+        };
+        let down = |rows: usize| {
+            let target = cursor + rows * columns;
+            if target <= last {
+                target
+            } else {
+                (last / columns * columns + cursor % columns).min(last)
+            }
+        };
         match self {
-            Self::Up if cursor >= columns => cursor - columns,
-            Self::Down if cursor + columns <= last => cursor + columns,
-            Self::Down if cursor / columns < last / columns => last,
+            Self::Up => up(1),
+            Self::Down => down(1),
+            Self::HalfUp => up(half_rows),
+            Self::HalfDown => down(half_rows),
             Self::Left if !cursor.is_multiple_of(columns) => cursor - 1,
             Self::Right if !(cursor + 1).is_multiple_of(columns) && cursor < last => cursor + 1,
-            Self::Up | Self::Down | Self::Left | Self::Right => cursor,
-            Self::Top | Self::Bottom | Self::HalfUp | Self::HalfDown => self.apply(cursor, len),
+            Self::Left | Self::Right => cursor,
+            Self::Top => 0,
+            Self::Bottom => last,
         }
     }
 }
@@ -157,16 +171,14 @@ pub struct ProxiesView {
     pub filter: Input,
     /// The filter box has the keyboard.
     pub typing: bool,
-    /// Cards per row of the node grid, as last drawn. Navigation needs it
-    /// but only the layout knows it.
-    pub columns: Cell<usize>,
 }
 
 /// A user intent, derived from a terminal event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
     Quit,
-    Resize,
+    /// The terminal changed size.
+    Resize(Size),
     SelectPage(Page),
     NextPage,
     PrevPage,
@@ -231,7 +243,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                     _ => Action::FilterInput(*key),
                 })
             }
-            Event::Resize(..) => Some(Action::Resize),
+            Event::Resize(width, height) => Some(Action::Resize(Size::new(*width, *height))),
             _ => None,
         };
     }
@@ -267,7 +279,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 _ => None,
             }
         }
-        Event::Resize(..) => Some(Action::Resize),
+        Event::Resize(width, height) => Some(Action::Resize(Size::new(*width, *height))),
         _ => None,
     }
 }
@@ -340,11 +352,18 @@ pub struct App {
     /// Set by `r` until the next `/version` reply, which then reports success.
     refreshing: bool,
     should_quit: bool,
+    /// The terminal size, from the start and every resize event.
+    size: Size,
     dirty: bool,
 }
 
 impl App {
-    pub fn new(settings: Settings, client: ApiClient, msg_tx: mpsc::Sender<Msg>) -> Self {
+    pub fn new(
+        settings: Settings,
+        client: ApiClient,
+        msg_tx: mpsc::Sender<Msg>,
+        size: Size,
+    ) -> Self {
         Self {
             theme: settings.theme.into(),
             settings,
@@ -362,6 +381,7 @@ impl App {
             reconnect: None,
             refreshing: false,
             should_quit: false,
+            size,
             dirty: false,
         }
     }
@@ -389,7 +409,10 @@ impl App {
     pub fn update(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
-            Action::Resize => self.dirty = true,
+            Action::Resize(size) => {
+                self.size = size;
+                self.dirty = true;
+            }
             Action::ToggleHelp => {
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
@@ -481,25 +504,35 @@ impl App {
             }
             Pane::Groups => {
                 let len = self.visible_groups().count();
+                let half = (self.proxies_fit().groups / 2).max(1);
                 let view = &mut self.proxies_view;
-                let group = movement.apply(view.group, len);
+                let group = movement.apply(view.group, len, half);
                 if group != view.group {
                     view.group = group;
                     view.node = None;
                 }
             }
             Pane::Nodes => {
-                let columns = self.proxies_view.columns.get().max(1);
+                let fit = self.proxies_fit();
                 let current = self.node_cursor();
-                if movement == Move::Left && current.is_multiple_of(columns) {
+                if movement == Move::Left && current.is_multiple_of(fit.columns) {
                     self.proxies_view.focus = Pane::Groups;
                 } else {
                     let len = self.visible_nodes().len();
-                    self.proxies_view.node = Some(movement.apply_grid(current, len, columns));
+                    let half_rows = (fit.rows / 2).max(1);
+                    self.proxies_view.node =
+                        Some(movement.apply_grid(current, len, fit.columns, half_rows));
                 }
             }
         }
         self.dirty = true;
+    }
+
+    /// How much of the proxies page fits in the terminal, laid out by the
+    /// same functions that draw it.
+    fn proxies_fit(&self) -> proxies::Fit {
+        let screen = Rect::from(self.size);
+        proxies::fit(regions(screen, self.reconnect.is_some()).body)
     }
 
     /// Drops the node filter and gives the keyboard back.
@@ -866,8 +899,9 @@ mod tests {
     const LEN: usize = 10;
     const COLUMNS: usize = 3;
 
+    /// Half a page is two rows.
     fn grid(movement: Move, cursor: usize) -> usize {
-        movement.apply_grid(cursor, LEN, COLUMNS)
+        movement.apply_grid(cursor, LEN, COLUMNS, 2)
     }
 
     #[test]
@@ -902,6 +936,28 @@ mod tests {
 
     #[test]
     fn right_stops_at_the_last_card_of_a_partial_row() {
-        assert_eq!(Move::Right.apply_grid(7, 8, COLUMNS), 7);
+        assert_eq!(Move::Right.apply_grid(7, 8, COLUMNS, 1), 7);
+    }
+
+    #[test]
+    fn half_page_moves_whole_rows_and_keeps_the_column() {
+        assert_eq!(grid(Move::HalfDown, 1), 7);
+        assert_eq!(grid(Move::HalfUp, 7), 1);
+    }
+
+    #[test]
+    fn half_page_clamps_to_the_grid() {
+        // Two rows down from row 2 overshoots: same rule as `Down`.
+        assert_eq!(grid(Move::HalfDown, 5), 9);
+        assert_eq!(grid(Move::HalfDown, 9), 9);
+        assert_eq!(grid(Move::HalfUp, 4), 1);
+        assert_eq!(grid(Move::HalfUp, 2), 2);
+    }
+
+    #[test]
+    fn list_half_page_is_the_given_height() {
+        assert_eq!(Move::HalfDown.apply(2, 30, 4), 6);
+        assert_eq!(Move::HalfDown.apply(28, 30, 4), 29);
+        assert_eq!(Move::HalfUp.apply(2, 30, 4), 0);
     }
 }

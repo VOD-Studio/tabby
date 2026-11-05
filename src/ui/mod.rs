@@ -17,27 +17,51 @@ use crate::{
     app::{App, Overlay, Page},
 };
 
-pub fn draw(frame: &mut Frame, app: &App) {
+/// The bands the screen is split into. Drawing and cursor paging both read
+/// this, so the app's idea of what fits is what is drawn.
+pub struct Regions {
+    header: Rect,
+    tabs: Rect,
+    /// The reconnect banner, while there is one.
+    banner: Option<Rect>,
+    /// Where the page draws.
+    pub body: Rect,
+    footer: Rect,
+}
+
+pub fn regions(screen: Rect, reconnecting: bool) -> Regions {
     let [header, tabs, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Fill(1),
         Constraint::Length(2),
     ])
-    .areas(frame.area());
-    components::header::render(frame, header, app);
-    components::tabs::render(frame, tabs, app);
-    let body = match &app.reconnect {
-        Some(reconnect) => {
-            let [banner, rest] =
-                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
-            components::banner::render(frame, banner, app, reconnect);
-            rest
-        }
-        None => body,
+    .areas(screen);
+    let (banner, body) = if reconnecting {
+        let [banner, body] =
+            Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
+        (Some(banner), body)
+    } else {
+        (None, body)
     };
-    draw_page(frame, body, app);
-    components::footer::render(frame, footer, app);
+    Regions {
+        header,
+        tabs,
+        banner,
+        body,
+        footer,
+    }
+}
+
+pub fn draw(frame: &mut Frame, app: &App) {
+    let regions = regions(frame.area(), app.reconnect.is_some());
+    components::header::render(frame, regions.header, app);
+    components::tabs::render(frame, regions.tabs, app);
+    if let (Some(banner), Some(reconnect)) = (regions.banner, &app.reconnect) {
+        components::banner::render(frame, banner, app, reconnect);
+    }
+    draw_page(frame, regions.body, app);
+    components::footer::render(frame, regions.footer, app);
     match app.overlay {
         Some(Overlay::Help) => components::help::render(frame, frame.area(), app),
         None => {}

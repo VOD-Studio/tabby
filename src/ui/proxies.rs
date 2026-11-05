@@ -20,6 +20,51 @@ const GROUPS_WIDTH: u16 = 28;
 /// Rows one group takes in the list: name line and current-node line.
 const GROUP_ROWS: u16 = 2;
 
+/// The group list and the node grid, side by side.
+fn panes(area: Rect) -> [Rect; 2] {
+    Layout::horizontal([Constraint::Length(GROUPS_WIDTH), Constraint::Fill(1)]).areas(area)
+}
+
+/// What a panel leaves for its content, whatever its title.
+fn panel_inner(area: Rect) -> Rect {
+    Block::bordered().inner(area)
+}
+
+fn group_capacity(inner: Rect) -> usize {
+    usize::from(inner.height / GROUP_ROWS)
+}
+
+/// Cards per row in a node panel `width` columns wide.
+fn grid_columns(width: u16) -> u16 {
+    (width / CARD_MIN_WIDTH).clamp(1, MAX_COLUMNS)
+}
+
+fn grid_rows(inner: Rect) -> usize {
+    usize::from(inner.height / CARD_ROWS)
+}
+
+/// How much of the page fits on screen, for paging the cursor.
+#[derive(Debug, Clone, Copy)]
+pub struct Fit {
+    /// Groups visible in the list.
+    pub groups: usize,
+    /// Cards per row.
+    pub columns: usize,
+    /// Card rows visible in the grid.
+    pub rows: usize,
+}
+
+/// Measures the page as [`render`] will lay it out in `body`.
+pub fn fit(body: Rect) -> Fit {
+    let [groups, nodes] = panes(body);
+    let nodes = panel_inner(nodes);
+    Fit {
+        groups: group_capacity(panel_inner(groups)),
+        columns: usize::from(grid_columns(nodes.width)),
+        rows: grid_rows(nodes),
+    }
+}
+
 /// The proxies page: group list on the left, the selected group's nodes on the
 /// right.
 pub fn render(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies) {
@@ -30,8 +75,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies) {
     }
     let selected = app.proxies_view.group.min(groups.len() - 1);
 
-    let [left, right] =
-        Layout::horizontal([Constraint::Length(GROUPS_WIDTH), Constraint::Fill(1)]).areas(area);
+    let [left, right] = panes(area);
     render_groups(frame, left, app, proxies, &groups, selected);
     render_nodes(frame, right, app, proxies, groups[selected]);
 }
@@ -68,10 +112,10 @@ fn render_groups(
         Span::styled(format!("  {} ", groups.len()), Style::new().fg(theme.muted)),
     ]);
     let block = panel(app, focused, title);
-    let inner = block.inner(area);
+    let inner = panel_inner(area);
     frame.render_widget(block, area);
 
-    let capacity = usize::from(inner.height / GROUP_ROWS);
+    let capacity = group_capacity(inner);
     let window = app
         .proxies_view
         .group_scroll
@@ -198,7 +242,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
             Span::styled(details, Style::new().fg(theme.muted)),
         ]),
     );
-    let inner = block.inner(area);
+    let inner = panel_inner(area);
     if members.is_empty() {
         frame.render_widget(block, area);
         if total == 0 {
@@ -215,17 +259,14 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
         return;
     }
 
-    let columns = (inner.width / CARD_MIN_WIDTH).clamp(1, MAX_COLUMNS);
+    let columns = grid_columns(inner.width);
     let card_width = inner.width / columns;
     let columns = usize::from(columns);
-    view.columns.set(columns);
     let total_rows = members.len().div_ceil(columns);
     let cursor = app.node_cursor();
-    let rows = view.node_scroll.window(
-        cursor / columns,
-        total_rows,
-        usize::from(inner.height / CARD_ROWS),
-    );
+    let rows = view
+        .node_scroll
+        .window(cursor / columns, total_rows, grid_rows(inner));
 
     let first = rows.start * columns + 1;
     let last = (rows.end * columns).min(members.len());
