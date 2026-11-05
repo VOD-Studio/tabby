@@ -34,10 +34,17 @@ pub enum ThemeName {
 pub struct Config {
     default: Option<String>,
     theme: Option<ThemeName>,
-    delay_url: Option<String>,
-    /// Milliseconds.
-    delay_timeout: Option<u32>,
+    delay: DelayConfig,
     profiles: BTreeMap<String, Profile>,
+}
+
+/// The `[delay]` table.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct DelayConfig {
+    url: Option<String>,
+    /// Milliseconds.
+    timeout_ms: Option<u32>,
 }
 
 /// One External Controller endpoint.
@@ -120,11 +127,12 @@ impl Config {
                 .map(str::to_owned),
             theme: overrides.theme.or(self.theme).unwrap_or_default(),
             delay_url: self
-                .delay_url
+                .delay
+                .url
                 .clone()
                 .filter(|url| !url.is_empty())
                 .unwrap_or_else(|| DEFAULT_DELAY_URL.to_owned()),
-            delay_timeout_ms: self.delay_timeout.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS),
+            delay_timeout_ms: self.delay.timeout_ms.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS),
         })
     }
 }
@@ -140,8 +148,10 @@ mod tests {
     const FILE: &str = r#"
 default = "local"
 theme = "tokyo-night"
-delay_url = "http://delay.test/204"
-delay_timeout = 2500
+
+[delay]
+url = "http://delay.test/204"
+timeout_ms = 2500
 
 [profiles.local]
 url = "http://local:9090"
