@@ -60,8 +60,8 @@ pub struct App {
 impl App {
     pub fn new(settings: Settings, client: ApiClient, msg_tx: mpsc::Sender<Msg>) -> Self {
         Self {
+            theme: settings.theme.into(),
             settings,
-            theme: Theme::TERMINAL,
             client,
             msg_tx,
             version: None,
