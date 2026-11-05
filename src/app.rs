@@ -475,14 +475,43 @@ impl App {
         }
     }
 
-    /// Groups the proxies page lists: `GLOBAL` only counts in global mode.
+    /// Keeps the group cursor sensible when the mode change added or removed
+    /// `GLOBAL` at the head of the list: entering global mode lands on it,
+    /// leaving stays on the group that was selected.
+    fn follow_mode_change(&mut self, was_global: bool, selected: Option<String>) {
+        let group = match (was_global, self.is_global_mode()) {
+            (false, true) => 0,
+            (true, false) => selected
+                .and_then(|name| self.visible_groups().position(|group| group.name == name))
+                .unwrap_or(0),
+            _ => return,
+        };
+        self.proxies_view.group = group;
+        // The node cursor indexed the previous group's members.
+        self.proxies_view.node = None;
+    }
+
+    pub fn is_global_mode(&self) -> bool {
+        matches!(&self.configs, Some(Ok(configs)) if configs.mode == "global")
+    }
+
+    /// Groups the proxies page lists. `GLOBAL` only counts in global mode,
+    /// where it leads; the kernel puts it last.
     pub fn visible_groups(&self) -> impl Iterator<Item = &Proxy> {
-        let global_mode = matches!(&self.configs, Some(Ok(configs)) if configs.mode == "global");
-        self.proxies
-            .iter()
-            .filter_map(|proxies| proxies.as_ref().ok())
-            .flat_map(Proxies::groups)
-            .filter(move |group| global_mode || group.name != GLOBAL)
+        let proxies = self
+            .proxies
+            .as_ref()
+            .and_then(|proxies| proxies.as_ref().ok());
+        let global = proxies
+            .filter(|_| self.is_global_mode())
+            .and_then(|proxies| proxies.get(GLOBAL))
+            .filter(|global| global.all.is_some());
+        global.into_iter().chain(
+            proxies
+                .into_iter()
+                .flat_map(Proxies::groups)
+                .filter(|group| group.name != GLOBAL),
+        )
     }
 
     /// The group the cursor is on.
@@ -654,7 +683,10 @@ impl App {
             }
             Msg::Configs(result) => {
                 self.note_failure(&result);
+                let was_global = self.is_global_mode();
+                let selected = self.selected_group().map(|group| group.name.clone());
                 self.configs = Some(result);
+                self.follow_mode_change(was_global, selected);
             }
             Msg::Proxies(result) => {
                 self.note_failure(&result);
@@ -1067,5 +1099,68 @@ mod tests {
                 .all(|m| delay_of(&app, m) == Some(Delay::Failed))
         );
         assert!(app.toasts.is_empty());
+    }
+
+    fn set_mode(app: &mut App, mode: &str) {
+        app.handle_msg(Msg::Configs(Ok(Configs {
+            mode: mode.to_owned(),
+            ..Configs::default()
+        })));
+    }
+
+    fn group_names(app: &App) -> Vec<&str> {
+        app.visible_groups()
+            .map(|group| group.name.as_str())
+            .collect()
+    }
+
+    #[test]
+    fn global_group_only_shows_in_global_mode_and_leads() {
+        let (mut app, _) = app_with_proxies();
+        let configured = ["节点选择", "自动选择", "故障转移", "负载均衡"];
+        for mode in ["rule", "direct"] {
+            set_mode(&mut app, mode);
+            assert_eq!(group_names(&app), configured);
+        }
+        set_mode(&mut app, "global");
+        assert_eq!(
+            group_names(&app),
+            ["GLOBAL", "节点选择", "自动选择", "故障转移", "负载均衡"]
+        );
+    }
+
+    #[test]
+    fn entering_global_mode_moves_the_cursor_to_global() {
+        let (mut app, _) = app_with_proxies();
+        set_mode(&mut app, "rule");
+        app.proxies_view.group = 2;
+        app.proxies_view.node = Some(3);
+        set_mode(&mut app, "global");
+        assert_eq!(app.selected_group().unwrap().name, GLOBAL);
+        assert_eq!(app.proxies_view.node, None);
+    }
+
+    #[test]
+    fn leaving_global_mode_keeps_the_selected_group() {
+        let (mut app, _) = app_with_proxies();
+        set_mode(&mut app, "global");
+        app.proxies_view.group = 3;
+        assert_eq!(app.selected_group().unwrap().name, "故障转移");
+        set_mode(&mut app, "rule");
+        assert_eq!(app.selected_group().unwrap().name, "故障转移");
+
+        // Standing on GLOBAL itself, the cursor falls back to the first group.
+        set_mode(&mut app, "global");
+        set_mode(&mut app, "rule");
+        assert_eq!(app.proxies_view.group, 0);
+    }
+
+    #[test]
+    fn refreshing_within_global_mode_leaves_the_cursor_alone() {
+        let (mut app, _) = app_with_proxies();
+        set_mode(&mut app, "global");
+        app.proxies_view.group = 3;
+        set_mode(&mut app, "global");
+        assert_eq!(app.proxies_view.group, 3);
     }
 }
