@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, io};
+use std::{
+    collections::BTreeMap,
+    fs, io,
+    path::{Path, PathBuf},
+};
 
 use clap::{Args, ValueEnum};
 use color_eyre::{
@@ -83,16 +87,76 @@ pub struct Settings {
     pub delay_timeout_ms: u32,
 }
 
+/// Where a connection the profile popup offers comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Origin {
+    /// A `[profiles.<name>]` table of `config.toml`.
+    Profile,
+    /// The `--url` / `--secret` overrides (or their variables) tabby was
+    /// started with.
+    Overrides,
+    /// No profile was chosen at start: the built-in address.
+    Default,
+}
+
+/// One connection the profile popup offers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Choice {
+    pub origin: Origin,
+    /// What the header calls the connection.
+    pub name: String,
+    pub url: String,
+    pub secret: Option<String>,
+}
+
+impl Choice {
+    /// What the popup and the switch toast call it.
+    pub fn label(&self) -> &str {
+        match self.origin {
+            Origin::Profile => &self.name,
+            Origin::Overrides => "启动参数指定",
+            Origin::Default => "默认地址",
+        }
+    }
+}
+
+/// The connections tabby can switch between at runtime.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Profiles {
+    /// The connection tabby started with first, when no profile describes
+    /// it as written; then every profile, by name.
+    pub choices: Vec<Choice>,
+    /// Index into `choices` of the connection in use.
+    pub current: usize,
+    /// `config.toml`, for the popup to point at when it defines no profile.
+    pub path: Option<PathBuf>,
+}
+
+impl Profiles {
+    /// Whether `config.toml` defines no profile to switch to.
+    pub fn is_empty(&self) -> bool {
+        !self
+            .choices
+            .iter()
+            .any(|choice| choice.origin == Origin::Profile)
+    }
+}
+
+/// Where `config.toml` lives; `None` when the home directory is unknown.
+pub fn path() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "tabby").map(|dirs| dirs.config_dir().join("config.toml"))
+}
+
 impl Config {
-    /// Loads `config.toml` from the platform config directory.
+    /// Loads `config.toml` from `path`.
     ///
-    /// A missing file (or an unknown home directory) yields the defaults.
-    pub fn load() -> Result<Self> {
-        let Some(dirs) = ProjectDirs::from("", "", "tabby") else {
+    /// A missing file (or no path, for an unknown home directory) yields
+    /// the defaults.
+    pub fn load(path: Option<&Path>) -> Result<Self> {
+        let Some(path) = path else {
             return Ok(Self::default());
         };
-        let path = dirs.config_dir().join("config.toml");
-        match fs::read_to_string(&path) {
+        match fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text)
                 .wrap_err_with(|| format!("invalid config file {}", path.display())),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
@@ -102,22 +166,29 @@ impl Config {
         }
     }
 
+    /// The profile `overrides` pick: `overrides.profile`, else the file's
+    /// `default`, else none.
+    fn chosen(&self, overrides: &Overrides) -> Result<Option<(&str, &Profile)>> {
+        let name = non_empty(overrides.profile.as_ref()).or(self.default.as_deref());
+        name.map(|name| {
+            self.profiles
+                .get_key_value(name)
+                .map(|(name, profile)| (name.as_str(), profile))
+                .ok_or_else(|| eyre!("profile `{name}` is not defined in config.toml"))
+        })
+        .transpose()
+    }
+
     /// Merges `overrides` over the file over the built-in defaults.
     ///
     /// The profile is `overrides.profile`, else the file's `default`, else none;
     /// an explicit `url` / `secret` override beats the profile's own value.
     /// An empty override (`TABBY_SECRET=`) counts as unset.
     pub fn resolve(&self, overrides: &Overrides) -> Result<Settings> {
-        let name = non_empty(overrides.profile.as_ref()).or(self.default.as_deref());
-        let profile = name
-            .map(|name| {
-                self.profiles
-                    .get(name)
-                    .ok_or_else(|| eyre!("profile `{name}` is not defined in config.toml"))
-            })
-            .transpose()?;
+        let chosen = self.chosen(overrides)?;
+        let profile = chosen.map(|(_, profile)| profile);
         Ok(Settings {
-            profile: name.unwrap_or(FALLBACK_PROFILE).to_owned(),
+            profile: chosen.map_or(FALLBACK_PROFILE, |(name, _)| name).to_owned(),
             url: non_empty(overrides.url.as_ref())
                 .or_else(|| profile.map(|p| p.url.as_str()))
                 .unwrap_or(DEFAULT_URL)
@@ -134,6 +205,50 @@ impl Config {
                 .unwrap_or_else(|| DEFAULT_DELAY_URL.to_owned()),
             delay_timeout_ms: self.delay.timeout_ms.unwrap_or(DEFAULT_DELAY_TIMEOUT_MS),
         })
+    }
+
+    /// What the profile popup offers, given the `settings` that
+    /// [`Config::resolve`] made of the same `overrides`.
+    ///
+    /// The overrides only shaped the connection tabby started with: a
+    /// profile switched to connects with its own url and secret. So that
+    /// first connection is offered on its own, ahead of the profiles,
+    /// whenever a `url` or `secret` override shaped it, or no profile did.
+    pub fn profiles(&self, overrides: &Overrides, settings: &Settings) -> Profiles {
+        // `resolve` has already failed on an unknown profile.
+        let chosen = self.chosen(overrides).ok().flatten().map(|(name, _)| name);
+        let overridden = non_empty(overrides.url.as_ref()).is_some()
+            || non_empty(overrides.secret.as_ref()).is_some();
+        let launch = match (overridden, chosen) {
+            (true, _) => Some(Origin::Overrides),
+            (false, None) => Some(Origin::Default),
+            (false, Some(_)) => None,
+        }
+        .map(|origin| Choice {
+            origin,
+            name: settings.profile.clone(),
+            url: settings.url.clone(),
+            secret: settings.secret.clone(),
+        });
+        let current = match (&launch, chosen) {
+            (None, Some(name)) => self.profiles.keys().position(|key| key == name),
+            _ => None,
+        }
+        .unwrap_or(0);
+        let choices = launch
+            .into_iter()
+            .chain(self.profiles.iter().map(|(name, profile)| Choice {
+                origin: Origin::Profile,
+                name: name.clone(),
+                url: profile.url.clone(),
+                secret: profile.secret.clone(),
+            }))
+            .collect();
+        Profiles {
+            choices,
+            current,
+            path: None,
+        }
     }
 }
 
@@ -237,5 +352,72 @@ url = "http://router:9090"
             ..Overrides::default()
         };
         assert!(file().resolve(&overrides).is_err());
+    }
+
+    fn offered(config: &Config, overrides: &Overrides) -> Profiles {
+        let settings = config.resolve(overrides).unwrap();
+        config.profiles(overrides, &settings)
+    }
+
+    fn urls(profiles: &Profiles) -> Vec<(Origin, &str, Option<&str>)> {
+        profiles
+            .choices
+            .iter()
+            .map(|choice| (choice.origin, choice.url.as_str(), choice.secret.as_deref()))
+            .collect()
+    }
+
+    #[test]
+    fn url_override_is_offered_apart_from_the_profiles_it_shadows() {
+        let overrides = Overrides {
+            url: Some("http://cli:1".into()),
+            secret: Some("cli-secret".into()),
+            ..Overrides::default()
+        };
+        let profiles = offered(&file(), &overrides);
+        assert_eq!(
+            urls(&profiles),
+            [
+                (Origin::Overrides, "http://cli:1", Some("cli-secret")),
+                // The profiles keep their own values: the override was for
+                // the start only.
+                (Origin::Profile, "http://local:9090", Some("file-secret")),
+                (Origin::Profile, "http://router:9090", None),
+            ]
+        );
+        assert_eq!(profiles.current, 0);
+    }
+
+    #[test]
+    fn a_connection_made_by_a_profile_alone_is_that_profile() {
+        let profiles = offered(&file(), &Overrides::default());
+        assert_eq!(profiles.choices.len(), 2);
+        assert_eq!(profiles.choices[profiles.current].name, "local");
+        let overrides = Overrides {
+            profile: Some("router".into()),
+            ..Overrides::default()
+        };
+        let profiles = offered(&file(), &overrides);
+        assert_eq!(profiles.choices[profiles.current].name, "router");
+    }
+
+    #[test]
+    fn the_built_in_address_is_not_mistaken_for_a_profile_named_default() {
+        let config: Config = toml::from_str(
+            r#"
+[profiles.default]
+url = "http://elsewhere:9090"
+"#,
+        )
+        .unwrap();
+        let profiles = offered(&config, &Overrides::default());
+        assert_eq!(
+            urls(&profiles),
+            [
+                (Origin::Default, DEFAULT_URL, None),
+                (Origin::Profile, "http://elsewhere:9090", None),
+            ]
+        );
+        assert_eq!(profiles.current, 0);
     }
 }

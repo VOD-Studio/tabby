@@ -10,7 +10,7 @@ use tokio::{
 };
 
 use crate::{
-    app::{App, Msg, action_for},
+    app::{App, Envelope, action_for},
     ui,
 };
 
@@ -28,7 +28,7 @@ pub const MSG_BUFFER: usize = 256;
 pub async fn run(
     terminal: &mut DefaultTerminal,
     app: &mut App,
-    mut msg_rx: mpsc::Receiver<Msg>,
+    mut msg_rx: mpsc::Receiver<Envelope>,
 ) -> Result<()> {
     let mut events = EventStream::new();
     let mut tick = interval(TICK);
@@ -43,7 +43,7 @@ pub async fn run(
                     terminal.draw(|frame| ui::draw(frame, app))?;
                 }
             }
-            Some(msg) = msg_rx.recv() => app.handle_msg(msg),
+            Some(envelope) = msg_rx.recv() => app.receive(envelope),
             event = events.next() => {
                 let Some(event) = event else { break };
                 if let Some(action) = action_for(&event?, app.page, app.typing()) {

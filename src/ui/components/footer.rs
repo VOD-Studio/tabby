@@ -42,6 +42,19 @@ fn confirm_hints(app: &App) -> Vec<Hint> {
     vec![hint("y", verb), hint("n/Esc", "取消")]
 }
 
+/// Keys while the profile popup is open; without a profile it only closes.
+fn profile_hints(app: &App) -> Vec<Hint> {
+    if app.profiles.is_empty() {
+        return vec![hint("Esc", "关闭"), hint("q", "退出")];
+    }
+    vec![
+        hint("Enter", "切换"),
+        hint("j/k", "移动"),
+        hint("Esc", "关闭"),
+        hint("q", "退出"),
+    ]
+}
+
 /// Keys while a port is being typed on the settings page.
 fn port_hints() -> Vec<Hint> {
     vec![hint("Enter", "确定"), hint("Esc", "取消")]
@@ -183,7 +196,12 @@ fn global_hints(page: Page) -> Vec<Hint> {
     if page == Page::Overview {
         hints.push(hint("m", "切换模式"));
     }
-    hints.extend([hint("r", "刷新"), hint("?", "帮助"), hint("q", "退出")]);
+    hints.extend([
+        hint("r", "刷新"),
+        hint("P", "配置"),
+        hint("?", "帮助"),
+        hint("q", "退出"),
+    ]);
     hints
 }
 
@@ -192,6 +210,7 @@ fn hints(app: &App) -> Vec<Hint> {
         Some(Overlay::Help) => help_hints(),
         Some(Overlay::Connection) => detail_hints(),
         Some(Overlay::Confirm) => confirm_hints(app),
+        Some(Overlay::Profiles) => profile_hints(app),
         None if app.page == Page::Settings && app.typing() => port_hints(),
         None => {
             let mut hints = page_hints(app);

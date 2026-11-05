@@ -23,7 +23,7 @@ use crate::{
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
-    config::Settings,
+    config::{Profiles, Settings},
     format::natural_cmp,
     ui::{
         connections,
@@ -1277,6 +1277,8 @@ pub enum Action {
     /// `Esc` in the input box: drop the filter, or the port being typed.
     FilterClear,
     ToggleHelp,
+    /// `P`: open the profile popup, or close it.
+    Profiles,
     /// `Esc`: closes the topmost overlay, or clears an applied filter.
     Dismiss,
 }
@@ -1349,6 +1351,44 @@ pub enum Msg {
         stream: Stream,
         event: StreamEvent,
     },
+}
+
+/// A [`Msg`] stamped with the connection it was sent for.
+#[derive(Debug)]
+pub struct Envelope {
+    /// The [`Outbox::epoch`] of the sender.
+    pub epoch: u64,
+    pub msg: Msg,
+}
+
+/// Where the background work for one connection reports: the app's
+/// channel, every message stamped with the epoch of that connection. A
+/// profile switch moves the app to the next epoch, and [`App::receive`]
+/// drops whatever the work for an earlier one still sends.
+#[derive(Debug, Clone)]
+pub struct Outbox {
+    epoch: u64,
+    tx: mpsc::Sender<Envelope>,
+}
+
+impl Outbox {
+    pub fn new(epoch: u64, tx: mpsc::Sender<Envelope>) -> Self {
+        Self { epoch, tx }
+    }
+
+    /// The outbox of the connection that replaces this one.
+    fn next(&self) -> Self {
+        Self::new(self.epoch + 1, self.tx.clone())
+    }
+
+    /// Delivers `msg`. `false` when the app has hung up.
+    pub async fn send(&self, msg: Msg) -> bool {
+        let envelope = Envelope {
+            epoch: self.epoch,
+            msg,
+        };
+        self.tx.send(envelope).await.is_ok()
+    }
 }
 
 /// A reply to a request of the providers page.
@@ -1447,6 +1487,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('y') => Some(Action::Accept),
                 KeyCode::Char('n') => Some(Action::Cancel),
                 KeyCode::Char('m') => Some(Action::CycleMode),
+                KeyCode::Char('P') => Some(Action::Profiles),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -1484,6 +1525,8 @@ pub enum Overlay {
     Connection,
     /// The question in [`App::pending`].
     Confirm,
+    /// The connections in [`App::profiles`] to switch between.
+    Profiles,
 }
 
 /// Which connections `X` closes.
@@ -1949,7 +1992,14 @@ pub struct App {
     pub theme: Theme,
     pub page: Page,
     client: ApiClient,
-    msg_tx: mpsc::Sender<Msg>,
+    /// Where background work reports, stamped with the current connection.
+    outbox: Outbox,
+    /// The connections `P` offers, and which one is in use.
+    pub profiles: Profiles,
+    /// Index into [`Profiles::choices`] of the row the profile popup's
+    /// cursor is on.
+    pub profile_cursor: usize,
+    pub profile_scroll: Scroll,
     pub version: Option<Result<Version, ApiError>>,
     pub configs: Option<Result<Configs, ApiError>>,
     pub proxies: Option<Result<Proxies, ApiError>>,
@@ -2035,16 +2085,32 @@ impl App {
     pub fn new(
         settings: Settings,
         client: ApiClient,
-        msg_tx: mpsc::Sender<Msg>,
+        msg_tx: mpsc::Sender<Envelope>,
         size: Size,
+        profiles: Profiles,
     ) -> Self {
-        let streams = Streams::new(&settings.url, settings.secret.as_deref(), msg_tx.clone());
+        Self::connect(settings, client, Outbox::new(0, msg_tx), size, profiles)
+    }
+
+    /// An app on the controller of `settings`, nothing loaded yet, its
+    /// background work reporting to `outbox`.
+    fn connect(
+        settings: Settings,
+        client: ApiClient,
+        outbox: Outbox,
+        size: Size,
+        profiles: Profiles,
+    ) -> Self {
+        let streams = Streams::new(&settings.url, settings.secret.as_deref(), outbox.clone());
         Self {
             theme: settings.theme.into(),
             settings,
             page: Page::Overview,
             client,
-            msg_tx,
+            outbox,
+            profile_cursor: profiles.current,
+            profiles,
+            profile_scroll: Scroll::default(),
             version: None,
             configs: None,
             proxies: None,
@@ -2190,10 +2256,10 @@ impl App {
         F: FnOnce(ApiClient) -> Fut,
         Fut: Future<Output = Msg> + Send + 'static,
     {
-        let tx = self.msg_tx.clone();
+        let outbox = self.outbox.clone();
         let msg = request(self.client.clone());
         tokio::spawn(async move {
-            let _ = tx.send(msg.await).await;
+            outbox.send(msg.await).await;
         });
     }
 
@@ -2207,6 +2273,7 @@ impl App {
                 self.dirty = true;
             }
             _ if self.overlay == Some(Overlay::Confirm) => self.answer(action),
+            _ if self.overlay == Some(Overlay::Profiles) => self.pick_profile(action),
             Action::ToggleHelp => {
                 // The connection popup is not swapped for the help.
                 self.overlay = match self.overlay {
@@ -2226,6 +2293,11 @@ impl App {
             }
             // Overlays are modal: everything else waits until they close.
             _ if self.overlay.is_some() => {}
+            Action::Profiles => {
+                self.profile_cursor = self.profiles.current;
+                self.overlay = Some(Overlay::Profiles);
+                self.dirty = true;
+            }
             Action::SelectPage(page) => self.set_page(page),
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
@@ -2874,9 +2946,76 @@ impl App {
         match self.overlay.take() {
             Some(Overlay::Connection) => self.connections_view.detail = None,
             Some(Overlay::Confirm) => self.pending = None,
-            Some(Overlay::Help) | None => {}
+            Some(Overlay::Help | Overlay::Profiles) | None => {}
         }
         self.dirty = true;
+    }
+
+    /// The profile popup answers to the cursor keys, `Enter`, `Esc` and
+    /// `P`; quitting and resizing are handled before it is asked. Without a
+    /// profile to offer it only explains how to add one, and only closes.
+    fn pick_profile(&mut self, action: Action) {
+        match action {
+            Action::Cursor(movement) if !self.profiles.is_empty() => {
+                let len = self.profiles.choices.len();
+                let half = (len / 2).max(1);
+                self.profile_cursor = movement.apply(self.profile_cursor, len, half);
+                self.dirty = true;
+            }
+            Action::Confirm if !self.profiles.is_empty() => {
+                self.close_overlay();
+                if self.profile_cursor != self.profiles.current {
+                    self.switch_profile(self.profile_cursor);
+                }
+            }
+            Action::Dismiss | Action::Profiles => self.close_overlay(),
+            _ => {}
+        }
+    }
+
+    /// Connects to the controller of choice `index` of [`App::profiles`]
+    /// in place of the current one.
+    ///
+    /// Everything learnt from the old controller goes, the way it came: the
+    /// app starts over on the new one as it does at launch. Only what is
+    /// the user's and not the controller's stays: the theme and the delay
+    /// test settings, the page, the orderings of the proxies and the
+    /// connections, and the level the log is subscribed at. The old
+    /// streams stop as their [`Streams`] is dropped; what they or the old
+    /// requests still send is stamped with the old epoch and dropped on
+    /// arrival.
+    fn switch_profile(&mut self, index: usize) {
+        let Some(choice) = self.profiles.choices.get(index) else {
+            return;
+        };
+        let label = choice.label().to_owned();
+        let client = match ApiClient::new(&choice.url, choice.secret.as_deref()) {
+            Ok(client) => client,
+            Err(err) => {
+                self.toast(ToastKind::Error, format!("无法切换到 {label}：{err}"));
+                return;
+            }
+        };
+        tracing::info!(profile = %choice.name, url = %choice.url, "switching profile");
+        let settings = Settings {
+            profile: choice.name.clone(),
+            url: choice.url.clone(),
+            secret: choice.secret.clone(),
+            ..self.settings.clone()
+        };
+        let mut profiles = std::mem::take(&mut self.profiles);
+        profiles.current = index;
+        let mut app = Self::connect(settings, client, self.outbox.next(), self.size, profiles);
+        app.proxies_view.sort = self.proxies_view.sort;
+        app.connections_view.sort = self.connections_view.sort;
+        app.logs_view.level = self.logs_view.level;
+        app.streams.set_log_level(self.logs_view.level);
+        let page = self.page;
+        *self = app;
+        self.start();
+        // The page loads what it loads on a first visit.
+        self.set_page(page);
+        self.toast(ToastKind::Success, format!("已切换到 {label}"));
     }
 
     /// `y`: closes the confirm dialog and does what it asked about.
@@ -3365,7 +3504,22 @@ impl App {
         }
     }
 
-    pub fn handle_msg(&mut self, msg: Msg) {
+    /// Applies a message from the background, unless it was sent for a
+    /// controller the app has since switched away from: a reply, a frame
+    /// or a stream going up or down there says nothing about the one in
+    /// use now.
+    pub fn receive(&mut self, envelope: Envelope) {
+        if envelope.epoch == self.outbox.epoch {
+            self.handle_msg(envelope.msg);
+        } else {
+            tracing::debug!(
+                epoch = envelope.epoch,
+                "dropped a message for a previous profile"
+            );
+        }
+    }
+
+    fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Version(result) => self.apply_version(result),
             // A reply older than one already applied would roll the mode back.
@@ -3960,11 +4114,11 @@ mod tests {
 
     /// An app on a controller nobody listens on, so requests it spawns fail
     /// fast instead of reaching a real kernel.
-    fn app_without_controller() -> (App, mpsc::Receiver<Msg>) {
+    fn app_without_controller() -> (App, mpsc::Receiver<Envelope>) {
         app_at("http://127.0.0.1:1")
     }
 
-    fn app_at(url: &str) -> (App, mpsc::Receiver<Msg>) {
+    fn app_at(url: &str) -> (App, mpsc::Receiver<Envelope>) {
         let (tx, rx) = mpsc::channel(16);
         let overrides = crate::config::Overrides {
             url: Some(url.to_owned()),
@@ -3974,7 +4128,14 @@ mod tests {
             .resolve(&overrides)
             .unwrap();
         let client = ApiClient::new(&settings.url, None).unwrap();
-        (App::new(settings, client, tx, Size::new(120, 40)), rx)
+        let app = App::new(
+            settings,
+            client,
+            tx,
+            Size::new(120, 40),
+            Profiles::default(),
+        );
+        (app, rx)
     }
 
     fn app_with(proxies: Proxies) -> App {
@@ -4637,10 +4798,13 @@ mod tests {
     /// on the channel. Dropping the app first stops its streams, so the
     /// channel closes once the requests are answered and nothing can still
     /// be on its way.
-    async fn requests_made(app: App, mut rx: mpsc::Receiver<Msg>) -> (usize, usize, usize, usize) {
+    async fn requests_made(
+        app: App,
+        mut rx: mpsc::Receiver<Envelope>,
+    ) -> (usize, usize, usize, usize) {
         drop(app);
         let (mut versions, mut configs, mut proxies, mut changes) = (0, 0, 0, 0);
-        while let Some(msg) = rx.recv().await {
+        while let Some(Envelope { msg, .. }) = rx.recv().await {
             match msg {
                 Msg::Version(_) => versions += 1,
                 Msg::Configs { .. } => configs += 1,
@@ -4821,7 +4985,7 @@ mod tests {
             app.page = page;
             app.logs_view.receive(log_entry(LogLevel::Info, "kept"));
             app.update(press('/', page, app.typing()).unwrap());
-            for key in ['p', 's', 'S', 'm', '5', 'l', 'c', 'u', 'U', 'h'] {
+            for key in ['p', 's', 'S', 'm', '5', 'l', 'c', 'u', 'U', 'h', 'P'] {
                 let action = press(key, page, app.typing());
                 assert_eq!(
                     action,
@@ -4833,7 +4997,7 @@ mod tests {
                 );
                 app.update(action.unwrap());
             }
-            assert_eq!(app.filter().unwrap().value(), "psSm5lcuUh", "{page:?}");
+            assert_eq!(app.filter().unwrap().value(), "psSm5lcuUhP", "{page:?}");
             assert_eq!(app.page, page);
             assert!(!app.connections_view.paused);
             let logs = &app.logs_view;
@@ -4940,7 +5104,7 @@ mod tests {
             set_mode(&mut app, current);
             app.update(Action::CycleMode);
             assert!(matches!(
-                rx.recv().await,
+                rx.recv().await.map(|envelope| envelope.msg),
                 Some(Msg::Changed { result: Ok(()), .. })
             ));
 
@@ -5578,10 +5742,10 @@ mod tests {
     /// The closes the app sent, from the replies they leave on the channel.
     /// Dropping the app first lets the channel close once they are
     /// answered.
-    async fn closes_sent(app: App, mut rx: mpsc::Receiver<Msg>) -> Vec<Sent> {
+    async fn closes_sent(app: App, mut rx: mpsc::Receiver<Envelope>) -> Vec<Sent> {
         drop(app);
         let mut sent = vec![];
-        while let Some(msg) = rx.recv().await {
+        while let Some(Envelope { msg, .. }) = rx.recv().await {
             match msg {
                 Msg::AllConnectionsClosed { .. } => sent.push(Sent::All),
                 Msg::ConnectionsClosed { results, .. } => {
@@ -5594,7 +5758,7 @@ mod tests {
     }
 
     /// Newest first: `a`, `b`, `c`, on the connections page.
-    fn three_connections() -> (App, mpsc::Receiver<Msg>) {
+    fn three_connections() -> (App, mpsc::Receiver<Envelope>) {
         let (mut app, rx) = app_without_controller();
         app.page = Page::Connections;
         connect(&mut app, Stream::Connections);
@@ -6045,7 +6209,7 @@ mod tests {
 
     /// On the providers page of a mihomo kernel, with these proxy and rule
     /// providers loaded.
-    fn providers_app(proxies: &[&str], rules: &[&str]) -> (App, mpsc::Receiver<Msg>) {
+    fn providers_app(proxies: &[&str], rules: &[&str]) -> (App, mpsc::Receiver<Envelope>) {
         let (mut app, rx) = app_without_controller();
         app.page = Page::Providers;
         app.version = Some(Ok(kernel(true)));
@@ -6097,10 +6261,10 @@ mod tests {
 
     /// The provider requests the app made, from the replies they leave on
     /// the channel, in no particular order.
-    async fn providers_sent(app: App, mut rx: mpsc::Receiver<Msg>) -> Vec<ProviderSent> {
+    async fn providers_sent(app: App, mut rx: mpsc::Receiver<Envelope>) -> Vec<ProviderSent> {
         drop(app);
         let mut sent = vec![];
-        while let Some(msg) = rx.recv().await {
+        while let Some(Envelope { msg, .. }) = rx.recv().await {
             sent.push(match msg {
                 Msg::Providers(ProviderMsg::Proxies { refetch, .. }) => {
                     ProviderSent::Proxies(refetch)
@@ -6399,7 +6563,7 @@ mod tests {
 
     /// On the settings page of a kernel (mihomo when `meta`) whose
     /// `/configs` replied `configs`.
-    fn settings_app(url: &str, meta: bool, configs: &str) -> (App, mpsc::Receiver<Msg>) {
+    fn settings_app(url: &str, meta: bool, configs: &str) -> (App, mpsc::Receiver<Envelope>) {
         let (mut app, rx) = app_at(url);
         app.page = Page::Settings;
         app.version = Some(Ok(kernel(meta)));
@@ -6598,7 +6762,10 @@ mod tests {
                 key_press(&mut app, KeyCode::Char(' '));
             }
             assert!(
-                matches!(rx.recv().await, Some(Msg::Changed { result: Ok(()), .. })),
+                matches!(
+                    rx.recv().await.map(|envelope| envelope.msg),
+                    Some(Msg::Changed { result: Ok(()), .. })
+                ),
                 "{setting:?}"
             );
         }
@@ -6672,5 +6839,244 @@ mod tests {
         key_press(&mut app, KeyCode::Enter);
         key_press(&mut app, KeyCode::Char(' '));
         assert_eq!(requests_made(app, rx).await, (0, 1, 0, 3));
+    }
+
+    /// Two profiles on ports nobody listens on, `a` the default.
+    const PROFILES: &str = r#"
+default = "a"
+
+[profiles.a]
+url = "http://127.0.0.1:1"
+secret = "a-secret"
+
+[profiles.b]
+url = "http://127.0.0.1:2"
+secret = "b-secret"
+"#;
+
+    /// An app started with `overrides` over [`PROFILES`].
+    fn profiles_app(overrides: &crate::config::Overrides) -> (App, mpsc::Receiver<Envelope>) {
+        let (tx, rx) = mpsc::channel(64);
+        let config: crate::config::Config = toml::from_str(PROFILES).unwrap();
+        let settings = config.resolve(overrides).unwrap();
+        let profiles = config.profiles(overrides, &settings);
+        let client = ApiClient::new(&settings.url, settings.secret.as_deref()).unwrap();
+        let app = App::new(settings, client, tx, Size::new(120, 40), profiles);
+        (app, rx)
+    }
+
+    /// `P`, then `Enter` on row `index` of the popup.
+    fn switch_to(app: &mut App, index: usize) {
+        key_press(app, KeyCode::Char('P'));
+        assert_eq!(app.overlay, Some(Overlay::Profiles));
+        key_press(app, KeyCode::Char('g'));
+        for _ in 0..index {
+            key_press(app, KeyCode::Char('j'));
+        }
+        key_press(app, KeyCode::Enter);
+        assert_eq!(app.overlay, None);
+    }
+
+    fn toast_texts(app: &App) -> Vec<&str> {
+        app.toasts.iter().map(|toast| toast.text.as_str()).collect()
+    }
+
+    /// One of every reply and stream event the app takes in.
+    fn every_kind_of_msg() -> Vec<Msg> {
+        let provider = ProviderRef {
+            kind: ProviderKind::Proxy,
+            name: "P".to_owned(),
+        };
+        let connections = ConnectionSnapshot {
+            upload_total: 1,
+            download_total: 2,
+            connections: vec![Connection::default()],
+        };
+        let stream = |stream, event| Msg::Stream { stream, event };
+        vec![
+            Msg::Version(Ok(kernel(true))),
+            // Each of these would raise the banner or toast.
+            Msg::Version(Err(ApiError::Timeout)),
+            Msg::Configs {
+                seq: 1,
+                refetch: false,
+                result: Err(http(500)),
+            },
+            Msg::Configs {
+                seq: 1,
+                refetch: false,
+                result: Ok(Configs::default()),
+            },
+            fetched(1, false, reply(&[("a", &[50])])),
+            Msg::Rules {
+                seq: 1,
+                refetch: false,
+                result: Ok(vec![]),
+            },
+            Msg::Delay {
+                name: "a".to_owned(),
+                result: Ok(80),
+            },
+            Msg::Delay {
+                name: "a".to_owned(),
+                result: Err(http(500)),
+            },
+            // A success here refetches the proxies.
+            Msg::GroupDelay {
+                members: vec!["a".to_owned()],
+                result: Ok(HashMap::new()),
+            },
+            Msg::Selected {
+                group: "G".to_owned(),
+                node: "a".to_owned(),
+                result: Ok(()),
+            },
+            Msg::ConnectionsClosed {
+                results: vec![("c".to_owned(), Ok(()))],
+                report: true,
+            },
+            Msg::AllConnectionsClosed {
+                count: 3,
+                result: Err(http(500)),
+            },
+            Msg::Changed {
+                change: Change::Patch(Patch::Mode(Mode::Global)),
+                result: Ok(()),
+            },
+            Msg::Providers(ProviderMsg::Done {
+                target: provider,
+                work: Work::Checking,
+                result: Ok(()),
+            }),
+            stream(Stream::Traffic, StreamEvent::Connected),
+            stream(
+                Stream::Traffic,
+                StreamEvent::Traffic(Traffic { up: 1, down: 2 }),
+            ),
+            stream(Stream::Connections, StreamEvent::Connected),
+            stream(Stream::Connections, StreamEvent::Connections(connections)),
+            stream(
+                Stream::Logs,
+                StreamEvent::Log(Log {
+                    kind: LogKind::Level(LogLevel::Info),
+                    payload: "old".to_owned(),
+                }),
+            ),
+            // The last stream up going down is an outage, which probes.
+            stream(Stream::Traffic, StreamEvent::Disconnected),
+            stream(Stream::Connections, StreamEvent::Disconnected),
+        ]
+    }
+
+    #[tokio::test]
+    async fn nothing_sent_for_the_previous_profile_reaches_the_new_one() {
+        let (mut app, _rx) = profiles_app(&crate::config::Overrides::default());
+        let old = app.outbox.epoch;
+        switch_to(&mut app, 1);
+        let fetches = (app.fetches, app.config_fetches, app.rule_fetches);
+        for msg in every_kind_of_msg() {
+            app.receive(Envelope { epoch: old, msg });
+        }
+        assert!(app.version.is_none() && app.configs.is_none() && app.proxies.is_none());
+        assert!(app.rules_view.rows.is_none());
+        assert!(app.reconnect.is_none() && !app.links.outage && app.links.up.is_empty());
+        assert!(app.traffic.is_none() && app.connections.is_none());
+        assert!(app.connections_view.rows.is_none() && app.logs_view.entries.is_empty());
+        assert!(app.changing.is_empty());
+        assert_eq!(toast_texts(&app), ["已切换到 b"]);
+        assert_eq!(
+            (app.fetches, app.config_fetches, app.rule_fetches),
+            fetches,
+            "a stale reply asked for more"
+        );
+
+        // The same news from the controller in use does count.
+        let epoch = app.outbox.epoch;
+        app.receive(Envelope {
+            epoch,
+            msg: Msg::Version(Err(ApiError::Timeout)),
+        });
+        assert!(app.reconnect.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_switch_leaves_nothing_of_the_old_controller_on_screen() {
+        let (mut app, _rx) = profiles_app(&crate::config::Overrides::default());
+        app.handle_msg(Msg::Version(Err(ApiError::Timeout)));
+        app.handle_msg(fetched(1, false, reply(&[("a", &[50])])));
+        app.testing.insert("a".to_owned());
+        connect(&mut app, Stream::Logs);
+        stream_event(
+            &mut app,
+            Stream::Logs,
+            StreamEvent::Log(Log {
+                kind: LogKind::Level(LogLevel::Info),
+                payload: "old".to_owned(),
+            }),
+        );
+        stream_event(
+            &mut app,
+            Stream::Traffic,
+            StreamEvent::Traffic(Traffic { up: 1, down: 2 }),
+        );
+        app.page = Page::Logs;
+        key_press(&mut app, KeyCode::Char('l'));
+        app.page = Page::Proxies;
+        key_press(&mut app, KeyCode::Char('s'));
+        let (level, sort) = (app.logs_view.level, app.proxies_view.sort);
+        assert!(app.reconnect.is_some() && !app.logs_view.entries.is_empty());
+
+        switch_to(&mut app, 1);
+        assert_eq!(app.settings.profile, "b");
+        assert_eq!(app.profiles.current, 1);
+        // The page loads afresh instead of showing the old groups.
+        assert!(app.proxies.is_none() && app.is_loading());
+        assert!(app.reconnect.is_none(), "the old banner stayed");
+        assert!(app.testing.is_empty() && app.traffic.is_none());
+        assert!(app.logs_view.entries.is_empty());
+        assert_eq!(toast_texts(&app), ["已切换到 b"]);
+        // What is the user's stays.
+        assert_eq!(app.page, Page::Proxies);
+        assert_eq!((app.logs_view.level, app.proxies_view.sort), (level, sort));
+    }
+
+    #[tokio::test]
+    async fn launch_overrides_hold_for_the_launch_connection_only() {
+        let overrides = crate::config::Overrides {
+            url: Some("http://127.0.0.1:3".to_owned()),
+            secret: Some("cli-secret".to_owned()),
+            ..Default::default()
+        };
+        let (mut app, _rx) = profiles_app(&overrides);
+        let connection = |app: &App| (app.settings.url.clone(), app.settings.secret.clone());
+        let launch = connection(&app);
+        assert_eq!(app.profiles.current, 0);
+
+        // Row 0 is the launch connection, then `a`, then `b`.
+        switch_to(&mut app, 2);
+        assert_eq!(
+            connection(&app),
+            ("http://127.0.0.1:2".to_owned(), Some("b-secret".to_owned()))
+        );
+        switch_to(&mut app, 1);
+        assert_eq!(
+            connection(&app),
+            ("http://127.0.0.1:1".to_owned(), Some("a-secret".to_owned()))
+        );
+        switch_to(&mut app, 0);
+        assert_eq!(connection(&app), launch);
+        assert_eq!(app.profiles.current, 0);
+        assert_eq!(toast_texts(&app), ["已切换到 启动参数指定"]);
+    }
+
+    #[tokio::test]
+    async fn picking_the_profile_in_use_does_not_reconnect() {
+        let (mut app, rx) = profiles_app(&crate::config::Overrides::default());
+        app.handle_msg(fetched(1, false, reply(&[("a", &[50])])));
+        let epoch = app.outbox.epoch;
+        switch_to(&mut app, 0);
+        assert_eq!(app.outbox.epoch, epoch);
+        assert!(app.proxies.is_some() && app.toasts.is_empty());
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
     }
 }

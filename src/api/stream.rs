@@ -9,7 +9,7 @@ use reqwest::Url;
 use serde::Deserialize;
 use tokio::{
     net::TcpStream,
-    sync::{mpsc, watch},
+    sync::watch,
     task::JoinHandle,
     time::{sleep, timeout},
 };
@@ -19,7 +19,7 @@ use super::{
     backoff,
     models::{ConnectionSnapshot, Log, LogLevel, Memory, Traffic},
 };
-use crate::app::Msg;
+use crate::app::{Msg, Outbox};
 
 /// How long one connection attempt, TLS and upgrade included, may take.
 /// Without a limit a controller that drops packets would hold a stream in one
@@ -112,19 +112,19 @@ pub struct Streams {
     secret: Option<String>,
     /// What `/logs` is subscribed at.
     log_level: LogLevel,
-    tx: mpsc::Sender<Msg>,
+    outbox: Outbox,
     /// Ticked to cut short the backoff wait of every stream.
     retry: watch::Sender<()>,
     tasks: HashMap<Stream, JoinHandle<()>>,
 }
 
 impl Streams {
-    pub fn new(base: &str, secret: Option<&str>, tx: mpsc::Sender<Msg>) -> Self {
+    pub fn new(base: &str, secret: Option<&str>, outbox: Outbox) -> Self {
         Self {
             base: base.to_owned(),
             secret: secret.map(str::to_owned),
             log_level: LogLevel::default(),
-            tx,
+            outbox,
             retry: watch::Sender::new(()),
             tasks: HashMap::new(),
         }
@@ -142,7 +142,12 @@ impl Streams {
                 return;
             }
         };
-        let task = tokio::spawn(run(stream, url, self.tx.clone(), self.retry.subscribe()));
+        let task = tokio::spawn(run(
+            stream,
+            url,
+            self.outbox.clone(),
+            self.retry.subscribe(),
+        ));
         self.tasks.insert(stream, task);
     }
 
@@ -179,16 +184,16 @@ impl Drop for Streams {
 }
 
 /// Connects, forwards frames, and reconnects after a backoff, for ever.
-async fn run(stream: Stream, url: Url, tx: mpsc::Sender<Msg>, mut retry: watch::Receiver<()>) {
+async fn run(stream: Stream, url: Url, outbox: Outbox, mut retry: watch::Receiver<()>) {
     let mut failures = 0;
     loop {
         match timeout(CONNECT_TIMEOUT, connect_async(url.as_str())).await {
             Ok(Ok((mut socket, _))) => {
                 failures = 0;
                 tracing::info!(?stream, "stream connected");
-                if !emit(&tx, stream, Event::Connected).await
-                    || !pump(stream, &mut socket, &tx).await
-                    || !emit(&tx, stream, Event::Disconnected).await
+                if !emit(&outbox, stream, Event::Connected).await
+                    || !pump(stream, &mut socket, &outbox).await
+                    || !emit(&outbox, stream, Event::Disconnected).await
                 {
                     return;
                 }
@@ -206,12 +211,12 @@ async fn run(stream: Stream, url: Url, tx: mpsc::Sender<Msg>, mut retry: watch::
 
 /// Forwards the frames of `socket` until the connection ends. Returns `false`
 /// when the app is gone and nobody is listening any more.
-async fn pump(stream: Stream, socket: &mut Socket, tx: &mpsc::Sender<Msg>) -> bool {
+async fn pump(stream: Stream, socket: &mut Socket, outbox: &Outbox) -> bool {
     while let Some(frame) = socket.next().await {
         match frame {
             Ok(Message::Text(text)) => {
                 if let Some(event) = decode(stream, &text)
-                    && !emit(tx, stream, event).await
+                    && !emit(outbox, stream, event).await
                 {
                     return false;
                 }
@@ -250,8 +255,8 @@ fn parse<'a, T: Deserialize<'a>>(stream: Stream, text: &'a str) -> Option<T> {
 }
 
 /// Reports to the app. `false` when it has hung up.
-async fn emit(tx: &mpsc::Sender<Msg>, stream: Stream, event: Event) -> bool {
-    tx.send(Msg::Stream { stream, event }).await.is_ok()
+async fn emit(outbox: &Outbox, stream: Stream, event: Event) -> bool {
+    outbox.send(Msg::Stream { stream, event }).await
 }
 
 /// Sleeps for `delay`, or until [`Streams::retry_now`] is called meanwhile.
@@ -270,14 +275,14 @@ async fn wait(delay: Duration, retry: &mut watch::Receiver<()>) {
 #[cfg(test)]
 mod tests {
     use futures_util::SinkExt;
-    use tokio::{net::TcpListener, time::Instant};
+    use tokio::{net::TcpListener, sync::mpsc, time::Instant};
     use tokio_tungstenite::{
         accept_async, accept_hdr_async,
         tungstenite::handshake::server::{Request, Response},
     };
 
     use super::*;
-    use crate::api::models::LogKind;
+    use crate::{api::models::LogKind, app::Envelope};
 
     fn build(base: &str, secret: Option<&str>, stream: Stream) -> Url {
         url(base, secret, stream, LogLevel::Info).unwrap()
@@ -430,7 +435,7 @@ mod tests {
         let server = tokio::spawn(flaky_controller(listener, targets_tx));
 
         let (tx, mut rx) = mpsc::channel(8);
-        let mut streams = Streams::new(&base, Some("p&w #+密"), tx);
+        let mut streams = Streams::new(&base, Some("p&w #+密"), Outbox::new(0, tx));
         streams.start(Stream::Traffic);
 
         // The first backoff is 1 s; the bound only keeps a bug from hanging.
@@ -439,7 +444,8 @@ mod tests {
             let msg = timeout(Duration::from_secs(10), rx.recv())
                 .await
                 .expect("stream went quiet")
-                .unwrap();
+                .unwrap()
+                .msg;
             let Msg::Stream { stream, event } = msg else {
                 panic!("unexpected message {msg:?}");
             };
@@ -485,14 +491,15 @@ mod tests {
         });
 
         let (tx, mut rx) = mpsc::channel(8);
-        let mut streams = Streams::new(&base, None, tx);
+        let mut streams = Streams::new(&base, None, Outbox::new(0, tx));
         streams.start(Stream::Traffic);
         let mut events = vec![];
         while events.len() < 2 {
             let msg = timeout(Duration::from_secs(10), rx.recv())
                 .await
                 .expect("stream went quiet")
-                .unwrap();
+                .unwrap()
+                .msg;
             let Msg::Stream { event, .. } = msg else {
                 panic!("unexpected message {msg:?}");
             };
@@ -504,11 +511,12 @@ mod tests {
         );
     }
 
-    async fn next_event(rx: &mut mpsc::Receiver<Msg>) -> Event {
+    async fn next_event(rx: &mut mpsc::Receiver<Envelope>) -> Event {
         let msg = timeout(Duration::from_secs(10), rx.recv())
             .await
             .expect("stream went quiet")
-            .unwrap();
+            .unwrap()
+            .msg;
         let Msg::Stream { event, .. } = msg else {
             panic!("unexpected message {msg:?}");
         };
@@ -535,7 +543,7 @@ mod tests {
         });
 
         let (tx, mut rx) = mpsc::channel(8);
-        let mut streams = Streams::new(&base, None, tx);
+        let mut streams = Streams::new(&base, None, Outbox::new(0, tx));
         streams.start(Stream::Logs);
         assert_eq!(next_event(&mut rx).await, Event::Connected);
         streams.set_log_level(LogLevel::Debug);

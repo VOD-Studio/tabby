@@ -14,7 +14,7 @@ use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
 };
-use config::{Config, Overrides};
+use config::{Config, Overrides, Profiles};
 use directories::ProjectDirs;
 use tokio::sync::mpsc;
 use tracing::level_filters::LevelFilter;
@@ -34,7 +34,13 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     color_eyre::install()?;
     init_logging()?;
-    let settings = Config::load()?.resolve(&cli.overrides)?;
+    let path = config::path();
+    let file = Config::load(path.as_deref())?;
+    let settings = file.resolve(&cli.overrides)?;
+    let profiles = Profiles {
+        path,
+        ..file.profiles(&cli.overrides, &settings)
+    };
     tracing::info!(
         profile = %settings.profile,
         url = %settings.url,
@@ -47,7 +53,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = match terminal.size() {
         Ok(size) => {
-            let mut app = App::new(settings, client, msg_tx, size);
+            let mut app = App::new(settings, client, msg_tx, size, profiles);
             app.start();
             event::run(&mut terminal, &mut app, msg_rx).await
         }
