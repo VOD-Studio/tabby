@@ -8,7 +8,7 @@ use ratatui::{
 use tui_input::Input;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Confirm, Overlay, Page, Pane};
+use crate::app::{App, Confirm, Gate, Overlay, Page, Pane, Setting};
 
 /// One entry of the key bar. A disabled one is shown dimmed: the key exists
 /// but the connected kernel cannot do it.
@@ -40,6 +40,11 @@ fn detail_hints() -> Vec<Hint> {
 fn confirm_hints(app: &App) -> Vec<Hint> {
     let verb = app.pending.as_ref().map_or("确认", Confirm::verb);
     vec![hint("y", verb), hint("n/Esc", "取消")]
+}
+
+/// Keys while a port is being typed on the settings page.
+fn port_hints() -> Vec<Hint> {
+    vec![hint("Enter", "确定"), hint("Esc", "取消")]
 }
 
 /// Keys that only work on the given page.
@@ -115,6 +120,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
             hint("j/k", "移动"),
         ],
         Page::Rules => vec![hint("/", "过滤"), hint("j/k", "移动"), hint("g/G", "首尾")],
+        Page::Settings => settings_hints(app),
         Page::Logs => {
             let view = &app.logs_view;
             let mut hints = vec![
@@ -129,7 +135,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
             }
             hints
         }
-        _ => vec![],
+        Page::Overview => vec![],
     };
     if app
         .filter()
@@ -138,6 +144,36 @@ fn page_hints(app: &App) -> Vec<Hint> {
         hints.push(hint("Esc", "清除过滤"));
     }
     hints
+}
+
+/// The settings page's keys: what `Enter` does to the setting under the
+/// cursor, dimmed where the kernel lacks it.
+fn settings_hints(app: &App) -> Vec<Hint> {
+    let setting = app.settings_view.selected();
+    let description = match setting {
+        Setting::Mode => "切换模式",
+        Setting::LogLevel => "切换级别",
+        Setting::Port(_) => "修改端口",
+        Setting::AllowLan | Setting::Ipv6 | Setting::Tun => "切换",
+        Setting::Reload
+        | Setting::FlushFakeIp
+        | Setting::UpdateGeo
+        | Setting::Restart
+        | Setting::Upgrade => "执行",
+    };
+    let enabled = match &app.configs {
+        Some(Ok(configs)) => app.gate(setting, configs) == Gate::Open,
+        _ => false,
+    };
+    vec![
+        Hint {
+            key: "Enter",
+            description,
+            enabled,
+        },
+        hint("j/k", "移动"),
+        hint("g/G", "首尾"),
+    ]
 }
 
 /// Keys that work on every page.
@@ -156,6 +192,7 @@ fn hints(app: &App) -> Vec<Hint> {
         Some(Overlay::Help) => help_hints(),
         Some(Overlay::Connection) => detail_hints(),
         Some(Overlay::Confirm) => confirm_hints(app),
+        None if app.page == Page::Settings && app.typing() => port_hints(),
         None => {
             let mut hints = page_hints(app);
             hints.extend(global_hints(app.page));

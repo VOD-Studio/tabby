@@ -231,20 +231,24 @@ fn render_kernel(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
         }
         _ => (NO_VALUE.to_owned(), theme.muted),
     };
-    let port = if configs.mixed_port == 0 {
-        ("未启用".to_owned(), theme.muted)
-    } else {
-        (configs.mixed_port.to_string(), theme.fg)
+    let port = match configs.mixed_port {
+        None => (NO_VALUE.to_owned(), theme.muted),
+        Some(0) => ("未启用".to_owned(), theme.muted),
+        Some(port) => (port.to_string(), theme.fg),
     };
     let tun = match &configs.tun {
         Some(tun) => switch(theme, tun.enable),
         None => ("需要 mihomo".to_owned(), theme.muted),
     };
+    let lan = configs.allow_lan.map_or_else(
+        || (NO_VALUE.to_owned(), theme.muted),
+        |on| switch(theme, on),
+    );
     let rows = [
         ("版本", version),
         ("混合端口", port),
         ("TUN", tun),
-        ("局域网连接", switch(theme, configs.allow_lan)),
+        ("局域网连接", lan),
     ];
     let width = usize::from(inner.width);
     let lines: Vec<Line> = rows

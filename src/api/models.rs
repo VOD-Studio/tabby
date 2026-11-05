@@ -32,17 +32,24 @@ impl Version {
 
 /// `GET /configs`: the subset of runtime settings tabby shows.
 ///
-/// Fields mihomo adds on top of Clash are `Option` or defaulted.
+/// A field a kernel leaves out is `None` (or empty), never 0 or `false`:
+/// mihomo adds some on top of Clash, and a missing one must not read as
+/// "off".
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, rename_all = "kebab-case")]
 pub struct Configs {
-    pub port: u16,
-    pub socks_port: u16,
-    pub mixed_port: u16,
-    pub allow_lan: bool,
+    /// The HTTP proxy port; 0 when it is off.
+    pub port: Option<u16>,
+    pub socks_port: Option<u16>,
+    pub redir_port: Option<u16>,
+    pub tproxy_port: Option<u16>,
+    pub mixed_port: Option<u16>,
+    pub allow_lan: Option<bool>,
     pub mode: String,
+    /// How much the kernel itself logs, not what the log page subscribes
+    /// to.
     pub log_level: String,
-    pub ipv6: bool,
+    pub ipv6: Option<bool>,
     /// mihomo only.
     pub tun: Option<Tun>,
 }
@@ -52,6 +59,22 @@ impl Configs {
     pub fn mode(&self) -> Option<Mode> {
         Mode::parse(&self.mode)
     }
+}
+
+/// The levels the kernel's own `log-level` takes, in the order the settings
+/// page cycles through them.
+pub const KERNEL_LOG_LEVELS: [&str; 5] = ["silent", "error", "warning", "info", "debug"];
+
+/// The kernel log level after `level` (any case) in [`KERNEL_LOG_LEVELS`].
+/// One tabby does not know goes to `info`, the kernels' default, as an
+/// unknown mode goes to rule.
+pub fn next_kernel_log_level(level: &str) -> &'static str {
+    KERNEL_LOG_LEVELS
+        .iter()
+        .position(|known| level.eq_ignore_ascii_case(known))
+        .map_or("info", |index| {
+            KERNEL_LOG_LEVELS[(index + 1) % KERNEL_LOG_LEVELS.len()]
+        })
 }
 
 /// How the kernel routes traffic.
@@ -105,6 +128,11 @@ impl Mode {
 #[serde(default)]
 pub struct Tun {
     pub enable: bool,
+    /// The network stack (`gvisor`, `system`, `mixed`); empty when not
+    /// reported.
+    pub stack: String,
+    /// The interface name; empty when the kernel picks one.
+    pub device: String,
 }
 
 /// One `/traffic` frame: current throughput in bytes per second.
@@ -718,11 +746,21 @@ mod tests {
 
         let configs: Configs =
             serde_json::from_str(include_str!("../../tests/fixtures/mihomo_configs.json")).unwrap();
-        assert_eq!(configs.mixed_port, 17890);
+        let ports = [
+            configs.port,
+            configs.socks_port,
+            configs.redir_port,
+            configs.tproxy_port,
+            configs.mixed_port,
+        ];
+        assert_eq!(ports, [Some(0), Some(0), Some(0), Some(0), Some(17890)]);
         assert_eq!(configs.mode, "rule");
         assert_eq!(configs.log_level, "info");
-        assert!(!configs.allow_lan);
-        assert!(!configs.tun.unwrap().enable);
+        assert_eq!(configs.allow_lan, Some(false));
+        assert_eq!(configs.ipv6, Some(true));
+        let tun = configs.tun.unwrap();
+        assert!(!tun.enable);
+        assert_eq!((tun.stack.as_str(), tun.device.as_str()), ("Mips", ""));
     }
 
     #[test]
@@ -734,9 +772,37 @@ mod tests {
 
         let configs: Configs =
             serde_json::from_str(include_str!("../../tests/fixtures/clash_configs.json")).unwrap();
-        assert_eq!(configs.mixed_port, 17891);
+        assert_eq!(configs.mixed_port, Some(17891));
+        assert_eq!(configs.port, Some(0));
         assert_eq!(configs.mode, "rule");
+        assert_eq!(configs.ipv6, Some(false));
         assert!(configs.tun.is_none());
+
+        // A field left out reads as unknown, not as off or port 0.
+        let configs: Configs = serde_json::from_str(r#"{"mode":"rule"}"#).unwrap();
+        let ports = [
+            configs.port,
+            configs.socks_port,
+            configs.redir_port,
+            configs.tproxy_port,
+            configs.mixed_port,
+        ];
+        assert_eq!(ports, [None; 5]);
+        assert_eq!((configs.allow_lan, configs.ipv6), (None, None));
+        assert!(configs.log_level.is_empty() && configs.tun.is_none());
+    }
+
+    #[test]
+    fn kernel_log_levels_cycle_from_silent_to_debug() {
+        let mut level = "silent";
+        let mut seen = vec![];
+        for _ in 0..5 {
+            level = next_kernel_log_level(level);
+            seen.push(level);
+        }
+        assert_eq!(seen, ["error", "warning", "info", "debug", "silent"]);
+        assert_eq!(next_kernel_log_level("WARNING"), "info");
+        assert_eq!(next_kernel_log_level("verbose"), "info");
     }
 
     #[test]

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use super::{
     error::ApiError,
     models::{
-        Configs, Mode, ProviderList, Proxies, ProxyProvider, Rule, RuleList, RuleProvider, Version,
+        Configs, ProviderList, Proxies, ProxyProvider, Rule, RuleList, RuleProvider, Version,
     },
 };
 
@@ -27,6 +27,10 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound for one request; longer than the default 5 s delay-test timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Upper bound for a request the kernel only answers once it has downloaded
+/// something (geo databases, a new kernel build) from the internet.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Client for the Clash / mihomo External Controller REST API.
 #[derive(Debug, Clone)]
@@ -149,6 +153,14 @@ impl ApiClient {
         Ok(())
     }
 
+    /// `POST base/seg1/seg2/…` without a body, ignoring the reply body;
+    /// the request may take up to `timeout`.
+    async fn post(&self, segments: &[&str], timeout: Duration) -> Result<(), ApiError> {
+        let request = self.http.post(self.url(segments)).timeout(timeout);
+        Self::check(request.send().await?).await?;
+        Ok(())
+    }
+
     /// `GET /version`.
     pub async fn version(&self) -> Result<Version, ApiError> {
         self.get_json(&["version"]).await
@@ -159,10 +171,47 @@ impl ApiClient {
         self.get_json(&["configs"]).await
     }
 
-    /// `PATCH /configs`: switches the proxy mode. Replies 204.
-    pub async fn set_mode(&self, mode: Mode) -> Result<(), ApiError> {
-        self.patch_json(&["configs"], &serde_json::json!({ "mode": mode.name() }))
+    /// `PATCH /configs`: changes the running settings named in `body` (the
+    /// mode, a port …). Replies 204.
+    pub async fn patch_configs(&self, body: &serde_json::Value) -> Result<(), ApiError> {
+        self.patch_json(&["configs"], body).await
+    }
+
+    /// `PUT /configs?force=true` with an empty path and payload: reloads
+    /// the configuration file the kernel was started with. Replies 204.
+    pub async fn reload_config(&self) -> Result<(), ApiError> {
+        let url = format!("{}?force=true", self.url(&["configs"]));
+        let body = serde_json::json!({ "path": "", "payload": "" });
+        Self::check(self.http.put(url).json(&body).send().await?).await?;
+        Ok(())
+    }
+
+    /// `POST /cache/fakeip/flush` (mihomo only). Replies 204, also when
+    /// fake-ip is not in use.
+    pub async fn flush_fake_ip(&self) -> Result<(), ApiError> {
+        self.post(&["cache", "fakeip", "flush"], REQUEST_TIMEOUT)
             .await
+    }
+
+    /// `POST /configs/geo` (mihomo only): downloads the geo IP, ASN and site
+    /// databases the configuration uses; mihomo v1.19.33 does not reload the
+    /// configuration after it. The kernel replies once that is done, 204,
+    /// so this may take long; with none in use it replies at once.
+    pub async fn update_geo(&self) -> Result<(), ApiError> {
+        self.post(&["configs", "geo"], DOWNLOAD_TIMEOUT).await
+    }
+
+    /// `POST /restart` (mihomo only). mihomo v1.19.33 replies 200
+    /// `{"status":"ok"}` in full and only then replaces itself.
+    pub async fn restart(&self) -> Result<(), ApiError> {
+        self.post(&["restart"], REQUEST_TIMEOUT).await
+    }
+
+    /// `POST /upgrade` (mihomo only): downloads the newest kernel, replaces
+    /// the running program with it and restarts. Fails with the kernel's
+    /// message when there is nothing newer.
+    pub async fn upgrade(&self) -> Result<(), ApiError> {
+        self.post(&["upgrade"], DOWNLOAD_TIMEOUT).await
     }
 
     /// `GET /proxies`.
@@ -364,21 +413,6 @@ mod tests {
             .select_proxy("节点/选择 #1", "🚀 a/b#c")
             .await
             .unwrap();
-    }
-
-    #[tokio::test]
-    async fn set_mode_patches_configs_with_the_lowercase_name() {
-        let server = MockServer::start().await;
-        Mock::given(method("PATCH"))
-            .and(path("/configs"))
-            .and(body_json(json!({"mode": "global"})))
-            .respond_with(ResponseTemplate::new(204))
-            .expect(1)
-            .mount(&server)
-            .await;
-
-        let client = ApiClient::new(&server.uri(), None).unwrap();
-        client.set_mode(Mode::Global).await.unwrap();
     }
 
     #[tokio::test]

@@ -69,7 +69,17 @@ fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
             ("G", "最新并跟随"),
             ("Ctrl+d / Ctrl+u", "翻半页"),
         ],
-        _ => &[],
+        Page::Settings => &[
+            ("Enter / Space", "切换开关或执行操作"),
+            ("Enter", "端口行：编辑端口"),
+            ("Enter / Esc", "编辑中提交 / 取消"),
+            ("y", "确认标 ! 的操作"),
+            ("n / Esc", "取消"),
+            ("j / k / ↓ / ↑", "上下移动"),
+            ("g / G", "顶部 / 底部"),
+            ("Ctrl+d / Ctrl+u", "翻半页"),
+        ],
+        Page::Overview => &[],
     }
 }
 

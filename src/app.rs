@@ -19,7 +19,7 @@ use crate::{
         models::{
             self, Baseline, Configs, ConnectionSnapshot, ConnectionStats, CoreKind, Delay, GLOBAL,
             Log, LogKind, LogLevel, Mode, Proxies, Proxy, ProxyProvider, Rate, Rule, RuleProvider,
-            Traffic, Version,
+            Traffic, Version, next_kernel_log_level,
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
@@ -30,7 +30,8 @@ use crate::{
         logs::{self, Fit},
         providers, proxies, regions, rules,
         scroll::Scroll,
-        text::describe,
+        settings,
+        text::{describe, reason},
         theme::Theme,
     },
 };
@@ -1233,7 +1234,7 @@ pub enum Action {
     CycleMode,
     Cursor(Move),
     /// `Enter`: acts on the item under the cursor: picks a node, opens a
-    /// connection's details.
+    /// connection's details, toggles or runs a setting (`Space` too).
     Confirm,
     /// `x`: close the connection under the cursor.
     CloseConnection,
@@ -1267,11 +1268,13 @@ pub enum Action {
     HealthCheck,
     /// `/`: start typing the current page's filter.
     StartFilter,
-    /// A key typed into the filter box.
+    /// A key typed into the input box that has the keyboard: a filter, or
+    /// the port being edited on the settings page.
     FilterInput(KeyEvent),
-    /// `Enter` in the filter box: keep the filter, stop typing.
+    /// `Enter` in the input box: keep the filter and stop typing, or send
+    /// the port.
     FilterAccept,
-    /// `Esc` in the filter box: drop the filter.
+    /// `Esc` in the input box: drop the filter, or the port being typed.
     FilterClear,
     ToggleHelp,
     /// `Esc`: closes the topmost overlay, or clears an applied filter.
@@ -1289,8 +1292,11 @@ pub enum Msg {
         refetch: bool,
         result: Result<Configs, ApiError>,
     },
-    /// Reply to `PATCH /configs` switching the mode.
-    ModeSet(Result<(), ApiError>),
+    /// Reply to a change a setting (or `m`) asked of the kernel.
+    Changed {
+        change: Change,
+        result: Result<(), ApiError>,
+    },
     /// Reply to a `/proxies` fetch. `refetch` marks one made while data is
     /// already on screen, whose failure must not take that data away.
     Proxies {
@@ -1407,6 +1413,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::BackTab => Some(Action::PrevPage),
                 KeyCode::Esc => Some(Action::Dismiss),
                 KeyCode::Enter => Some(Action::Confirm),
+                KeyCode::Char(' ') if page == Page::Settings => Some(Action::Confirm),
                 KeyCode::Char(_) if ctrl || alt => None,
                 KeyCode::Char('q') => Some(Action::Quit),
                 KeyCode::Char('r') => Some(Action::Refresh),
@@ -1498,6 +1505,9 @@ pub enum Confirm {
         filter: String,
         targets: Vec<ProviderRef>,
     },
+    /// A setting that changes routing, reloads, downloads or replaces the
+    /// kernel.
+    Change(Change),
 }
 
 impl Confirm {
@@ -1505,6 +1515,7 @@ impl Confirm {
         match self {
             Self::CloseConnections(_) => "关闭连接",
             Self::UpdateProviders { .. } => "更新 Provider",
+            Self::Change(change) => change.title(),
         }
     }
 
@@ -1520,6 +1531,7 @@ impl Confirm {
             Self::UpdateProviders { filter, targets } => {
                 format!("更新匹配「{filter}」的 {} 个 provider？", targets.len())
             }
+            Self::Change(change) => change.question().to_owned(),
         }
     }
 
@@ -1528,7 +1540,363 @@ impl Confirm {
         match self {
             Self::CloseConnections(_) => "确认",
             Self::UpdateProviders { .. } => "更新",
+            Self::Change(change) => change.verb(),
         }
+    }
+}
+
+/// A port the kernel takes proxy clients on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Port {
+    Http,
+    Socks,
+    Mixed,
+    Redir,
+    Tproxy,
+}
+
+impl Port {
+    /// Its key in `/configs`, read and patched alike.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Http => "port",
+            Self::Socks => "socks-port",
+            Self::Mixed => "mixed-port",
+            Self::Redir => "redir-port",
+            Self::Tproxy => "tproxy-port",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Http => "HTTP",
+            Self::Socks => "SOCKS",
+            Self::Mixed => "Mixed",
+            Self::Redir => "Redir",
+            Self::Tproxy => "TProxy",
+        }
+    }
+
+    /// The port number `configs` reports, 0 when off; `None` when the
+    /// kernel has no such port.
+    pub fn of(self, configs: &Configs) -> Option<u16> {
+        match self {
+            Self::Http => configs.port,
+            Self::Socks => configs.socks_port,
+            Self::Mixed => configs.mixed_port,
+            Self::Redir => configs.redir_port,
+            Self::Tproxy => configs.tproxy_port,
+        }
+    }
+}
+
+/// The rows of the settings page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Setting {
+    Mode,
+    AllowLan,
+    /// The kernel's own `log-level`, not the level the log page subscribes
+    /// at.
+    LogLevel,
+    Ipv6,
+    Port(Port),
+    Tun,
+    Reload,
+    FlushFakeIp,
+    UpdateGeo,
+    Restart,
+    Upgrade,
+}
+
+impl Setting {
+    /// Top to bottom, as the page lists them.
+    pub const ALL: [Self; 15] = [
+        Self::Mode,
+        Self::AllowLan,
+        Self::LogLevel,
+        Self::Ipv6,
+        Self::Port(Port::Http),
+        Self::Port(Port::Socks),
+        Self::Port(Port::Mixed),
+        Self::Port(Port::Redir),
+        Self::Port(Port::Tproxy),
+        Self::Tun,
+        Self::Reload,
+        Self::FlushFakeIp,
+        Self::UpdateGeo,
+        Self::Restart,
+        Self::Upgrade,
+    ];
+
+    /// The group heading it is listed under.
+    pub fn section(self) -> &'static str {
+        match self {
+            Self::Mode | Self::AllowLan | Self::LogLevel | Self::Ipv6 => "基础",
+            Self::Port(_) => "端口",
+            Self::Tun => "TUN",
+            Self::Reload | Self::FlushFakeIp | Self::UpdateGeo | Self::Restart | Self::Upgrade => {
+                "维护"
+            }
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Mode => "代理模式",
+            Self::AllowLan => "局域网连接",
+            Self::LogLevel => "内核日志级别",
+            Self::Ipv6 => "IPv6",
+            Self::Port(port) => port.label(),
+            Self::Tun => "启用",
+            Self::Reload => "重载配置",
+            Self::FlushFakeIp => "刷新 FakeIP",
+            Self::UpdateGeo => "更新 GeoData",
+            Self::Restart => "重启内核",
+            Self::Upgrade => "升级内核",
+        }
+    }
+
+    /// It asks before going ahead: it changes the system's routes, throws
+    /// away what was changed at runtime, downloads, or takes the kernel
+    /// down for a moment.
+    pub fn asks(self) -> bool {
+        matches!(
+            self,
+            Self::Tun | Self::Reload | Self::UpdateGeo | Self::Restart | Self::Upgrade
+        )
+    }
+
+    /// Only mihomo has it; original Clash has neither the field nor the
+    /// endpoint.
+    fn mihomo_only(self) -> bool {
+        matches!(
+            self,
+            Self::Tun | Self::FlushFakeIp | Self::UpdateGeo | Self::Restart | Self::Upgrade
+        )
+    }
+}
+
+/// Whether a setting can be used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Gate {
+    Open,
+    /// The kernel did not report the value, though it is not known to be
+    /// original Clash.
+    Missing,
+    /// Original Clash, which does not have it.
+    NeedsMihomo,
+}
+
+/// A change to the running configuration, sent as `PATCH /configs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Patch {
+    Mode(Mode),
+    AllowLan(bool),
+    LogLevel(&'static str),
+    Ipv6(bool),
+    Port(Port, u16),
+    Tun(bool),
+}
+
+impl Patch {
+    fn setting(self) -> Setting {
+        match self {
+            Self::Mode(_) => Setting::Mode,
+            Self::AllowLan(_) => Setting::AllowLan,
+            Self::LogLevel(_) => Setting::LogLevel,
+            Self::Ipv6(_) => Setting::Ipv6,
+            Self::Port(port, _) => Setting::Port(port),
+            Self::Tun(_) => Setting::Tun,
+        }
+    }
+
+    /// The request body: only the one key that changes.
+    fn body(self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Self::Mode(mode) => json!({ "mode": mode.name() }),
+            Self::AllowLan(on) => json!({ "allow-lan": on }),
+            Self::LogLevel(level) => json!({ "log-level": level }),
+            Self::Ipv6(on) => json!({ "ipv6": on }),
+            Self::Port(port, number) => json!({ (port.key()): number }),
+            Self::Tun(on) => json!({ "tun": { "enable": on } }),
+        }
+    }
+}
+
+/// What a settings row, or `m`, asks the kernel to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Change {
+    Patch(Patch),
+    Reload,
+    FlushFakeIp,
+    UpdateGeo,
+    Restart,
+    Upgrade,
+}
+
+impl Change {
+    pub fn setting(self) -> Setting {
+        match self {
+            Self::Patch(patch) => patch.setting(),
+            Self::Reload => Setting::Reload,
+            Self::FlushFakeIp => Setting::FlushFakeIp,
+            Self::UpdateGeo => Setting::UpdateGeo,
+            Self::Restart => Setting::Restart,
+            Self::Upgrade => Setting::Upgrade,
+        }
+    }
+
+    async fn send(self, client: &ApiClient) -> Result<(), ApiError> {
+        match self {
+            Self::Patch(patch) => client.patch_configs(&patch.body()).await,
+            Self::Reload => client.reload_config().await,
+            Self::FlushFakeIp => client.flush_fake_ip().await,
+            Self::UpdateGeo => client.update_geo().await,
+            Self::Restart => client.restart().await,
+            Self::Upgrade => client.upgrade().await,
+        }
+    }
+
+    /// The success toast; none for the mode, which the header and the
+    /// overview already show.
+    fn done(self) -> Option<String> {
+        let state = |on: bool| if on { "已开启" } else { "已关闭" };
+        Some(match self {
+            Self::Patch(Patch::Mode(_)) => return None,
+            Self::Patch(Patch::AllowLan(on)) => format!("局域网连接{}", state(on)),
+            Self::Patch(Patch::LogLevel(level)) => format!("内核日志级别已设为 {level}"),
+            Self::Patch(Patch::Ipv6(on)) => format!("IPv6 {}", state(on)),
+            Self::Patch(Patch::Port(port, 0)) => format!("{} 端口已关闭", port.label()),
+            Self::Patch(Patch::Port(port, number)) => {
+                format!("{} 端口已改为 {number}", port.label())
+            }
+            Self::Patch(Patch::Tun(on)) => format!("TUN {}", state(on)),
+            Self::Reload => "已重载配置".to_owned(),
+            Self::FlushFakeIp => "已刷新 FakeIP".to_owned(),
+            Self::UpdateGeo => "GeoData 已更新".to_owned(),
+            Self::Restart => "内核正在重启".to_owned(),
+            Self::Upgrade => "已升级，内核正在重启".to_owned(),
+        })
+    }
+
+    /// What the failure toast starts with.
+    fn failed(self) -> &'static str {
+        match self {
+            Self::Patch(Patch::Mode(_)) => "切换模式失败",
+            Self::Patch(_) => "修改失败",
+            Self::Reload => "重载配置失败",
+            Self::FlushFakeIp => "刷新 FakeIP 失败",
+            Self::UpdateGeo => "更新 GeoData 失败",
+            Self::Restart => "重启失败",
+            Self::Upgrade => "升级失败",
+        }
+    }
+
+    /// The confirm dialog's title, for the ones that ask.
+    fn title(self) -> &'static str {
+        match self {
+            Self::Patch(Patch::Tun(true)) => "开启 TUN",
+            Self::Patch(Patch::Tun(false)) => "关闭 TUN",
+            Self::Patch(_) => "修改设置",
+            Self::Reload => "重载配置",
+            Self::FlushFakeIp => "刷新 FakeIP",
+            Self::UpdateGeo => "更新 GeoData",
+            Self::Restart => "重启内核",
+            Self::Upgrade => "升级内核",
+        }
+    }
+
+    fn question(self) -> &'static str {
+        match self {
+            Self::Patch(Patch::Tun(true)) => "开启 TUN？内核会接管本机流量并修改系统路由。",
+            Self::Patch(Patch::Tun(false)) => "关闭 TUN？经 TUN 进入内核的流量将改走本机网络。",
+            Self::Patch(_) => "修改这项设置？",
+            Self::Reload => "重新加载配置文件？运行中改过的设置会被文件里的值覆盖。",
+            Self::FlushFakeIp => "清空 FakeIP 缓存？",
+            Self::UpdateGeo => "下载 GeoIP / GeoSite 数据库？需要联网，可能要等一会儿。",
+            Self::Restart => "重启内核？现有连接会全部断开，控制器短暂不可用。",
+            Self::Upgrade => "升级内核？会下载并替换内核程序，完成后内核自动重启。",
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Patch(Patch::Tun(true)) => "开启",
+            Self::Patch(Patch::Tun(false)) => "关闭",
+            Self::Patch(_) | Self::FlushFakeIp => "确认",
+            Self::Reload => "重载",
+            Self::UpdateGeo => "更新",
+            Self::Restart => "重启",
+            Self::Upgrade => "升级",
+        }
+    }
+}
+
+/// Progress of a change. Another press before it ends would race two
+/// requests, or patch from a value the kernel no longer has, so it waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// The request is in flight.
+    Sending,
+    /// Done; waiting for the `/configs` fetch with this number (or a later
+    /// one), which says what the kernel now runs.
+    Refetching(u64),
+}
+
+/// Reads a typed port: `Ok(None)` when nothing was typed, which drops the
+/// edit, else the number, or why it is not a port. 0 turns the port off.
+fn parse_port(text: &str) -> Result<Option<u16>, &'static str> {
+    if text.is_empty() {
+        return Ok(None);
+    }
+    if !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err("端口只能是数字");
+    }
+    let digits = text.trim_start_matches('0');
+    // Five digits at most, then the range: no overflow whatever is typed.
+    if digits.len() > 5 {
+        return Err("端口须在 0–65535 之间");
+    }
+    let number: u32 = digits.parse().unwrap_or(0);
+    u16::try_from(number)
+        .map(Some)
+        .map_err(|_| "端口须在 0–65535 之间")
+}
+
+/// Cursor and the port being typed on the settings page.
+#[derive(Debug, Default)]
+pub struct SettingsView {
+    /// Index into [`Setting::ALL`].
+    pub cursor: usize,
+    pub scroll: Scroll,
+    /// The port being edited and what has been typed, while one is. It has
+    /// the keyboard meanwhile, as a filter box does.
+    pub editing: Option<(Port, Input)>,
+}
+
+impl SettingsView {
+    /// The setting under the cursor.
+    pub fn selected(&self) -> Setting {
+        Setting::ALL[self.cursor.min(Setting::ALL.len() - 1)]
+    }
+
+    /// A key typed into the port box: digits, and the keys that edit or
+    /// move; other characters are not taken.
+    fn type_key(&mut self, key: KeyEvent) {
+        let Some((_, input)) = &mut self.editing else {
+            return;
+        };
+        let plain = !key
+            .modifiers
+            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
+        if let KeyCode::Char(ch) = key.code
+            && plain
+            && !ch.is_ascii_digit()
+        {
+            return;
+        }
+        input.handle_event(&Event::Key(key));
     }
 }
 
@@ -1560,18 +1928,6 @@ struct Links {
     outage: bool,
 }
 
-/// Progress of a mode switch. Pressing `m` again before it ends would race
-/// two requests, so it waits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ModeSwitch {
-    Idle,
-    /// `PATCH /configs` is in flight.
-    Patching,
-    /// Patched; waiting for the `/configs` fetch with this number (or a
-    /// later one), which says what the kernel now runs.
-    Refetching(u64),
-}
-
 /// Samples kept per chart or sparkline: one per second of the last minute.
 pub const TRAFFIC_HISTORY: usize = 60;
 
@@ -1599,7 +1955,11 @@ pub struct App {
     config_fetches: u64,
     /// The newest `/configs` fetch whose reply has been applied.
     applied_config: u64,
-    mode_switch: ModeSwitch,
+    /// Settings with a change in progress (the mode's included, whichever
+    /// key sent it); a second press waits for it to end.
+    changing: HashMap<Setting, Stage>,
+    /// The settings page.
+    pub settings_view: SettingsView,
     /// Nodes with a delay test in flight.
     pub testing: HashSet<String>,
     /// `/proxies` fetches issued so far; numbers them.
@@ -1687,7 +2047,8 @@ impl App {
             proxies: None,
             config_fetches: 0,
             applied_config: 0,
-            mode_switch: ModeSwitch::Idle,
+            changing: HashMap::new(),
+            settings_view: SettingsView::default(),
             proxies_view: ProxiesView::default(),
             testing: HashSet::new(),
             fetches: 0,
@@ -1897,7 +2258,7 @@ impl App {
             }
             Action::StartFilter => self.set_typing(true),
             Action::FilterInput(key) => self.type_into_filter(key),
-            Action::FilterAccept => self.set_typing(false),
+            Action::FilterAccept => self.accept_input(),
             Action::FilterClear => {
                 self.clear_filter();
                 self.dirty = true;
@@ -1956,7 +2317,7 @@ impl App {
     /// `m`: asks the kernel for the next mode and, once it agrees, fetches
     /// `/configs` to show what it really runs. An unknown mode goes to rule.
     fn cycle_mode(&mut self) {
-        if self.mode_switch != ModeSwitch::Idle {
+        if self.changing.contains_key(&Setting::Mode) {
             return;
         }
         let Some(Ok(configs)) = &self.configs else {
@@ -1964,8 +2325,7 @@ impl App {
             return;
         };
         let target = configs.mode().map_or(Mode::Rule, Mode::next);
-        self.mode_switch = ModeSwitch::Patching;
-        self.spawn(move |client| async move { Msg::ModeSet(client.set_mode(target).await) });
+        self.send_change(Change::Patch(Patch::Mode(target)));
     }
 
     /// Keeps the group cursor sensible when the mode change added or removed
@@ -2030,6 +2390,15 @@ impl App {
                 self.move_in_rules(movement);
                 return;
             }
+            Page::Settings => {
+                let screen = Rect::from(self.size);
+                let capacity = settings::capacity(regions(screen, self.reconnect.is_some()).body);
+                let half = (capacity / 2).max(1);
+                let view = &mut self.settings_view;
+                view.cursor = movement.apply(view.cursor, Setting::ALL.len(), half);
+                self.dirty = true;
+                return;
+            }
             Page::Providers => {
                 let screen = Rect::from(self.size);
                 let capacity = providers::capacity(regions(screen, self.reconnect.is_some()).body);
@@ -2040,7 +2409,7 @@ impl App {
                 return;
             }
             Page::Proxies => {}
-            _ => return,
+            Page::Overview => return,
         }
         match self.proxies_view.focus {
             Pane::Groups if movement == Move::Right => {
@@ -2133,7 +2502,8 @@ impl App {
         self.dirty = true;
     }
 
-    /// Whether the current page's filter box has the keyboard.
+    /// Whether the current page's input box has the keyboard: a filter, or
+    /// the port being edited on the settings page.
     pub fn typing(&self) -> bool {
         match self.page {
             Page::Proxies => self.proxies_view.typing,
@@ -2141,7 +2511,8 @@ impl App {
             Page::Connections => self.connections_view.typing,
             Page::Rules => self.rules_view.typing,
             Page::Logs => self.logs_view.typing,
-            _ => false,
+            Page::Settings => self.settings_view.editing.is_some(),
+            Page::Overview => false,
         }
     }
 
@@ -2169,7 +2540,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// A key typed into the current page's filter box.
+    /// A key typed into the current page's input box.
     fn type_into_filter(&mut self, key: KeyEvent) {
         let event = Event::Key(key);
         match self.page {
@@ -2191,7 +2562,8 @@ impl App {
                 let fit = self.logs_fit();
                 self.logs_view.settle(fit);
             }
-            _ => {}
+            Page::Settings => self.settings_view.type_key(key),
+            Page::Overview => {}
         }
         self.dirty = true;
     }
@@ -2209,7 +2581,17 @@ impl App {
         self.dirty = true;
     }
 
-    /// Drops the current page's filter and gives the keyboard back.
+    /// `Enter` in the input box: keeps the filter, or sends the port typed.
+    fn accept_input(&mut self) {
+        if self.page == Page::Settings {
+            self.submit_port();
+        } else {
+            self.set_typing(false);
+        }
+    }
+
+    /// Drops the current page's filter, or the port being typed, and gives
+    /// the keyboard back.
     fn clear_filter(&mut self) {
         match self.page {
             Page::Proxies => {
@@ -2226,7 +2608,8 @@ impl App {
                 let fit = self.logs_fit();
                 self.logs_view.settle(fit);
             }
-            _ => {}
+            Page::Settings => self.settings_view.editing = None,
+            Page::Overview => {}
         }
     }
 
@@ -2290,7 +2673,8 @@ impl App {
 
     /// `Enter`: on the proxies page, from the group list, moves into the
     /// nodes; on a node, switches the group to it. On the connections page,
-    /// opens the details of the connection under the cursor.
+    /// opens the details of the connection under the cursor. On the
+    /// settings page (`Space` too), acts on the setting under the cursor.
     fn confirm(&mut self) {
         match self.page {
             Page::Proxies if self.selected_group().is_some() => match self.proxies_view.focus {
@@ -2313,7 +2697,134 @@ impl App {
                 self.overlay = Some(Overlay::Connection);
                 self.dirty = true;
             }
+            Page::Settings => self.activate_setting(),
             _ => {}
+        }
+    }
+
+    /// Whether the kernel can take `setting`: original Clash has none of
+    /// the mihomo additions, and a value the kernel did not report cannot
+    /// be changed from. An unknown kernel counts as mihomo; the request
+    /// would say otherwise.
+    pub fn gate(&self, setting: Setting, configs: &Configs) -> Gate {
+        let clash = self.core_kind() == Some(CoreKind::Clash);
+        if clash && setting.mihomo_only() {
+            return Gate::NeedsMihomo;
+        }
+        let reported = match setting {
+            Setting::AllowLan => configs.allow_lan.is_some(),
+            Setting::LogLevel => !configs.log_level.is_empty(),
+            Setting::Ipv6 => configs.ipv6.is_some(),
+            Setting::Port(port) => port.of(configs).is_some(),
+            Setting::Tun => configs.tun.is_some(),
+            Setting::Mode
+            | Setting::Reload
+            | Setting::FlushFakeIp
+            | Setting::UpdateGeo
+            | Setting::Restart
+            | Setting::Upgrade => true,
+        };
+        match (reported, clash) {
+            (true, _) => Gate::Open,
+            (false, true) => Gate::NeedsMihomo,
+            (false, false) => Gate::Missing,
+        }
+    }
+
+    /// Whether a change to `setting` is in progress.
+    pub fn is_changing(&self, setting: Setting) -> bool {
+        self.changing.contains_key(&setting)
+    }
+
+    /// `Enter` / `Space` on a setting: toggles a switch, steps the mode or
+    /// the kernel log level, opens a port for editing, or runs a
+    /// maintenance action, asking first where [`Setting::asks`]. One still
+    /// in progress is left alone; one the kernel lacks only says so.
+    fn activate_setting(&mut self) {
+        let Some(Ok(configs)) = &self.configs else {
+            return;
+        };
+        let setting = self.settings_view.selected();
+        if self.is_changing(setting) {
+            return;
+        }
+        let gate = self.gate(setting, configs);
+        let flip = |on: Option<bool>| !on.unwrap_or_default();
+        let change = match setting {
+            Setting::Mode | Setting::Port(_) => None,
+            Setting::AllowLan => Some(Change::Patch(Patch::AllowLan(flip(configs.allow_lan)))),
+            Setting::LogLevel => Some(Change::Patch(Patch::LogLevel(next_kernel_log_level(
+                &configs.log_level,
+            )))),
+            Setting::Ipv6 => Some(Change::Patch(Patch::Ipv6(flip(configs.ipv6)))),
+            Setting::Tun => Some(Change::Patch(Patch::Tun(flip(
+                configs.tun.as_ref().map(|tun| tun.enable),
+            )))),
+            Setting::Reload => Some(Change::Reload),
+            Setting::FlushFakeIp => Some(Change::FlushFakeIp),
+            Setting::UpdateGeo => Some(Change::UpdateGeo),
+            Setting::Restart => Some(Change::Restart),
+            Setting::Upgrade => Some(Change::Upgrade),
+        };
+        let current_port = match setting {
+            Setting::Port(port) => port.of(configs),
+            _ => None,
+        };
+        match gate {
+            Gate::Open => {}
+            Gate::NeedsMihomo => {
+                self.toast(ToastKind::Error, "需要 mihomo".to_owned());
+                return;
+            }
+            Gate::Missing => {
+                self.toast(ToastKind::Error, "内核没有提供这一项".to_owned());
+                return;
+            }
+        }
+        match (setting, change) {
+            (Setting::Mode, _) => self.cycle_mode(),
+            (Setting::Port(port), _) => {
+                // Off is typed as nothing rather than as a 0 to delete first.
+                let typed = current_port
+                    .filter(|number| *number != 0)
+                    .map(|number| number.to_string())
+                    .unwrap_or_default();
+                self.settings_view.editing = Some((port, Input::new(typed)));
+                self.dirty = true;
+            }
+            (_, Some(change)) if setting.asks() => {
+                self.pending = Some(Confirm::Change(change));
+                self.overlay = Some(Overlay::Confirm);
+                self.dirty = true;
+            }
+            (_, Some(change)) => self.send_change(change),
+            (_, None) => {}
+        }
+    }
+
+    /// `Enter` in the port box: sends a valid port that differs from the
+    /// current one and closes the box; empty closes it without a word;
+    /// anything else is refused with the box left open to fix it.
+    fn submit_port(&mut self) {
+        let Some((port, input)) = self.settings_view.editing.take() else {
+            return;
+        };
+        self.dirty = true;
+        match parse_port(input.value()) {
+            Ok(None) => {}
+            Ok(Some(number)) => {
+                let current = match &self.configs {
+                    Some(Ok(configs)) => port.of(configs),
+                    _ => None,
+                };
+                if current != Some(number) {
+                    self.send_change(Change::Patch(Patch::Port(port, number)));
+                }
+            }
+            Err(why) => {
+                self.settings_view.editing = Some((port, input));
+                self.toast(ToastKind::Error, why.to_owned());
+            }
         }
     }
 
@@ -2370,6 +2881,7 @@ impl App {
         match pending {
             Confirm::CloseConnections(closing) => self.close_connections(closing),
             Confirm::UpdateProviders { targets, .. } => self.update_providers(targets),
+            Confirm::Change(change) => self.send_change(change),
         }
     }
 
@@ -2531,13 +3043,12 @@ impl App {
         self.version.as_ref()?.as_ref().ok().map(Version::kind)
     }
 
-    /// Swaps in a `/configs` reply from fetch `seq`, and ends the mode
-    /// switch if this is the refetch it waited for (or a later one).
+    /// Swaps in a `/configs` reply from fetch `seq`, and ends the changes
+    /// for which this is the refetch they waited for (or a later one).
     fn apply_configs(&mut self, seq: u64, refetch: bool, result: Result<Configs, ApiError>) {
         self.applied_config = seq;
-        if matches!(self.mode_switch, ModeSwitch::Refetching(awaited) if seq >= awaited) {
-            self.mode_switch = ModeSwitch::Idle;
-        }
+        self.changing
+            .retain(|_, stage| !matches!(*stage, Stage::Refetching(awaited) if seq >= awaited));
         self.note_failure(&result);
         // A failed refetch keeps the mode on screen; the toast says why.
         if refetch && result.is_err() && matches!(self.configs, Some(Ok(_))) {
@@ -2549,21 +3060,53 @@ impl App {
         self.follow_mode_change(was_global, selected);
     }
 
-    /// The kernel's answer to `PATCH /configs`: on success, asks what it now
-    /// runs rather than assuming.
-    fn apply_mode_set(&mut self, result: Result<(), ApiError>) {
-        match result {
-            Ok(()) => {
+    /// Sends `change`, unless its setting is already being changed; the
+    /// row spins until it ends.
+    fn send_change(&mut self, change: Change) {
+        let setting = change.setting();
+        if self.changing.contains_key(&setting) {
+            return;
+        }
+        self.changing.insert(setting, Stage::Sending);
+        self.dirty = true;
+        self.spawn(move |client| async move {
+            let result = change.send(&client).await;
+            Msg::Changed { change, result }
+        });
+    }
+
+    /// The kernel's answer to a change. A changed setting asks what the
+    /// kernel now runs rather than assuming, and stays busy until that is
+    /// in; a reload refreshes whatever else is loaded, too. A restart (or
+    /// an upgrade, which restarts) goes through the outage handling: the
+    /// streams drop and their return replays the startup requests.
+    fn apply_change(&mut self, change: Change, result: Result<(), ApiError>) {
+        let setting = change.setting();
+        if let Err(err) = result {
+            self.changing.remove(&setting);
+            self.toast(
+                ToastKind::Error,
+                format!("{}：{}", change.failed(), reason(&err)),
+            );
+            return;
+        }
+        if let Some(text) = change.done() {
+            self.toast(ToastKind::Success, text);
+        }
+        match change {
+            Change::Patch(_) | Change::Reload => {
                 let seq = self.fetch_configs(true);
-                self.mode_switch = ModeSwitch::Refetching(seq);
+                self.changing.insert(setting, Stage::Refetching(seq));
             }
-            Err(err) => {
-                self.mode_switch = ModeSwitch::Idle;
-                self.toast(
-                    ToastKind::Error,
-                    format!("切换模式失败：{}", describe(&err)),
-                );
+            Change::FlushFakeIp | Change::UpdateGeo | Change::Restart | Change::Upgrade => {
+                self.changing.remove(&setting);
             }
+        }
+        if change == Change::Reload {
+            if matches!(self.proxies, Some(Ok(_))) {
+                self.fetch_proxies(true);
+            }
+            self.reload_visited();
         }
     }
 
@@ -2824,7 +3367,7 @@ impl App {
                 refetch,
                 result,
             } => self.apply_configs(seq, refetch, result),
-            Msg::ModeSet(result) => self.apply_mode_set(result),
+            Msg::Changed { change, result } => self.apply_change(change, result),
             // A reply older than one already applied would roll the page back.
             Msg::Proxies { seq, .. } if seq < self.applied_fetch => {}
             Msg::Proxies {
@@ -2929,6 +3472,7 @@ impl App {
         let spinning = match self.page {
             Page::Proxies => !self.testing.is_empty(),
             Page::Providers => self.providers_spinning(),
+            Page::Settings => !self.changing.is_empty(),
             _ => false,
         };
         if self.is_loading() || spinning {
@@ -3048,13 +3592,12 @@ impl App {
     /// Whether the current page is waiting for data (and so shows a spinner).
     pub fn is_loading(&self) -> bool {
         match self.page {
-            Page::Overview => self.configs.is_none(),
+            Page::Overview | Page::Settings => self.configs.is_none(),
             Page::Proxies => self.proxies.is_none(),
             Page::Connections => self.connections_view.rows.is_none(),
             Page::Rules => self.rules_view.rows.is_none(),
             Page::Providers => self.providers_view.loading(),
             Page::Logs => self.logs_view.waiting(),
-            Page::Settings => false,
         }
     }
 
@@ -3258,6 +3801,10 @@ impl App {
             },
             // Like the rules, one list at a time.
             Page::Providers => self.load_providers(),
+            // What is on screen may have changed outside tabby.
+            Page::Settings if matches!(self.configs, Some(Ok(_))) => {
+                self.fetch_configs(true);
+            }
             _ => {}
         }
     }
@@ -3970,23 +4517,24 @@ mod tests {
         stream_event(app, stream, StreamEvent::Disconnected);
     }
 
-    /// How many `/version`, `/configs`, `/proxies` and mode `PATCH` requests
-    /// the app made, counted from the replies they leave on the channel.
-    /// Dropping the app first stops its streams, so the channel closes once
-    /// the requests are answered and nothing can still be on its way.
+    /// How many `/version`, `/configs`, `/proxies` and change (mode switch,
+    /// setting) requests the app made, counted from the replies they leave
+    /// on the channel. Dropping the app first stops its streams, so the
+    /// channel closes once the requests are answered and nothing can still
+    /// be on its way.
     async fn requests_made(app: App, mut rx: mpsc::Receiver<Msg>) -> (usize, usize, usize, usize) {
         drop(app);
-        let (mut versions, mut configs, mut proxies, mut modes) = (0, 0, 0, 0);
+        let (mut versions, mut configs, mut proxies, mut changes) = (0, 0, 0, 0);
         while let Some(msg) = rx.recv().await {
             match msg {
                 Msg::Version(_) => versions += 1,
                 Msg::Configs { .. } => configs += 1,
                 Msg::Proxies { .. } => proxies += 1,
-                Msg::ModeSet(_) => modes += 1,
+                Msg::Changed { .. } => changes += 1,
                 _ => {}
             }
         }
-        (versions, configs, proxies, modes)
+        (versions, configs, proxies, changes)
     }
 
     #[tokio::test]
@@ -4183,6 +4731,14 @@ mod tests {
         }
     }
 
+    /// The reply to the mode switch `m` sent.
+    fn mode_set(result: Result<(), ApiError>) -> Msg {
+        Msg::Changed {
+            change: Change::Patch(Patch::Mode(Mode::Global)),
+            result,
+        }
+    }
+
     #[tokio::test]
     async fn m_sends_one_patch_until_the_refetch_answers() {
         let (mut app, rx) = app_without_controller();
@@ -4193,7 +4749,7 @@ mod tests {
         app.update(Action::CycleMode);
 
         // Patched: the refetch (number 2) is in flight.
-        app.handle_msg(Msg::ModeSet(Ok(())));
+        app.handle_msg(mode_set(Ok(())));
         app.update(Action::CycleMode);
 
         // An older fetch answering first says nothing about the new mode.
@@ -4212,12 +4768,12 @@ mod tests {
         let (mut app, rx) = app_without_controller();
         set_mode(&mut app, "rule");
         app.update(Action::CycleMode);
-        app.handle_msg(Msg::ModeSet(Err(http(500))));
+        app.handle_msg(mode_set(Err(http(500))));
         assert_eq!(app.toasts.len(), 1);
         assert!(matches!(app.configs, Some(Ok(_))));
 
         app.update(Action::CycleMode);
-        app.handle_msg(Msg::ModeSet(Ok(())));
+        app.handle_msg(mode_set(Ok(())));
         app.handle_msg(Msg::Configs {
             seq: 2,
             refetch: true,
@@ -4268,7 +4824,10 @@ mod tests {
             let (mut app, mut rx) = app_at(&server.uri());
             set_mode(&mut app, current);
             app.update(Action::CycleMode);
-            assert!(matches!(rx.recv().await, Some(Msg::ModeSet(Ok(())))));
+            assert!(matches!(
+                rx.recv().await,
+                Some(Msg::Changed { result: Ok(()), .. })
+            ));
 
             let requests = server.received_requests().await.unwrap();
             assert_eq!(requests.len(), 1, "{current}");
@@ -5715,5 +6274,284 @@ mod tests {
                 ProviderSent::Rules(false),
             ]
         );
+    }
+
+    const MIHOMO_CONFIGS: &str = include_str!("../tests/fixtures/mihomo_configs.json");
+
+    /// On the settings page of a kernel (mihomo when `meta`) whose
+    /// `/configs` replied `configs`.
+    fn settings_app(url: &str, meta: bool, configs: &str) -> (App, mpsc::Receiver<Msg>) {
+        let (mut app, rx) = app_at(url);
+        app.page = Page::Settings;
+        app.version = Some(Ok(kernel(meta)));
+        app.configs = Some(Ok(serde_json::from_str(configs).unwrap()));
+        (app, rx)
+    }
+
+    fn select(app: &mut App, setting: Setting) {
+        app.settings_view.cursor = Setting::ALL.iter().position(|s| *s == setting).unwrap();
+    }
+
+    /// Presses `code` as the event loop would.
+    fn key_press(app: &mut App, code: KeyCode) {
+        let event = Event::Key(KeyEvent::new(code, KeyModifiers::NONE));
+        if let Some(action) = action_for(&event, app.page, app.typing()) {
+            app.update(action);
+        }
+    }
+
+    fn type_text(app: &mut App, text: &str) {
+        for ch in text.chars() {
+            key_press(app, KeyCode::Char(ch));
+        }
+    }
+
+    /// Opens the port under the cursor, unless it is open, and types `text`
+    /// over what it held.
+    fn retype_port(app: &mut App, text: &str) {
+        if app.settings_view.editing.is_none() {
+            key_press(app, KeyCode::Enter);
+        }
+        for _ in 0..5 {
+            key_press(app, KeyCode::Backspace);
+        }
+        type_text(app, text);
+    }
+
+    fn port_box(app: &App) -> Option<&str> {
+        let (_, input) = app.settings_view.editing.as_ref()?;
+        Some(input.value())
+    }
+
+    #[test]
+    fn a_typed_port_is_a_number_from_0_to_65535_or_nothing() {
+        assert_eq!(parse_port(""), Ok(None));
+        assert_eq!(parse_port("0"), Ok(Some(0)));
+        assert_eq!(parse_port("65535"), Ok(Some(65535)));
+        assert_eq!(parse_port("0017890"), Ok(Some(17890)));
+        for refused in [
+            "65536",
+            "70000",
+            "99999999999999999999999",
+            "12a",
+            "-1",
+            " 80",
+        ] {
+            assert!(parse_port(refused).is_err(), "{refused}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_port_box_takes_digits_and_sends_only_a_new_valid_port() {
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        select(&mut app, Setting::Port(Port::Mixed));
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(port_box(&app), Some("17890"));
+        // It has the keyboard: `m`, `q` and `7` neither switch modes, quit
+        // nor change pages, and letters are not taken.
+        retype_port(&mut app, "7a0m0q00");
+        assert_eq!(port_box(&app), Some("70000"));
+        assert!(!app.should_quit() && app.page == Page::Settings);
+        // Out of range: refused, and left open to fix.
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(port_box(&app), Some("70000"));
+        assert_eq!(app.toasts.back().unwrap().text, "端口须在 0–65535 之间");
+        key_press(&mut app, KeyCode::Esc);
+        assert!(port_box(&app).is_none() && !app.typing());
+        // Nothing typed, or the port it already is: closed, nothing sent.
+        retype_port(&mut app, "");
+        key_press(&mut app, KeyCode::Enter);
+        retype_port(&mut app, "17890");
+        key_press(&mut app, KeyCode::Enter);
+        assert!(port_box(&app).is_none());
+        assert_eq!(app.toasts.len(), 1);
+        // 0 turns it off.
+        retype_port(&mut app, "0");
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.is_changing(Setting::Port(Port::Mixed)));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 1));
+    }
+
+    #[tokio::test]
+    async fn what_the_kernel_lacks_is_refused_without_a_request() {
+        // Original Clash, without `ipv6` and a SOCKS port besides.
+        let clash =
+            r#"{"port":0,"mixed-port":7890,"allow-lan":false,"mode":"rule","log-level":"info"}"#;
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", false, clash);
+        for setting in [
+            Setting::Ipv6,
+            Setting::Port(Port::Socks),
+            Setting::Tun,
+            Setting::FlushFakeIp,
+            Setting::UpdateGeo,
+            Setting::Restart,
+            Setting::Upgrade,
+        ] {
+            select(&mut app, setting);
+            key_press(&mut app, KeyCode::Enter);
+            assert!(app.overlay.is_none() && !app.typing(), "{setting:?}");
+            assert_eq!(
+                app.toasts.back().unwrap().text,
+                "需要 mihomo",
+                "{setting:?}"
+            );
+        }
+        // What Clash does have works.
+        select(&mut app, Setting::AllowLan);
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 1));
+
+        // mihomo leaving a value out: unknown rather than off, and not sent.
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, r#"{"mode":"rule"}"#);
+        select(&mut app, Setting::Ipv6);
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.toasts.back().unwrap().text, "内核没有提供这一项");
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn each_setting_sends_its_request_and_the_dangerous_ones_ask_first() {
+        use serde_json::{Value, json};
+        use wiremock::{Mock, MockServer, ResponseTemplate, matchers::any};
+
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        // allow-lan off, log-level info, ipv6 on, mixed-port 17890, TUN off.
+        let (mut app, mut rx) = settings_app(&server.uri(), true, MIHOMO_CONFIGS);
+        let expected = [
+            (
+                Setting::AllowLan,
+                "PATCH",
+                "/configs",
+                json!({"allow-lan": true}),
+            ),
+            (
+                Setting::LogLevel,
+                "PATCH",
+                "/configs",
+                json!({"log-level": "debug"}),
+            ),
+            (Setting::Ipv6, "PATCH", "/configs", json!({"ipv6": false})),
+            (
+                Setting::Port(Port::Mixed),
+                "PATCH",
+                "/configs",
+                json!({"mixed-port": 17891}),
+            ),
+            (
+                Setting::Tun,
+                "PATCH",
+                "/configs",
+                json!({"tun": {"enable": true}}),
+            ),
+            (
+                Setting::Reload,
+                "PUT",
+                "/configs?force=true",
+                json!({"path": "", "payload": ""}),
+            ),
+            (
+                Setting::FlushFakeIp,
+                "POST",
+                "/cache/fakeip/flush",
+                Value::Null,
+            ),
+            (Setting::UpdateGeo, "POST", "/configs/geo", Value::Null),
+            (Setting::Restart, "POST", "/restart", Value::Null),
+            (Setting::Upgrade, "POST", "/upgrade", Value::Null),
+        ];
+        for (setting, ..) in &expected {
+            select(&mut app, *setting);
+            if setting.asks() {
+                key_press(&mut app, KeyCode::Enter);
+                assert_eq!(app.overlay, Some(Overlay::Confirm), "{setting:?}");
+                key_press(&mut app, KeyCode::Char('n'));
+                assert!(app.overlay.is_none() && app.pending.is_none());
+                key_press(&mut app, KeyCode::Char(' '));
+                key_press(&mut app, KeyCode::Char('y'));
+            } else if let Setting::Port(_) = setting {
+                retype_port(&mut app, "17891");
+                key_press(&mut app, KeyCode::Enter);
+            } else {
+                key_press(&mut app, KeyCode::Char(' '));
+            }
+            assert!(
+                matches!(rx.recv().await, Some(Msg::Changed { result: Ok(()), .. })),
+                "{setting:?}"
+            );
+        }
+
+        // In order, one each: `n` sent nothing.
+        let requests = server.received_requests().await.unwrap();
+        let sent: Vec<(String, String, Value)> = requests
+            .iter()
+            .map(|request| {
+                let query = request.url.query().map(|q| format!("?{q}"));
+                let body = if request.body.is_empty() {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&request.body).unwrap()
+                };
+                (
+                    request.method.to_string(),
+                    format!("{}{}", request.url.path(), query.unwrap_or_default()),
+                    body,
+                )
+            })
+            .collect();
+        let expected: Vec<(String, String, Value)> = expected
+            .into_iter()
+            .map(|(_, verb, route, body)| (verb.to_owned(), route.to_owned(), body))
+            .collect();
+        assert_eq!(sent, expected);
+    }
+
+    #[tokio::test]
+    async fn a_setting_in_progress_takes_no_second_press_and_old_replies_cannot_undo_it() {
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        // The startup fetch, number 1, is slow.
+        app.config_fetches = 1;
+        select(&mut app, Setting::AllowLan);
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Enter);
+
+        // Patched: the refetch, number 2, is in flight and the row still busy.
+        app.handle_msg(Msg::Changed {
+            change: Change::Patch(Patch::AllowLan(true)),
+            result: Ok(()),
+        });
+        assert_eq!(app.toasts.back().unwrap().text, "局域网连接已开启");
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.is_changing(Setting::AllowLan));
+
+        let lan = |on: bool| Configs {
+            allow_lan: Some(on),
+            mode: "rule".to_owned(),
+            ..Configs::default()
+        };
+        app.handle_msg(Msg::Configs {
+            seq: 2,
+            refetch: true,
+            result: Ok(lan(true)),
+        });
+        assert!(!app.is_changing(Setting::AllowLan));
+        // The slow startup reply, from before the patch, is dropped.
+        app.handle_msg(Msg::Configs {
+            seq: 1,
+            refetch: false,
+            result: Ok(lan(false)),
+        });
+        assert!(matches!(&app.configs, Some(Ok(c)) if c.allow_lan == Some(true)));
+
+        // Free again: the next press switches it back off. A maintenance
+        // action is not sent twice either.
+        key_press(&mut app, KeyCode::Enter);
+        select(&mut app, Setting::FlushFakeIp);
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Char(' '));
+        assert_eq!(requests_made(app, rx).await, (0, 1, 0, 3));
     }
 }

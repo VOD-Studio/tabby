@@ -15,6 +15,16 @@ pub fn describe(err: &ApiError) -> String {
     }
 }
 
+/// Why something the user asked the kernel to do failed: the kernel's own
+/// message when it refused (it says more than the status, e.g. that there
+/// is no newer version to upgrade to), else [`describe`].
+pub fn reason(err: &ApiError) -> String {
+    match err {
+        ApiError::Http { message, .. } if !message.is_empty() => message.clone(),
+        _ => describe(err),
+    }
+}
+
 /// The untranslated cause behind [`describe`], when it adds information.
 pub fn detail(err: &ApiError) -> Option<&str> {
     match err {

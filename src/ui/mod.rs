@@ -6,15 +6,13 @@ pub mod providers;
 pub mod proxies;
 pub mod rules;
 pub mod scroll;
+pub mod settings;
 pub mod text;
 pub mod theme;
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
-    text::Line,
-    widgets::Paragraph,
+    layout::{Constraint, Layout, Rect},
 };
 
 use crate::{
@@ -95,7 +93,7 @@ pub fn page_title(page: Page) -> &'static str {
     }
 }
 
-/// Page bodies are still to come; routing and the data states are real.
+/// The current page into the body, through its loading and error states.
 fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
     match app.page {
         Page::Overview => {
@@ -124,7 +122,12 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
         }
         Page::Connections => connections::render(frame, area, app),
         Page::Logs => logs::render(frame, area, app),
-        Page::Settings => draw_unbuilt(frame, area, app),
+        Page::Settings => {
+            if let Some(configs) = ready(frame, area, app, app.configs.as_ref(), "正在读取设置…")
+            {
+                settings::render(frame, area, app, configs);
+            }
+        }
     }
 }
 
@@ -148,23 +151,4 @@ fn ready<'a, T>(
         }
         Some(Ok(data)) => Some(data),
     }
-}
-
-fn draw_unbuilt(frame: &mut Frame, area: Rect, app: &App) {
-    let theme = app.theme;
-    let lines = vec![
-        Line::styled(
-            page_title(app.page),
-            Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
-        ),
-        Line::styled("此页面尚未实现", Style::new().fg(theme.muted)),
-    ];
-    let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
-    let [_, middle, _] = Layout::vertical([
-        Constraint::Fill(1),
-        Constraint::Length(rows),
-        Constraint::Fill(1),
-    ])
-    .areas(area);
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), middle);
 }
