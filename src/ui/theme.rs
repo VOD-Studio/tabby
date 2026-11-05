@@ -1,4 +1,4 @@
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style};
 
 use crate::config::ThemeName;
 
@@ -17,6 +17,9 @@ pub struct Theme {
     pub warning: Color,
     /// Failed / timed out / off-limits.
     pub error: Color,
+    /// Cursor row background. A style rather than a color: the `terminal`
+    /// theme has no background of its own to pick and inverts instead.
+    pub surface: Style,
 }
 
 impl Theme {
@@ -28,6 +31,7 @@ impl Theme {
         success: Color::Green,
         warning: Color::Yellow,
         error: Color::Red,
+        surface: Style::new().add_modifier(Modifier::REVERSED),
     };
 
     const TOKYO_NIGHT: Self = Self {
@@ -37,6 +41,7 @@ impl Theme {
         success: Color::Rgb(0x9e, 0xce, 0x6a),
         warning: Color::Rgb(0xe0, 0xaf, 0x68),
         error: Color::Rgb(0xf7, 0x76, 0x8e),
+        surface: Style::new().bg(Color::Rgb(0x29, 0x2e, 0x42)),
     };
 
     const CATPPUCCIN_MOCHA: Self = Self {
@@ -46,7 +51,18 @@ impl Theme {
         success: Color::Rgb(0xa6, 0xe3, 0xa1),
         warning: Color::Rgb(0xf9, 0xe2, 0xaf),
         error: Color::Rgb(0xf3, 0x8b, 0xa8),
+        surface: Style::new().bg(Color::Rgb(0x31, 0x32, 0x44)),
     };
+
+    /// Color for a delay test result: under 200 ms good, up to 500 ms slow,
+    /// beyond that bad.
+    pub fn delay(&self, millis: u32) -> Color {
+        match millis {
+            0..200 => self.success,
+            200..=500 => self.warning,
+            _ => self.error,
+        }
+    }
 }
 
 impl From<ThemeName> for Theme {

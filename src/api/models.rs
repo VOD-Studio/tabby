@@ -59,8 +59,31 @@ pub const GLOBAL: &str = "GLOBAL";
 #[serde(default)]
 pub struct Proxy {
     pub name: String,
+    /// Protocol or group type, as the kernel spells it: `Selector`, `URLTest`,
+    /// `Fallback`, `LoadBalance`, `Shadowsocks`, `Trojan` …
+    #[serde(rename = "type")]
+    pub kind: String,
     /// Member names; only groups have them.
     pub all: Option<Vec<String>>,
+    /// The member a group currently routes through.
+    pub now: Option<String>,
+    /// Delay test results, oldest first.
+    pub history: Vec<DelayRecord>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct DelayRecord {
+    /// Milliseconds; 0 when the test failed.
+    pub delay: u32,
+}
+
+impl Proxy {
+    /// Result of the latest delay test: `Some(0)` is a failed test, `None`
+    /// means never tested.
+    pub fn delay(&self) -> Option<u32> {
+        self.history.last().map(|record| record.delay)
+    }
 }
 
 #[derive(Deserialize)]
@@ -118,6 +141,10 @@ impl Proxies {
         self.group_order
             .iter()
             .filter_map(|name| self.by_name.get(name))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&Proxy> {
+        self.by_name.get(name)
     }
 }
 

@@ -1,4 +1,6 @@
 pub mod components;
+pub mod proxies;
+pub mod scroll;
 pub mod text;
 pub mod theme;
 
@@ -11,7 +13,7 @@ use ratatui::{
 };
 
 use crate::{
-    api::{error::ApiError, models::GLOBAL},
+    api::error::ApiError,
     app::{App, Overlay, Page},
 };
 
@@ -67,33 +69,16 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
     match app.page {
         Page::Overview => {
             if ready(frame, area, app, app.configs.as_ref(), "正在连接控制器…").is_some() {
-                draw_unbuilt(frame, area, app, None);
+                draw_unbuilt(frame, area, app);
             }
         }
         Page::Proxies => {
             if let Some(proxies) = ready(frame, area, app, app.proxies.as_ref(), "正在加载代理…")
             {
-                // GLOBAL only matters in global mode.
-                let global_mode =
-                    matches!(&app.configs, Some(Ok(configs)) if configs.mode == "global");
-                let groups = proxies
-                    .groups()
-                    .filter(|group| global_mode || group.name != GLOBAL)
-                    .count();
-                if groups == 0 {
-                    components::states::empty(
-                        frame,
-                        area,
-                        app,
-                        "配置里没有代理组",
-                        &[("r", "刷新")],
-                    );
-                } else {
-                    draw_unbuilt(frame, area, app, Some(format!("{groups} 个代理组")));
-                }
+                proxies::render(frame, area, app, proxies);
             }
         }
-        _ => draw_unbuilt(frame, area, app, None),
+        _ => draw_unbuilt(frame, area, app),
     }
 }
 
@@ -119,14 +104,15 @@ fn ready<'a, T>(
     }
 }
 
-fn draw_unbuilt(frame: &mut Frame, area: Rect, app: &App, summary: Option<String>) {
+fn draw_unbuilt(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
-    let mut lines = vec![Line::styled(
-        page_title(app.page),
-        Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
-    )];
-    lines.extend(summary.map(|summary| Line::styled(summary, Style::new().fg(theme.fg))));
-    lines.push(Line::styled("此页面尚未实现", Style::new().fg(theme.muted)));
+    let lines = vec![
+        Line::styled(
+            page_title(app.page),
+            Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
+        ),
+        Line::styled("此页面尚未实现", Style::new().fg(theme.muted)),
+    ];
     let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let [_, middle, _] = Layout::vertical([
         Constraint::Fill(1),

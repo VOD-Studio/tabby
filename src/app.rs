@@ -11,10 +11,10 @@ use crate::{
         backoff,
         client::ApiClient,
         error::ApiError,
-        models::{Configs, Proxies, Version},
+        models::{Configs, GLOBAL, Proxies, Proxy, Version},
     },
     config::Settings,
-    ui::{text::describe, theme::Theme},
+    ui::{scroll::Scroll, text::describe, theme::Theme},
 };
 
 /// The seven top-level pages, in tab order.
@@ -55,6 +55,53 @@ impl Page {
     }
 }
 
+/// Cursor movement inside the focused list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Move {
+    Up,
+    Down,
+    Top,
+    Bottom,
+    HalfUp,
+    HalfDown,
+}
+
+/// Rows covered by half a page (`Ctrl+u` / `Ctrl+d`).
+const HALF_PAGE: usize = 10;
+
+impl Move {
+    /// The cursor position after this move in a list of `len` items.
+    fn apply(self, cursor: usize, len: usize) -> usize {
+        let last = len.saturating_sub(1);
+        let cursor = cursor.min(last);
+        match self {
+            Self::Up => cursor.saturating_sub(1),
+            Self::Down => (cursor + 1).min(last),
+            Self::Top => 0,
+            Self::Bottom => last,
+            Self::HalfUp => cursor.saturating_sub(HALF_PAGE),
+            Self::HalfDown => (cursor + HALF_PAGE).min(last),
+        }
+    }
+}
+
+/// The two panels of the proxies page.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Pane {
+    #[default]
+    Groups,
+    Nodes,
+}
+
+/// Cursor and focus of the proxies page.
+#[derive(Debug, Default)]
+pub struct ProxiesView {
+    pub focus: Pane,
+    /// Index into [`App::visible_groups`].
+    pub group: usize,
+    pub group_scroll: Scroll,
+}
+
 /// A user intent, derived from a terminal event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -64,6 +111,8 @@ pub enum Action {
     NextPage,
     PrevPage,
     Refresh,
+    Cursor(Move),
+    Focus(Pane),
     ToggleHelp,
     /// `Esc`: closes the topmost overlay.
     Dismiss,
@@ -78,13 +127,15 @@ pub enum Msg {
 }
 
 /// Maps a terminal event to an [`Action`]; `None` means the event is ignored.
-pub fn action_for(event: &Event) -> Option<Action> {
+pub fn action_for(event: &Event, page: Page) -> Option<Action> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let alt = key.modifiers.contains(KeyModifiers::ALT);
             match key.code {
                 KeyCode::Char('c') if ctrl => Some(Action::Quit),
+                KeyCode::Char('d') if ctrl => Some(Action::Cursor(Move::HalfDown)),
+                KeyCode::Char('u') if ctrl => Some(Action::Cursor(Move::HalfUp)),
                 KeyCode::Tab => Some(Action::NextPage),
                 KeyCode::BackTab => Some(Action::PrevPage),
                 KeyCode::Esc => Some(Action::Dismiss),
@@ -92,6 +143,12 @@ pub fn action_for(event: &Event) -> Option<Action> {
                 KeyCode::Char('q') => Some(Action::Quit),
                 KeyCode::Char('r') => Some(Action::Refresh),
                 KeyCode::Char('?') => Some(Action::ToggleHelp),
+                KeyCode::Down | KeyCode::Char('j') => Some(Action::Cursor(Move::Down)),
+                KeyCode::Up | KeyCode::Char('k') => Some(Action::Cursor(Move::Up)),
+                KeyCode::Char('g') => Some(Action::Cursor(Move::Top)),
+                KeyCode::Char('G') => Some(Action::Cursor(Move::Bottom)),
+                KeyCode::Char('h') if page == Page::Proxies => Some(Action::Focus(Pane::Groups)),
+                KeyCode::Char('l') if page == Page::Proxies => Some(Action::Focus(Pane::Nodes)),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -157,6 +214,7 @@ pub struct App {
     pub version: Option<Result<Version, ApiError>>,
     pub configs: Option<Result<Configs, ApiError>>,
     pub proxies: Option<Result<Proxies, ApiError>>,
+    pub proxies_view: ProxiesView,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
     /// Frame counter of the loading spinner; advances while one is visible.
@@ -180,6 +238,7 @@ impl App {
             version: None,
             configs: None,
             proxies: None,
+            proxies_view: ProxiesView::default(),
             toasts: VecDeque::new(),
             overlay: None,
             spinner: 0,
@@ -230,6 +289,13 @@ impl App {
             Action::SelectPage(page) => self.set_page(page),
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
+            Action::Cursor(movement) => self.move_cursor(movement),
+            Action::Focus(pane) => {
+                if self.page == Page::Proxies && self.visible_groups().next().is_some() {
+                    self.proxies_view.focus = pane;
+                    self.dirty = true;
+                }
+            }
             Action::Refresh => {
                 // A failed request shows as loading again while it is retried.
                 if matches!(self.version, Some(Err(_))) {
@@ -248,6 +314,30 @@ impl App {
                 self.refreshing = true;
                 self.start();
             }
+        }
+    }
+
+    /// Groups the proxies page lists: `GLOBAL` only counts in global mode.
+    pub fn visible_groups(&self) -> impl Iterator<Item = &Proxy> {
+        let global_mode = matches!(&self.configs, Some(Ok(configs)) if configs.mode == "global");
+        self.proxies
+            .iter()
+            .filter_map(|proxies| proxies.as_ref().ok())
+            .flat_map(Proxies::groups)
+            .filter(move |group| global_mode || group.name != GLOBAL)
+    }
+
+    fn move_cursor(&mut self, movement: Move) {
+        if self.page != Page::Proxies {
+            return;
+        }
+        match self.proxies_view.focus {
+            Pane::Groups => {
+                let len = self.visible_groups().count();
+                self.proxies_view.group = movement.apply(self.proxies_view.group, len);
+                self.dirty = true;
+            }
+            Pane::Nodes => {}
         }
     }
 

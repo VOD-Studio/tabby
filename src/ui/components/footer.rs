@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph},
 };
 
-use crate::app::{App, Overlay};
+use crate::app::{App, Overlay, Page};
 
 /// Keys that work on every page, as `(key, what it does)`.
 const GLOBAL_HINTS: [(&str, &str); 4] = [
@@ -19,10 +19,22 @@ const GLOBAL_HINTS: [(&str, &str); 4] = [
 /// Keys while the help overlay is open.
 const HELP_HINTS: [(&str, &str); 2] = [("Esc/?", "关闭帮助"), ("q", "退出")];
 
-fn hints(app: &App) -> &'static [(&'static str, &'static str)] {
+/// Keys that only work on the given page.
+fn page_hints(page: Page) -> &'static [(&'static str, &'static str)] {
+    match page {
+        Page::Proxies => &[("j/k", "移动"), ("h/l", "切换面板")],
+        _ => &[],
+    }
+}
+
+fn hints(app: &App) -> Vec<(&'static str, &'static str)> {
     match app.overlay {
-        Some(Overlay::Help) => &HELP_HINTS,
-        None => &GLOBAL_HINTS,
+        Some(Overlay::Help) => HELP_HINTS.to_vec(),
+        None => page_hints(app.page)
+            .iter()
+            .chain(&GLOBAL_HINTS)
+            .copied()
+            .collect(),
     }
 }
 
@@ -38,12 +50,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let hints = hints(app);
     let mut spans = Vec::with_capacity(hints.len() * 3);
-    for (index, (key, description)) in hints.iter().enumerate() {
+    for (index, (key, description)) in hints.into_iter().enumerate() {
         if index > 0 {
             spans.push(Span::raw("   "));
         }
         spans.push(Span::styled(
-            *key,
+            key,
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         ));
         spans.push(Span::styled(
