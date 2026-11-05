@@ -1,14 +1,9 @@
-use ratatui::{
-    Frame,
-    layout::Rect,
-    style::Style,
-    text::Line,
-    widgets::{Block, BorderType, Clear, Padding, Paragraph},
-};
+use ratatui::{Frame, layout::Rect, style::Style, text::Line, widgets::Paragraph};
 
 use crate::{
     app::{App, ToastKind},
     format::truncate,
+    ui::components::popup,
 };
 
 /// Widest toast, borders included.
@@ -38,16 +33,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             height: 3,
         }
         .intersection(area);
-        frame.render_widget(Clear, rect);
-        frame.render_widget(
-            Paragraph::new(line.style(Style::new().fg(color))).block(
-                Block::bordered()
-                    .border_type(BorderType::Rounded)
-                    .border_style(Style::new().fg(color))
-                    .padding(Padding::horizontal(1)),
-            ),
-            rect,
-        );
+        let inner = popup::panel(frame, rect, color);
+        frame.render_widget(Paragraph::new(line.style(Style::new().fg(color))), inner);
         y = y.saturating_add(3);
     }
 }
