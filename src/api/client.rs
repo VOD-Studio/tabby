@@ -232,10 +232,14 @@ impl ApiClient {
     }
 
     /// `GET /proxies/{name}/delay`: milliseconds to fetch `url` through the
-    /// node. A failed or timed-out test is an HTTP 503 / 504 error.
+    /// node. A node from a proxy provider goes through
+    /// `GET /providers/proxies/{provider}/{name}/healthcheck` instead, which
+    /// answers the same way: `/proxies/{name}` does not know such nodes. A
+    /// failed or timed-out test is an HTTP 503 / 504 error.
     pub async fn proxy_delay(
         &self,
         name: &str,
+        provider: Option<&str>,
         url: &str,
         timeout_ms: u32,
     ) -> Result<u32, ApiError> {
@@ -244,11 +248,12 @@ impl ApiClient {
             delay: u32,
         }
         let timeout = timeout_ms.to_string();
+        let segments: &[&str] = match provider {
+            Some(provider) => &["providers", "proxies", provider, name, "healthcheck"],
+            None => &["proxies", name, "delay"],
+        };
         let reply: Reply = self
-            .get_json_query(
-                &["proxies", name, "delay"],
-                &[("url", url), ("timeout", &timeout)],
-            )
+            .get_json_query(segments, &[("url", url), ("timeout", &timeout)])
             .await?;
         Ok(reply.delay)
     }
@@ -475,26 +480,43 @@ mod tests {
 
     #[tokio::test]
     async fn proxy_delay_encodes_name_and_query() {
+        const NODE: &str = "a%2Fb%23c%25d%20e%3Ff";
+        // A node from a provider is tested through it.
+        let routes = [
+            (None, format!("/proxies/{NODE}/delay"), 42),
+            (
+                Some("机场 订阅/1"),
+                format!(
+                    "/providers/proxies/%E6%9C%BA%E5%9C%BA%20%E8%AE%A2%E9%98%85%2F1/{NODE}/healthcheck"
+                ),
+                43,
+            ),
+        ];
         let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/proxies/a%2Fb%23c%25d%20e%3Ff/delay"))
-            .and(query_param("url", "https://t.example/generate_204?x=1&y=2"))
-            .and(query_param("timeout", "5000"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"delay": 42})))
-            .expect(1)
-            .mount(&server)
-            .await;
+        for (_, route, delay) in &routes {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .and(query_param("url", "https://t.example/generate_204?x=1&y=2"))
+                .and(query_param("timeout", "5000"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "delay": delay })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
 
         let client = ApiClient::new(&server.uri(), None).unwrap();
-        let delay = client
-            .proxy_delay(
-                "a/b#c%d e?f",
-                "https://t.example/generate_204?x=1&y=2",
-                5000,
-            )
-            .await
-            .unwrap();
-        assert_eq!(delay, 42);
+        for (provider, _, delay) in routes {
+            let measured = client
+                .proxy_delay(
+                    "a/b#c%d e?f",
+                    provider,
+                    "https://t.example/generate_204?x=1&y=2",
+                    5000,
+                )
+                .await
+                .unwrap();
+            assert_eq!(measured, delay);
+        }
     }
 
     #[tokio::test]

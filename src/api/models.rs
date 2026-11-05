@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, hash_map::Entry};
 
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer};
@@ -428,6 +428,12 @@ pub struct Proxy {
     /// Delay test results, oldest first.
     pub history: Vec<DelayRecord>,
     pub udp: bool,
+    /// The proxy provider the node comes from, for the nodes `GET /proxies`
+    /// leaves out (see [`Proxies::add_provider_nodes`]). The kernel tests
+    /// those through the provider: `/proxies/{name}/delay` does not know
+    /// them.
+    #[serde(skip)]
+    pub provider: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -576,6 +582,20 @@ impl Proxies {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// Adds the nodes of `providers`: `GET /proxies` leaves them out,
+    /// although the groups that use a provider list them as members. A name
+    /// `/proxies` has already keeps its entry there.
+    pub fn add_provider_nodes(&mut self, providers: Vec<ProxyProvider>) {
+        for provider in providers {
+            for mut node in provider.proxies {
+                if let Entry::Vacant(slot) = self.by_name.entry(node.name.clone()) {
+                    node.provider = Some(provider.name.clone());
+                    slot.insert(node);
+                }
+            }
         }
     }
 }
@@ -1101,6 +1121,46 @@ mod tests {
             group_names(&proxies),
             ["节点选择", "自动选择", "故障转移", "负载均衡", "GLOBAL"]
         );
+    }
+
+    #[test]
+    fn provider_nodes_fill_in_what_proxies_leaves_out() {
+        // `直连 B` is only in the Compatible `负载均衡`; `集合 直连 2` is in
+        // `/proxies` too, under another type.
+        let mut proxies: Proxies = serde_json::from_str(
+            r#"{"proxies":{
+                "节点选择":{"name":"节点选择","type":"Selector",
+                    "all":["直连 B","集合 直连 1","集合 直连 2","订阅 直连 1"]},
+                "集合 直连 2":{"name":"集合 直连 2","type":"Shadowsocks","history":[]}
+            }}"#,
+        )
+        .unwrap();
+        let list: ProviderList<ProxyProvider> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/mihomo_proxy_providers.json"
+        ))
+        .unwrap();
+        proxies.add_provider_nodes(list.shown());
+
+        let node = |name| proxies.get(name);
+        let joined = node("集合 直连 1").unwrap();
+        assert_eq!(
+            (
+                joined.kind.as_str(),
+                joined.provider.as_deref(),
+                joined.delay()
+            ),
+            ("Direct", Some("本地集合"), Some(Delay::Millis(3422)))
+        );
+        assert_eq!(
+            node("订阅 直连 1").unwrap().provider.as_deref(),
+            Some("机场 订阅")
+        );
+        let kept = node("集合 直连 2").unwrap();
+        assert_eq!(
+            (kept.kind.as_str(), kept.provider.as_deref(), kept.delay()),
+            ("Shadowsocks", None, None)
+        );
+        assert!(node("直连 B").is_none());
     }
 
     fn rule(kind: &str, payload: &str, proxy: &str) -> Rule {

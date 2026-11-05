@@ -1297,12 +1297,15 @@ pub enum Msg {
         change: Change,
         result: Result<(), ApiError>,
     },
-    /// Reply to a `/proxies` fetch. `refetch` marks one made while data is
-    /// already on screen, whose failure must not take that data away.
+    /// Reply to a load of the proxies page: `/proxies` and, for the nodes it
+    /// leaves out, `/providers/proxies`, fetched together. `refetch` marks
+    /// one made while data is already on screen, whose failure must not take
+    /// that data away.
     Proxies {
         seq: u64,
         refetch: bool,
         result: Result<Proxies, ApiError>,
+        providers: Result<Vec<ProxyProvider>, ApiError>,
     },
     /// Reply to a `/rules` fetch. `refetch` marks one made while rules are
     /// already on screen, whose failure must not take them away.
@@ -2100,15 +2103,20 @@ impl App {
         self.spawn(|client| async move { Msg::Version(client.version().await) });
     }
 
-    /// Fetches `/proxies` in the background.
+    /// Loads what the proxies page shows: `/proxies`, and the proxy
+    /// providers for the nodes it leaves out. Both requests come back as one
+    /// reply, so the page never takes in half of a load. Every load and
+    /// reload of the page goes through here.
     fn fetch_proxies(&mut self, refetch: bool) {
         self.fetches += 1;
         let seq = self.fetches;
         self.spawn(move |client| async move {
+            let (result, providers) = tokio::join!(client.proxies(), client.proxy_providers());
             Msg::Proxies {
                 seq,
                 refetch,
-                result: client.proxies().await,
+                result,
+                providers,
             }
         });
     }
@@ -3368,21 +3376,12 @@ impl App {
                 result,
             } => self.apply_configs(seq, refetch, result),
             Msg::Changed { change, result } => self.apply_change(change, result),
-            // A reply older than one already applied would roll the page back.
-            Msg::Proxies { seq, .. } if seq < self.applied_fetch => {}
             Msg::Proxies {
                 seq,
                 refetch,
                 result,
-            } => {
-                self.applied_fetch = seq;
-                self.note_failure(&result);
-                match result {
-                    Ok(fresh) => self.apply_proxies(fresh, seq),
-                    Err(_) if refetch && matches!(self.proxies, Some(Ok(_))) => {}
-                    Err(err) => self.proxies = Some(Err(err)),
-                }
-            }
+                providers,
+            } => self.on_proxies(seq, refetch, result, providers),
             Msg::Rules {
                 seq,
                 refetch,
@@ -3628,9 +3627,38 @@ impl App {
         }
     }
 
-    /// Swaps in a fresh `/proxies` reply from fetch `seq`. Delay results
-    /// measured after that fetch was issued survive it, and the node cursor
-    /// stays on its node.
+    /// Takes in the reply to proxies load `seq`. One older than a reply
+    /// already applied is dropped: it would roll the page back.
+    fn on_proxies(
+        &mut self,
+        seq: u64,
+        refetch: bool,
+        result: Result<Proxies, ApiError>,
+        providers: Result<Vec<ProxyProvider>, ApiError>,
+    ) {
+        if seq < self.applied_fetch {
+            return;
+        }
+        self.applied_fetch = seq;
+        self.note_failure(&result);
+        match result {
+            Ok(mut fresh) => {
+                // Original Clash may not have the endpoint; the page then
+                // shows what `/proxies` has, as it did before providers.
+                match providers {
+                    Ok(providers) => fresh.add_provider_nodes(providers),
+                    Err(err) => tracing::debug!("proxy providers left out: {err}"),
+                }
+                self.apply_proxies(fresh, seq);
+            }
+            Err(_) if refetch && matches!(self.proxies, Some(Ok(_))) => {}
+            Err(err) => self.proxies = Some(Err(err)),
+        }
+    }
+
+    /// Swaps in a fresh load from fetch `seq`. Delay results measured after
+    /// that fetch was issued survive it, and the node cursor stays on its
+    /// node.
     fn apply_proxies(&mut self, mut fresh: Proxies, seq: u64) {
         let anchor = self.node_anchor();
         if let Some(Ok(earlier)) = &self.proxies {
@@ -3688,11 +3716,17 @@ impl App {
         if !self.testing.insert(name.clone()) {
             return;
         }
+        let provider = match &self.proxies {
+            Some(Ok(proxies)) => proxies.get(&name).and_then(|node| node.provider.clone()),
+            _ => None,
+        };
         let url = self.settings.delay_url.clone();
         let timeout = self.settings.delay_timeout_ms;
         self.dirty = true;
         self.spawn(move |client| async move {
-            let result = client.proxy_delay(&name, &url, timeout).await;
+            let result = client
+                .proxy_delay(&name, provider.as_deref(), &url, timeout)
+                .await;
             Msg::Delay { name, result }
         });
     }
@@ -3956,33 +3990,78 @@ mod tests {
         (app_with(proxies), members)
     }
 
+    /// A node whose history has `delays`, as the API sends it.
+    fn node(name: &str, delays: &[u32]) -> serde_json::Value {
+        let history: Vec<_> = delays
+            .iter()
+            .map(|delay| serde_json::json!({"delay": delay}))
+            .collect();
+        serde_json::json!({"name": name, "type": "Direct", "history": history})
+    }
+
     /// A reply with one selector group `G` over `nodes`, each given with the
     /// delays of its history.
     fn reply(nodes: &[(&str, &[u32])]) -> Proxies {
+        reply_using(nodes, &[])
+    }
+
+    /// Like [`reply`], with `G` also using the nodes `provided` by a proxy
+    /// provider, after `nodes`. As in `/proxies`, only their names are
+    /// there: [`provider`] has the nodes.
+    fn reply_using(nodes: &[(&str, &[u32])], provided: &[(&str, &[u32])]) -> Proxies {
         let mut proxies = serde_json::Map::new();
-        let names: Vec<&str> = nodes.iter().map(|(name, _)| *name).collect();
+        let names: Vec<&str> = nodes
+            .iter()
+            .chain(provided)
+            .map(|(name, _)| *name)
+            .collect();
         proxies.insert(
             "G".to_owned(),
             serde_json::json!({"name": "G", "type": "Selector", "all": names, "now": names[0]}),
         );
         for (name, delays) in nodes {
-            let history: Vec<_> = delays
-                .iter()
-                .map(|delay| serde_json::json!({"delay": delay}))
-                .collect();
-            proxies.insert(
-                (*name).to_owned(),
-                serde_json::json!({"name": name, "type": "Direct", "history": history}),
-            );
+            proxies.insert((*name).to_owned(), node(name, delays));
         }
         serde_json::from_value(serde_json::json!({ "proxies": proxies })).unwrap()
     }
 
+    /// The proxy provider `P` holding `nodes`.
+    fn provider(nodes: &[(&str, &[u32])]) -> Vec<ProxyProvider> {
+        let proxies = nodes
+            .iter()
+            .map(|(name, delays)| serde_json::from_value(node(name, delays)).unwrap())
+            .collect();
+        vec![ProxyProvider {
+            name: "P".to_owned(),
+            vehicle_type: "File".to_owned(),
+            proxies,
+            ..ProxyProvider::default()
+        }]
+    }
+
+    /// The reply to load `seq` of a kernel without proxy providers.
     fn fetched(seq: u64, refetch: bool, proxies: Proxies) -> Msg {
         Msg::Proxies {
             seq,
             refetch,
             result: Ok(proxies),
+            providers: Ok(vec![]),
+        }
+    }
+
+    /// The reply to load `seq`: `G` over `nodes` from `/proxies` and the
+    /// nodes `provided` by a proxy provider.
+    fn loaded(
+        seq: u64,
+        refetch: bool,
+        nodes: &[(&str, &[u32])],
+        provided: &[(&str, &[u32])],
+    ) -> Msg {
+        Msg::Proxies {
+            seq,
+            refetch,
+            result: Ok(reply_using(nodes, provided)),
+            providers: Ok(provider(provided)),
         }
     }
 
@@ -4223,11 +4302,12 @@ mod tests {
         }
     }
 
-    /// Replies to the `/proxies` and the `/rules` fetch numbered `seq`, the
-    /// node's delay and the rule's payload both saying `value`.
+    /// Replies to the proxies load and the `/rules` fetch numbered `seq`:
+    /// node `a` says `value`, provider node `p` `value + 1`, the rule's
+    /// payload `value`.
     fn replies(seq: u64, refetch: bool, value: u32) -> [Msg; 2] {
         [
-            fetched(seq, refetch, reply(&[("a", &[value])])),
+            loaded(seq, refetch, &[("a", &[value])], &[("p", &[value + 1])]),
             Msg::Rules {
                 seq,
                 refetch,
@@ -4236,15 +4316,15 @@ mod tests {
         ]
     }
 
-    /// What the two pages show: the delay of node `a`, the first rule's
-    /// payload.
-    fn shown(app: &App) -> (Option<Delay>, Option<String>) {
+    /// What the two pages show: the delays of nodes `a` and `p`, the first
+    /// rule's payload.
+    fn shown(app: &App) -> (Option<Delay>, Option<Delay>, Option<String>) {
         let payload = app
             .rules_view
             .visible()
             .first()
             .map(|row| row.payload.clone());
-        (delay_of(app, "a"), payload)
+        (delay_of(app, "a"), delay_of(app, "p"), payload)
     }
 
     #[tokio::test]
@@ -4255,7 +4335,11 @@ mod tests {
         }
         assert_eq!(
             shown(&app),
-            (Some(Delay::Millis(70)), Some("70".to_owned()))
+            (
+                Some(Delay::Millis(70)),
+                Some(Delay::Millis(71)),
+                Some("70".to_owned())
+            )
         );
     }
 
@@ -4269,6 +4353,7 @@ mod tests {
                     seq,
                     refetch,
                     result: Err(http(500)),
+                    providers: Ok(provider(&[("p", &[])])),
                 },
                 Msg::Rules {
                     seq,
@@ -4289,6 +4374,27 @@ mod tests {
         }
         assert!(matches!(app.proxies, Some(Err(_))));
         assert!(matches!(app.rules_view.rows, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn without_provider_nodes_the_page_shows_what_proxies_has() {
+        // Original Clash may have no `/providers/proxies` at all; neither a
+        // load nor a refetch makes that an error page.
+        let degraded = |seq, refetch| Msg::Proxies {
+            seq,
+            refetch,
+            result: Ok(reply_using(&[("a", &[70])], &[("p", &[])])),
+            providers: Err(ApiError::NotFound),
+        };
+        let (mut app, _rx) = app_without_controller();
+        app.handle_msg(degraded(1, false));
+        assert_eq!(delay_of(&app, "a"), Some(Delay::Millis(70)));
+        app.handle_msg(loaded(2, true, &[("a", &[])], &[("p", &[40])]));
+        assert_eq!(delay_of(&app, "p"), Some(Delay::Millis(40)));
+        app.handle_msg(degraded(3, true));
+        assert_eq!(delay_of(&app, "a"), Some(Delay::Millis(70)));
+        assert_eq!(delay_of(&app, "p"), None);
+        assert!(app.toasts.is_empty());
     }
 
     #[tokio::test]
@@ -4424,17 +4530,26 @@ mod tests {
 
     #[test]
     fn delay_sort_runs_fastest_then_timed_out_failed_untested() {
-        let mut app = app_with(reply(&[
-            ("untested-1", &[]),
-            ("failed-1", &[0]),
-            ("slow-a", &[300]),
-            ("timeout-1", &[]),
-            ("fast", &[20]),
-            ("failed-2", &[0]),
-            ("slow-b", &[300]),
-            ("timeout-2", &[]),
-            ("untested-2", &[]),
-        ]));
+        // The last four come from a proxy provider: their history counts
+        // the same.
+        let mut app = app_with(reply(&[("fast", &[])]));
+        app.handle_msg(loaded(
+            1,
+            true,
+            &[
+                ("untested-1", &[]),
+                ("failed-1", &[0]),
+                ("slow-a", &[300]),
+                ("timeout-1", &[]),
+                ("fast", &[20]),
+            ],
+            &[
+                ("failed-2", &[0]),
+                ("slow-b", &[300]),
+                ("timeout-2", &[]),
+                ("untested-2", &[]),
+            ],
+        ));
         app.record_delay("timeout-1", Delay::Timeout);
         app.record_delay("timeout-2", Delay::Timeout);
         app.proxies_view.sort = Sort::Delay;
