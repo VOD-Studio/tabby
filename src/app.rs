@@ -2,7 +2,10 @@ use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::{Frame, text::Text, widgets::Paragraph};
 use tokio::sync::mpsc;
 
-use crate::{api::client::ApiClient, config::Settings};
+use crate::{
+    api::{client::ApiClient, error::ApiError},
+    config::Settings,
+};
 
 /// A user intent, derived from a terminal event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -15,7 +18,7 @@ pub enum Action {
 #[derive(Debug)]
 pub enum Msg {
     /// Raw `GET /version` reply from the startup probe.
-    Version(Result<serde_json::Value, reqwest::Error>),
+    Version(Result<serde_json::Value, ApiError>),
 }
 
 /// Maps a terminal event to an [`Action`]; `None` means the event is ignored.

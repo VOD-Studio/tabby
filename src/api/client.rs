@@ -8,6 +8,8 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 
+use super::error::ApiError;
+
 /// Everything except RFC 3986 unreserved characters is escaped, so a name can
 /// never inject `/`, `?`, `#` or `%` into the request path.
 const PATH_SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
@@ -72,16 +74,14 @@ impl ApiClient {
         url
     }
 
-    pub async fn get_json<T: DeserializeOwned>(
-        &self,
-        segments: &[&str],
-    ) -> Result<T, reqwest::Error> {
-        self.http
-            .get(self.url(segments))
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await
+    /// `GET base/seg1/seg2/…`, decoded as JSON.
+    pub async fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T, ApiError> {
+        let response = self.http.get(self.url(segments)).send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            return Err(ApiError::from_status(status, &body));
+        }
+        Ok(response.json().await?)
     }
 }
