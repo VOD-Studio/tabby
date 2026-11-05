@@ -12,15 +12,17 @@ use ratatui::{
 use crate::app::{App, Page};
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    let [header, tabs, body] = Layout::vertical([
+    let [header, tabs, body, footer] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(2),
         Constraint::Fill(1),
+        Constraint::Length(2),
     ])
     .areas(frame.area());
     components::header::render(frame, header, app);
     components::tabs::render(frame, tabs, app);
     draw_page(frame, body, app);
+    components::footer::render(frame, footer, app);
 }
 
 pub fn page_title(page: Page) -> &'static str {
