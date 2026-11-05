@@ -540,6 +540,29 @@ impl Proxies {
     }
 }
 
+/// `GET /rules`: the rules in the order the kernel matches them.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct RuleList {
+    #[serde(deserialize_with = "null_as_default")]
+    pub rules: Vec<Rule>,
+}
+
+/// One rule. Original Clash sends only these three fields; mihomo adds
+/// `index`, `size` and `extra` (hit counts, `disabled`), which tabby does not
+/// show and so does not read.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Rule {
+    /// The kernel's spelling: `DomainSuffix`, `RuleSet`, `Match`.
+    #[serde(rename = "type")]
+    pub kind: String,
+    /// What it matches on; empty for `Match`.
+    pub payload: String,
+    /// The proxy or group it sends traffic to.
+    pub proxy: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -870,5 +893,49 @@ mod tests {
             group_names(&proxies),
             ["节点选择", "自动选择", "故障转移", "负载均衡", "GLOBAL"]
         );
+    }
+
+    fn rule(kind: &str, payload: &str, proxy: &str) -> Rule {
+        Rule {
+            kind: kind.to_owned(),
+            payload: payload.to_owned(),
+            proxy: proxy.to_owned(),
+        }
+    }
+
+    #[test]
+    fn parses_mihomo_rules_in_order() {
+        let list: RuleList =
+            serde_json::from_str(include_str!("../../tests/fixtures/mihomo_rules.json")).unwrap();
+        assert_eq!(
+            list.rules,
+            [
+                rule("RuleSet", "测试域名", "自动选择"),
+                rule("DomainSuffix", "example.com", "节点选择"),
+                rule("DomainKeyword", "mirror", "直连 A"),
+                rule("IPCIDR", "127.0.0.0/8", "DIRECT"),
+                rule("IPCIDR", "192.0.2.0/24", "死节点 1"),
+                rule("Match", "", "节点选择"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_clash_rules_and_missing_fields() {
+        // Original Clash: three fields only.
+        let json = r#"{"rules":[
+            {"type":"DomainSuffix","payload":"google.com","proxy":"Proxy"},
+            {"type":"GeoIP","payload":"CN","proxy":"DIRECT"},
+            {"type":"Match","payload":"","proxy":"Proxy"}]}"#;
+        let list: RuleList = serde_json::from_str(json).unwrap();
+        assert_eq!(list.rules[1], rule("GeoIP", "CN", "DIRECT"));
+        assert_eq!(list.rules.len(), 3);
+
+        let list: RuleList = serde_json::from_str(r#"{"rules":[{"type":"Match"},{}]}"#).unwrap();
+        assert_eq!(list.rules, [rule("Match", "", ""), rule("", "", "")]);
+        for json in [r#"{"rules":null}"#, "{}"] {
+            let list: RuleList = serde_json::from_str(json).unwrap();
+            assert!(list.rules.is_empty(), "{json}");
+        }
     }
 }

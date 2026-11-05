@@ -18,7 +18,7 @@ use crate::{
         error::ApiError,
         models::{
             self, Baseline, Configs, ConnectionSnapshot, ConnectionStats, CoreKind, Delay, GLOBAL,
-            Log, LogKind, LogLevel, Mode, Proxies, Proxy, Rate, Traffic, Version,
+            Log, LogKind, LogLevel, Mode, Proxies, Proxy, Rate, Rule, Traffic, Version,
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
@@ -27,7 +27,7 @@ use crate::{
     ui::{
         connections,
         logs::{self, Fit},
-        proxies, regions,
+        proxies, regions, rules,
         scroll::Scroll,
         text::describe,
         theme::Theme,
@@ -548,6 +548,120 @@ impl ConnectionsView {
     }
 }
 
+/// One row of the rules table.
+#[derive(Debug, Clone)]
+pub struct RuleRow {
+    /// Where the kernel lists it, from 1. Filtering does not renumber.
+    pub number: usize,
+    /// The type as configurations spell it: `DOMAIN-SUFFIX`.
+    pub kind: String,
+    pub payload: String,
+    pub proxy: String,
+    /// `kind`, `payload` and `proxy` folded once, for the filter.
+    folded: [String; 3],
+}
+
+impl RuleRow {
+    fn new(number: usize, rule: Rule) -> Self {
+        let kind = rules::type_name(&rule.kind);
+        Self {
+            number,
+            folded: [&kind, &rule.payload, &rule.proxy].map(|text| rules::fold(text)),
+            kind,
+            payload: rule.payload,
+            proxy: rule.proxy,
+        }
+    }
+
+    /// Whether `needle` (folded) is in the type, the payload or the target.
+    fn matches(&self, needle: &str) -> bool {
+        self.folded.iter().any(|field| field.contains(needle))
+    }
+}
+
+/// List, cursor and filter of the rules page.
+#[derive(Debug, Default)]
+pub struct RulesView {
+    /// The rules, in the kernel's order; `None` until the first load is in.
+    pub rows: Option<Result<Vec<RuleRow>, ApiError>>,
+    /// Index into [`RulesView::visible`].
+    pub cursor: usize,
+    pub scroll: Scroll,
+    /// Case-insensitive substring the type, payload or target must contain.
+    pub filter: Input,
+    /// The filter box has the keyboard.
+    pub typing: bool,
+}
+
+impl RulesView {
+    /// The rules that pass the filter, in the kernel's order.
+    pub fn visible(&self) -> Vec<&RuleRow> {
+        let Some(Ok(rows)) = &self.rows else {
+            return vec![];
+        };
+        let needle = rules::fold(self.filter.value());
+        rows.iter()
+            .filter(|row| needle.is_empty() || row.matches(&needle))
+            .collect()
+    }
+
+    /// The number and position of the rule under the cursor. Rules have no
+    /// id; the number is the closest thing.
+    fn anchor(&self) -> Option<(usize, usize)> {
+        let visible = self.visible();
+        let index = self.cursor.min(visible.len().checked_sub(1)?);
+        Some((visible[index].number, index))
+    }
+
+    /// Puts the cursor back on the rule numbered as in `anchor`; when no
+    /// rule shown has that number, at the same position, within the list.
+    fn restore(&mut self, anchor: Option<(usize, usize)>) {
+        let visible = self.visible();
+        self.cursor = anchor
+            .map_or(0, |(number, index)| {
+                visible
+                    .iter()
+                    .position(|row| row.number == number)
+                    .unwrap_or(index)
+            })
+            .min(visible.len().saturating_sub(1));
+    }
+
+    /// Takes in a `/rules` reply. A failed refetch keeps the rules on
+    /// screen; anything else that failed shows as the error page.
+    fn apply(&mut self, refetch: bool, result: Result<Vec<Rule>, ApiError>) {
+        match result {
+            Ok(rules) => {
+                let anchor = self.anchor();
+                let rows = rules
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, rule)| RuleRow::new(index + 1, rule))
+                    .collect();
+                self.rows = Some(Ok(rows));
+                self.restore(anchor);
+            }
+            Err(_) if refetch && matches!(self.rows, Some(Ok(_))) => {}
+            Err(err) => self.rows = Some(Err(err)),
+        }
+    }
+
+    /// Changes the filter; the cursor goes to the first rule that passes.
+    fn edit_filter(&mut self, edit: impl FnOnce(&mut Input)) {
+        edit(&mut self.filter);
+        self.cursor = 0;
+    }
+
+    /// Drops the filter and gives the keyboard back. The cursor stays on its
+    /// rule, now among the others.
+    fn clear_filter(&mut self) {
+        let anchor = self.anchor();
+        self.filter.reset();
+        self.typing = false;
+        self.restore(anchor);
+    }
+}
+
 /// Log lines kept: on screen, and in the queue a pause fills, alike.
 pub const LOG_CAPACITY: usize = 2000;
 
@@ -994,6 +1108,13 @@ pub enum Msg {
         refetch: bool,
         result: Result<Proxies, ApiError>,
     },
+    /// Reply to a `/rules` fetch. `refetch` marks one made while rules are
+    /// already on screen, whose failure must not take them away.
+    Rules {
+        seq: u64,
+        refetch: bool,
+        result: Result<Vec<Rule>, ApiError>,
+    },
     /// Reply to switching a selector group.
     Selected {
         group: String,
@@ -1053,7 +1174,10 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
             let alt = key.modifiers.contains(KeyModifiers::ALT);
             // The pages with a sortable list.
             let sorted = matches!(page, Page::Proxies | Page::Connections);
-            let filtered = matches!(page, Page::Proxies | Page::Connections | Page::Logs);
+            let filtered = matches!(
+                page,
+                Page::Proxies | Page::Rules | Page::Connections | Page::Logs
+            );
             let pausable = matches!(page, Page::Connections | Page::Logs);
             match key.code {
                 KeyCode::Char('c') if ctrl => Some(Action::Quit),
@@ -1248,6 +1372,12 @@ pub struct App {
     /// Delay results measured here, with the value of `fetches` when each was
     /// recorded. A reply replaces one only if its fetch came after it.
     local_delays: HashMap<String, u64>,
+    /// The rules page, loaded the first time it is shown.
+    pub rules_view: RulesView,
+    /// `/rules` fetches issued so far; numbers them.
+    rule_fetches: u64,
+    /// The newest `/rules` fetch whose reply has been applied.
+    applied_rule_fetch: u64,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
     /// What the confirm dialog asks about, while it is open.
@@ -1312,6 +1442,9 @@ impl App {
             testing: HashSet::new(),
             fetches: 0,
             applied_fetch: 0,
+            rules_view: RulesView::default(),
+            rule_fetches: 0,
+            applied_rule_fetch: 0,
             local_delays: HashMap::new(),
             toasts: VecDeque::new(),
             overlay: None,
@@ -1359,6 +1492,19 @@ impl App {
                 seq,
                 refetch,
                 result: client.proxies().await,
+            }
+        });
+    }
+
+    /// Fetches `/rules` in the background.
+    fn fetch_rules(&mut self, refetch: bool) {
+        self.rule_fetches += 1;
+        let seq = self.rule_fetches;
+        self.spawn(move |client| async move {
+            Msg::Rules {
+                seq,
+                refetch,
+                result: client.rules().await,
             }
         });
     }
@@ -1479,6 +1625,14 @@ impl App {
                 if let Some(reconnect) = &mut self.reconnect {
                     reconnect.retry_at = None;
                 }
+                // Rules are not among the startup requests: `r` on their
+                // page is what reloads them.
+                if self.page == Page::Rules {
+                    if matches!(self.rules_view.rows, Some(Err(_))) {
+                        self.rules_view.rows = None;
+                    }
+                    self.fetch_rules(false);
+                }
                 self.refreshing = true;
                 self.streams.retry_now();
                 self.start();
@@ -1559,6 +1713,10 @@ impl App {
                 self.dirty = true;
                 return;
             }
+            Page::Rules => {
+                self.move_in_rules(movement);
+                return;
+            }
             Page::Proxies => {}
             _ => return,
         }
@@ -1615,6 +1773,18 @@ impl App {
         logs::fit(regions(screen, self.reconnect.is_some()).body)
     }
 
+    /// Moves the rules cursor; half a page is half the rows the table
+    /// shows, laid out by the function that draws it.
+    fn move_in_rules(&mut self, movement: Move) {
+        let screen = Rect::from(self.size);
+        let capacity = rules::capacity(regions(screen, self.reconnect.is_some()).body);
+        let half = (capacity / 2).max(1);
+        let view = &mut self.rules_view;
+        let len = view.visible().len();
+        view.cursor = movement.apply(view.cursor, len, half);
+        self.dirty = true;
+    }
+
     /// `l`: resubscribes the log at the next level. What is shown stays.
     ///
     /// The old connection goes without a word and the new one reports in by
@@ -1646,6 +1816,7 @@ impl App {
         match self.page {
             Page::Proxies => self.proxies_view.typing,
             Page::Connections => self.connections_view.typing,
+            Page::Rules => self.rules_view.typing,
             Page::Logs => self.logs_view.typing,
             _ => false,
         }
@@ -1656,6 +1827,7 @@ impl App {
         match self.page {
             Page::Proxies => Some(&self.proxies_view.filter),
             Page::Connections => Some(&self.connections_view.filter),
+            Page::Rules => Some(&self.rules_view.filter),
             Page::Logs => Some(&self.logs_view.filter),
             _ => None,
         }
@@ -1684,6 +1856,9 @@ impl App {
             Page::Connections => self.connections_view.edit_filter(|filter| {
                 filter.handle_event(&event);
             }),
+            Page::Rules => self.rules_view.edit_filter(|filter| {
+                filter.handle_event(&event);
+            }),
             Page::Logs => {
                 self.logs_view.filter.handle_event(&event);
                 let fit = self.logs_fit();
@@ -1699,6 +1874,7 @@ impl App {
         match self.page {
             Page::Proxies => self.proxies_view.typing = typing,
             Page::Connections => self.connections_view.typing = typing,
+            Page::Rules => self.rules_view.typing = typing,
             Page::Logs => self.logs_view.typing = typing,
             _ => {}
         }
@@ -1714,6 +1890,7 @@ impl App {
                 self.proxies_view.node = None;
             }
             Page::Connections => self.connections_view.clear_filter(),
+            Page::Rules => self.rules_view.clear_filter(),
             Page::Logs => {
                 self.logs_view.filter.reset();
                 self.logs_view.typing = false;
@@ -2041,6 +2218,17 @@ impl App {
         }
     }
 
+    /// Takes in the reply to `/rules` fetch `seq`. One older than a reply
+    /// already applied is dropped: it would roll the page back.
+    fn apply_rules(&mut self, seq: u64, refetch: bool, result: Result<Vec<Rule>, ApiError>) {
+        if seq < self.applied_rule_fetch {
+            return;
+        }
+        self.applied_rule_fetch = seq;
+        self.note_failure(&result);
+        self.rules_view.apply(refetch, result);
+    }
+
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Version(result) => self.apply_version(result),
@@ -2067,6 +2255,11 @@ impl App {
                     Err(err) => self.proxies = Some(Err(err)),
                 }
             }
+            Msg::Rules {
+                seq,
+                refetch,
+                result,
+            } => self.apply_rules(seq, refetch, result),
             Msg::Selected {
                 group,
                 node,
@@ -2265,6 +2458,7 @@ impl App {
             Page::Overview => self.configs.is_none(),
             Page::Proxies => self.proxies.is_none(),
             Page::Connections => self.connections_view.rows.is_none(),
+            Page::Rules => self.rules_view.rows.is_none(),
             Page::Logs => self.logs_view.waiting(),
             _ => false,
         }
@@ -2432,12 +2626,28 @@ impl App {
     }
 
     fn set_page(&mut self, page: Page) {
-        let entering_proxies = page == Page::Proxies && self.page != Page::Proxies;
+        let entering = page != self.page;
         self.page = page;
         self.dirty = true;
-        // Shows what is there and refreshes behind it, without a spinner.
-        if entering_proxies && self.proxies.is_some() {
-            self.fetch_proxies(true);
+        if !entering {
+            return;
+        }
+        match page {
+            // Shows what is there and refreshes behind it, without a spinner.
+            Page::Proxies if self.proxies.is_some() => self.fetch_proxies(true),
+            // Rules load on the first visit, not at startup.
+            Page::Rules => match &self.rules_view.rows {
+                Some(Ok(_)) => self.fetch_rules(true),
+                // The last load failed: try again, with the spinner.
+                Some(Err(_)) => {
+                    self.rules_view.rows = None;
+                    self.fetch_rules(false);
+                }
+                None if self.rule_fetches == 0 => self.fetch_rules(false),
+                // The first load is still on its way.
+                None => {}
+            },
+            _ => {}
         }
     }
 }
@@ -2822,27 +3032,193 @@ mod tests {
         assert_eq!(delay_of(&app, "a"), Some(Delay::Millis(70)));
     }
 
-    #[tokio::test]
-    async fn reply_older_than_the_applied_one_is_dropped() {
-        let mut app = app_with(reply(&[("a", &[])]));
-        app.handle_msg(fetched(2, true, reply(&[("a", &[70])])));
-        app.handle_msg(fetched(1, true, reply(&[("a", &[90])])));
-        assert_eq!(delay_of(&app, "a"), Some(Delay::Millis(70)));
+    /// A rules reply: one rule per payload, all `DOMAIN-SUFFIX` to `DIRECT`.
+    fn rules_of(payloads: &[&str]) -> Vec<Rule> {
+        payloads
+            .iter()
+            .map(|payload| rule("DomainSuffix", payload, "DIRECT"))
+            .collect()
+    }
+
+    fn rule(kind: &str, payload: &str, proxy: &str) -> Rule {
+        Rule {
+            kind: kind.to_owned(),
+            payload: payload.to_owned(),
+            proxy: proxy.to_owned(),
+        }
+    }
+
+    /// Replies to the `/proxies` and the `/rules` fetch numbered `seq`, the
+    /// node's delay and the rule's payload both saying `value`.
+    fn replies(seq: u64, refetch: bool, value: u32) -> [Msg; 2] {
+        [
+            fetched(seq, refetch, reply(&[("a", &[value])])),
+            Msg::Rules {
+                seq,
+                refetch,
+                result: Ok(rules_of(&[&value.to_string()])),
+            },
+        ]
+    }
+
+    /// What the two pages show: the delay of node `a`, the first rule's
+    /// payload.
+    fn shown(app: &App) -> (Option<Delay>, Option<String>) {
+        let payload = app
+            .rules_view
+            .visible()
+            .first()
+            .map(|row| row.payload.clone());
+        (delay_of(app, "a"), payload)
     }
 
     #[tokio::test]
-    async fn failed_refetch_keeps_the_data_but_failed_load_does_not() {
+    async fn replies_older_than_the_applied_one_are_dropped() {
         let mut app = app_with(reply(&[("a", &[])]));
-        let failed = |seq, refetch| Msg::Proxies {
-            seq,
-            refetch,
-            result: Err(http(500)),
+        for msg in replies(2, true, 70).into_iter().chain(replies(1, true, 90)) {
+            app.handle_msg(msg);
+        }
+        assert_eq!(
+            shown(&app),
+            (Some(Delay::Millis(70)), Some("70".to_owned()))
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_refetches_keep_the_data_but_failed_loads_do_not() {
+        let mut app = app_with(reply(&[("a", &[])]));
+        app.rules_view.apply(false, Ok(rules_of(&["a"])));
+        let failed = |seq, refetch| {
+            [
+                Msg::Proxies {
+                    seq,
+                    refetch,
+                    result: Err(http(500)),
+                },
+                Msg::Rules {
+                    seq,
+                    refetch,
+                    result: Err(http(500)),
+                },
+            ]
         };
-        app.handle_msg(failed(1, true));
+        for msg in failed(1, true) {
+            app.handle_msg(msg);
+        }
         assert!(matches!(app.proxies, Some(Ok(_))));
+        assert!(matches!(app.rules_view.rows, Some(Ok(_))));
+        // Both say the same: it shows once.
         assert_eq!(app.toasts.len(), 1);
-        app.handle_msg(failed(2, false));
+        for msg in failed(2, false) {
+            app.handle_msg(msg);
+        }
         assert!(matches!(app.proxies, Some(Err(_))));
+        assert!(matches!(app.rules_view.rows, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn rules_load_on_the_first_visit_and_refresh_behind_later_ones() {
+        let (mut app, _rx) = app_without_controller();
+        app.start();
+        assert_eq!(app.rule_fetches, 0);
+        app.update(Action::SelectPage(Page::Rules));
+        assert!(app.is_loading());
+        // Away and back before the first reply: it is not asked twice.
+        app.update(Action::SelectPage(Page::Logs));
+        app.update(Action::SelectPage(Page::Rules));
+        assert_eq!(app.rule_fetches, 1);
+        app.handle_msg(Msg::Rules {
+            seq: 1,
+            refetch: false,
+            result: Ok(rules_of(&["a"])),
+        });
+        app.update(Action::SelectPage(Page::Logs));
+        app.update(Action::SelectPage(Page::Rules));
+        assert_eq!(app.rule_fetches, 2);
+        assert!(!app.is_loading());
+    }
+
+    /// The numbers of the rules the table shows.
+    fn rule_numbers(app: &App) -> Vec<usize> {
+        app.rules_view
+            .visible()
+            .iter()
+            .map(|row| row.number)
+            .collect()
+    }
+
+    #[test]
+    fn the_rule_filter_matches_type_payload_or_target_in_any_case() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Rules;
+        app.rules_view.apply(
+            false,
+            Ok(vec![
+                rule("DomainSuffix", "Example.com", "节点选择"),
+                rule("IPCIDR", "10.0.0.0/8", "DIRECT"),
+                rule("RuleSet", "广告", "REJECT"),
+                rule("Match", "", "直连 A"),
+            ]),
+        );
+        for (filter, numbers) in [
+            // The type as shown, not as the kernel spells it.
+            ("ip-c", &[2][..]),
+            ("ipcidr", &[]),
+            ("EXAMPLE", &[1]),
+            ("direct", &[2]),
+            ("直连", &[4]),
+            ("广告", &[3]),
+            ("e", &[1, 2, 3]),
+        ] {
+            type_filter(&mut app, filter);
+            assert_eq!(rule_numbers(&app), numbers, "{filter}");
+            app.update(Action::FilterClear);
+        }
+    }
+
+    #[test]
+    fn the_rule_cursor_goes_to_the_first_match_and_back_to_its_rule() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Rules;
+        app.rules_view
+            .apply(false, Ok(rules_of(&["a.cn", "b.com", "c.cn", "d.com"])));
+        app.rules_view.cursor = 1;
+        type_filter(&mut app, ".c");
+        assert_eq!(app.rules_view.cursor, 0);
+        // Narrowed further while the cursor was moved: back to the first.
+        app.update(Action::Cursor(Move::Bottom));
+        app.update(key('n'));
+        assert_eq!(rule_numbers(&app), [1, 3]);
+        assert_eq!(app.rules_view.cursor, 0);
+        app.update(Action::Cursor(Move::Down));
+        // Clearing it shows the rule among the others, still under the
+        // cursor.
+        app.update(Action::FilterClear);
+        assert_eq!(app.rules_view.cursor, 2);
+    }
+
+    #[test]
+    fn a_rules_refetch_keeps_the_cursor_on_its_number_or_the_end() {
+        let mut view = RulesView::default();
+        view.apply(false, Ok(rules_of(&["q1", "b", "q3", "q4"])));
+        // Only in payloads: not in `DOMAIN-SUFFIX` nor in `DIRECT`.
+        view.filter = Input::new("q".to_owned());
+        // On number 4, third of the matches 1, 3, 4.
+        view.cursor = 2;
+        // Now 1 to 4 all match: number 4 is fourth.
+        view.apply(true, Ok(rules_of(&["q1", "q2", "q3", "q4"])));
+        assert_eq!(view.cursor, 3);
+        // Gone, and the list shorter than where the cursor was: the end.
+        view.apply(true, Ok(rules_of(&["q1", "q2"])));
+        assert_eq!(view.cursor, 1);
+        // A number that is there but filtered out: the same position.
+        view.cursor = 0;
+        view.apply(true, Ok(rules_of(&["b", "q2"])));
+        assert_eq!((rule_number(&view), view.cursor), (2, 0));
+    }
+
+    fn rule_number(view: &RulesView) -> usize {
+        view.visible()[view.cursor].number
     }
 
     #[tokio::test]
@@ -3143,7 +3519,7 @@ mod tests {
         }
         // Page keys, the mode key and page numbers all go into the box of
         // the page being filtered, with nothing else happening.
-        for page in [Page::Proxies, Page::Connections, Page::Logs] {
+        for page in [Page::Proxies, Page::Rules, Page::Connections, Page::Logs] {
             let (mut app, _rx) = app_without_controller();
             app.page = page;
             app.logs_view.receive(log_entry(LogLevel::Info, "kept"));

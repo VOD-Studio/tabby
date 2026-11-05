@@ -1,0 +1,88 @@
+{
+    "rules": [
+        {
+            "index": 0,
+            "type": "RuleSet",
+            "payload": "测试域名",
+            "proxy": "自动选择",
+            "size": -1,
+            "extra": {
+                "disabled": false,
+                "hitCount": 0,
+                "hitAt": "1970-01-01T08:00:00+08:00",
+                "missCount": 0,
+                "missAt": "1970-01-01T08:00:00+08:00"
+            }
+        },
+        {
+            "index": 1,
+            "type": "DomainSuffix",
+            "payload": "example.com",
+            "proxy": "节点选择",
+            "size": -1,
+            "extra": {
+                "disabled": false,
+                "hitCount": 0,
+                "hitAt": "1970-01-01T08:00:00+08:00",
+                "missCount": 0,
+                "missAt": "1970-01-01T08:00:00+08:00"
+            }
+        },
+        {
+            "index": 2,
+            "type": "DomainKeyword",
+            "payload": "mirror",
+            "proxy": "直连 A",
+            "size": -1,
+            "extra": {
+                "disabled": false,
+                "hitCount": 0,
+                "hitAt": "1970-01-01T08:00:00+08:00",
+                "missCount": 0,
+                "missAt": "1970-01-01T08:00:00+08:00"
+            }
+        },
+        {
+            "index": 3,
+            "type": "IPCIDR",
+            "payload": "127.0.0.0/8",
+            "proxy": "DIRECT",
+            "size": -1,
+            "extra": {
+                "disabled": false,
+                "hitCount": 0,
+                "hitAt": "1970-01-01T08:00:00+08:00",
+                "missCount": 0,
+                "missAt": "1970-01-01T08:00:00+08:00"
+            }
+        },
+        {
+            "index": 4,
+            "type": "IPCIDR",
+            "payload": "192.0.2.0/24",
+            "proxy": "死节点 1",
+            "size": -1,
+            "extra": {
+                "disabled": false,
+                "hitCount": 0,
+                "hitAt": "1970-01-01T08:00:00+08:00",
+                "missCount": 0,
+                "missAt": "1970-01-01T08:00:00+08:00"
+            }
+        },
+        {
+            "index": 5,
+            "type": "Match",
+            "payload": "",
+            "proxy": "节点选择",
+            "size": -1,
+            "extra": {
+                "disabled": false,
+                "hitCount": 0,
+                "hitAt": "1970-01-01T08:00:00+08:00",
+                "missCount": 0,
+                "missAt": "1970-01-01T08:00:00+08:00"
+            }
+        }
+    ]
+}

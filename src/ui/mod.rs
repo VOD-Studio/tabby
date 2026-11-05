@@ -3,6 +3,7 @@ pub mod connections;
 pub mod logs;
 pub mod overview;
 pub mod proxies;
+pub mod rules;
 pub mod scroll;
 pub mod text;
 pub mod theme;
@@ -106,6 +107,17 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
             if let Some(proxies) = ready(frame, area, app, app.proxies.as_ref(), "正在加载代理…")
             {
                 proxies::render(frame, area, app, proxies);
+            }
+        }
+        Page::Rules => {
+            if let Some(rows) = ready(
+                frame,
+                area,
+                app,
+                app.rules_view.rows.as_ref(),
+                "正在加载规则…",
+            ) {
+                rules::render(frame, area, app, rows);
             }
         }
         Page::Connections => connections::render(frame, area, app),

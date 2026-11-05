@@ -28,6 +28,13 @@ fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
             ("g / G", "顶部 / 底部"),
             ("Ctrl+d / Ctrl+u", "翻半页"),
         ],
+        Page::Rules => &[
+            ("/", "过滤规则"),
+            ("Esc", "清除过滤"),
+            ("j / k / ↓ / ↑", "上下移动"),
+            ("g / G", "顶部 / 底部"),
+            ("Ctrl+d / Ctrl+u", "翻半页"),
+        ],
         Page::Connections => &[
             ("Enter", "连接详情"),
             ("x", "关闭选中连接"),

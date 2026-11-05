@@ -100,6 +100,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 },
             ),
         ],
+        Page::Rules => vec![hint("/", "过滤"), hint("j/k", "移动"), hint("g/G", "首尾")],
         Page::Logs => {
             let view = &app.logs_view;
             let mut hints = vec![

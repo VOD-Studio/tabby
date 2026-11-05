@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     error::ApiError,
-    models::{Configs, Mode, Proxies, Version},
+    models::{Configs, Mode, Proxies, Rule, RuleList, Version},
 };
 
 /// Everything except RFC 3986 unreserved characters is escaped, so a name can
@@ -160,6 +160,12 @@ impl ApiClient {
     /// `GET /proxies`.
     pub async fn proxies(&self) -> Result<Proxies, ApiError> {
         self.get_json(&["proxies"]).await
+    }
+
+    /// `GET /rules`, in matching order.
+    pub async fn rules(&self) -> Result<Vec<Rule>, ApiError> {
+        let list: RuleList = self.get_json(&["rules"]).await?;
+        Ok(list.rules)
     }
 
     /// `PUT /proxies/{group}`: makes a selector group route through `node`.
