@@ -3,13 +3,13 @@ use std::time::Duration;
 use color_eyre::Result;
 use crossterm::event::EventStream;
 use futures_util::StreamExt;
-use ratatui::{DefaultTerminal, Frame, widgets::Paragraph};
+use ratatui::DefaultTerminal;
 use tokio::{
     sync::mpsc,
     time::{MissedTickBehavior, interval},
 };
 
-use crate::app::{App, Msg, action_for};
+use crate::app::{App, Msg, action_for, draw};
 
 /// Render cadence for repaints deferred by background messages.
 const TICK: Duration = Duration::from_millis(100);
@@ -28,12 +28,12 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let (_msg_tx, mut msg_rx) = mpsc::channel::<Msg>(MSG_BUFFER);
 
-    terminal.draw(draw)?;
+    terminal.draw(|frame| draw(frame, app))?;
     while !app.should_quit() {
         tokio::select! {
             _ = tick.tick() => {
                 if app.take_dirty() {
-                    terminal.draw(draw)?;
+                    terminal.draw(|frame| draw(frame, app))?;
                 }
             }
             Some(msg) = msg_rx.recv() => match msg {},
@@ -43,14 +43,10 @@ pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
                     app.update(action);
                 }
                 if app.take_dirty() {
-                    terminal.draw(draw)?;
+                    terminal.draw(|frame| draw(frame, app))?;
                 }
             }
         }
     }
     Ok(())
-}
-
-fn draw(frame: &mut Frame) {
-    frame.render_widget(Paragraph::new("tabby - press q to quit"), frame.area());
 }
