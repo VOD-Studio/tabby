@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use color_eyre::Result;
 use crossterm::event::EventStream;
@@ -38,6 +38,7 @@ pub async fn run(
     while !app.should_quit() {
         tokio::select! {
             _ = tick.tick() => {
+                app.on_tick(Instant::now());
                 if app.take_dirty() {
                     terminal.draw(|frame| ui::draw(frame, app))?;
                 }

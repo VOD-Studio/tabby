@@ -2,6 +2,7 @@ mod api;
 mod app;
 mod config;
 mod event;
+mod format;
 mod ui;
 
 use std::panic;

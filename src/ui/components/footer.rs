@@ -9,7 +9,7 @@ use ratatui::{
 use crate::app::App;
 
 /// Keys that work on every page, as `(key, what it does)`.
-const GLOBAL_HINTS: [(&str, &str); 2] = [("1-7/Tab", "切换页面"), ("q", "退出")];
+const GLOBAL_HINTS: [(&str, &str); 3] = [("1-7/Tab", "切换页面"), ("r", "刷新"), ("q", "退出")];
 
 /// Divider plus one row of key hints: keys in accent, descriptions muted.
 /// Needs two rows.

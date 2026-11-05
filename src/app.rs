@@ -1,3 +1,8 @@
+use std::{
+    collections::VecDeque,
+    time::{Duration, Instant},
+};
+
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
 
@@ -57,6 +62,7 @@ pub enum Action {
     SelectPage(Page),
     NextPage,
     PrevPage,
+    Refresh,
 }
 
 /// A message from a background task.
@@ -78,6 +84,7 @@ pub fn action_for(event: &Event) -> Option<Action> {
                 KeyCode::BackTab => Some(Action::PrevPage),
                 KeyCode::Char(_) if ctrl || alt => None,
                 KeyCode::Char('q') => Some(Action::Quit),
+                KeyCode::Char('r') => Some(Action::Refresh),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -85,6 +92,26 @@ pub fn action_for(event: &Event) -> Option<Action> {
         Event::Resize(..) => Some(Action::Resize),
         _ => None,
     }
+}
+
+/// How long a toast stays on screen.
+const TOAST_TTL: Duration = Duration::from_secs(3);
+
+/// Older toasts are dropped beyond this many.
+const MAX_TOASTS: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Success,
+    Error,
+}
+
+/// A short-lived notification, shown top-right.
+#[derive(Debug)]
+pub struct Toast {
+    pub kind: ToastKind,
+    pub text: String,
+    expires_at: Instant,
 }
 
 /// Whether the controller has answered the `/version` probe.
@@ -105,6 +132,9 @@ pub struct App {
     msg_tx: mpsc::Sender<Msg>,
     pub version: Option<Result<Version, ApiError>>,
     pub configs: Option<Result<Configs, ApiError>>,
+    pub toasts: VecDeque<Toast>,
+    /// Set by `r` until the next `/version` reply, which then reports success.
+    refreshing: bool,
     should_quit: bool,
     dirty: bool,
 }
@@ -119,6 +149,8 @@ impl App {
             msg_tx,
             version: None,
             configs: None,
+            toasts: VecDeque::new(),
+            refreshing: false,
             should_quit: false,
             dirty: false,
         }
@@ -145,15 +177,63 @@ impl App {
             Action::SelectPage(page) => self.set_page(page),
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
+            Action::Refresh => {
+                self.refreshing = true;
+                self.start();
+            }
         }
     }
 
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
-            Msg::Version(result) => self.version = Some(result),
-            Msg::Configs(result) => self.configs = Some(result),
+            Msg::Version(result) => {
+                let refreshed = std::mem::take(&mut self.refreshing);
+                match &result {
+                    Ok(_) if refreshed => self.toast(ToastKind::Success, "已刷新".to_owned()),
+                    Ok(_) => {}
+                    Err(err) => self.toast(ToastKind::Error, describe(err)),
+                }
+                self.version = Some(result);
+            }
+            Msg::Configs(result) => {
+                if let Err(err) = &result {
+                    self.toast(ToastKind::Error, describe(err));
+                }
+                self.configs = Some(result);
+            }
         }
         self.dirty = true;
+    }
+
+    /// Drops expired toasts.
+    pub fn on_tick(&mut self, now: Instant) {
+        let shown = self.toasts.len();
+        self.toasts.retain(|toast| toast.expires_at > now);
+        if self.toasts.len() != shown {
+            self.dirty = true;
+        }
+    }
+
+    /// Shows a toast. An identical one already on screen is renewed instead of
+    /// stacked, so one failure reported by two requests shows once.
+    fn toast(&mut self, kind: ToastKind, text: String) {
+        let expires_at = Instant::now() + TOAST_TTL;
+        if let Some(existing) = self
+            .toasts
+            .iter_mut()
+            .find(|toast| toast.kind == kind && toast.text == text)
+        {
+            existing.expires_at = expires_at;
+            return;
+        }
+        if self.toasts.len() == MAX_TOASTS {
+            self.toasts.pop_front();
+        }
+        self.toasts.push_back(Toast {
+            kind,
+            text,
+            expires_at,
+        });
     }
 
     pub fn connection(&self) -> Connection {
@@ -176,5 +256,17 @@ impl App {
     fn set_page(&mut self, page: Page) {
         self.page = page;
         self.dirty = true;
+    }
+}
+
+/// One-line description of a failed request for a toast.
+fn describe(err: &ApiError) -> String {
+    match err {
+        ApiError::Unauthorized => "Secret 错误，请用 --secret 或修改配置".to_owned(),
+        ApiError::NotFound => "接口不存在（404）".to_owned(),
+        ApiError::Http { status, message } => format!("HTTP {status}：{message}"),
+        ApiError::Timeout => "请求超时".to_owned(),
+        ApiError::Connect(_) => "无法连接控制器".to_owned(),
+        ApiError::Decode(_) => "控制器返回了无法解析的数据".to_owned(),
     }
 }

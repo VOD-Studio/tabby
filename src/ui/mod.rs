@@ -23,6 +23,14 @@ pub fn draw(frame: &mut Frame, app: &App) {
     components::tabs::render(frame, tabs, app);
     draw_page(frame, body, app);
     components::footer::render(frame, footer, app);
+    // Below the header row, over whatever lies underneath.
+    let screen = frame.area();
+    let toasts = Rect {
+        y: screen.y + 1,
+        height: screen.height.saturating_sub(1),
+        ..screen
+    };
+    components::toast::render(frame, toasts, app);
 }
 
 pub fn page_title(page: Page) -> &'static str {
