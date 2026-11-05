@@ -1,0 +1,22 @@
+{
+    "providers": {
+        "测试域名": {
+            "behavior": "Domain",
+            "format": "YamlRule",
+            "name": "测试域名",
+            "ruleCount": 3,
+            "type": "Rule",
+            "vehicleType": "File",
+            "updatedAt": "2026-11-05T18:26:08.171256262+08:00"
+        },
+        "远程 IP": {
+            "behavior": "IPCIDR",
+            "format": "YamlRule",
+            "name": "远程 IP",
+            "ruleCount": 2,
+            "type": "Rule",
+            "vehicleType": "HTTP",
+            "updatedAt": "2026-11-05T20:36:09.756937348+08:00"
+        }
+    }
+}

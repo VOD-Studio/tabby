@@ -1,0 +1,456 @@
+{
+    "providers": {
+        "default": {
+            "name": "default",
+            "type": "Proxy",
+            "vehicleType": "Compatible",
+            "proxies": [
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {},
+                    "history": [],
+                    "id": "2c74a382-ad22-48c5-bbef-9cf9546788c1",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "DIRECT",
+                    "provider-name": "",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {},
+                    "history": [],
+                    "id": "5ef6273b-d3d1-4575-aac4-3109434a558f",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "REJECT",
+                    "provider-name": "",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Reject",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": true,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:11.070284292+08:00",
+                                    "delay": 1383
+                                },
+                                {
+                                    "time": "2026-11-05T20:36:12.281958017+08:00",
+                                    "delay": 2595
+                                },
+                                {
+                                    "time": "2026-11-05T20:36:12.563063185+08:00",
+                                    "delay": 2876
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:11.070284292+08:00",
+                            "delay": 1383
+                        },
+                        {
+                            "time": "2026-11-05T20:36:12.281958017+08:00",
+                            "delay": 2595
+                        },
+                        {
+                            "time": "2026-11-05T20:36:12.563063185+08:00",
+                            "delay": 2876
+                        }
+                    ],
+                    "id": "e78ea3f8-11e2-4582-a022-c10621acf40a",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "直连 A",
+                    "provider-name": "",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                }
+            ],
+            "testUrl": "",
+            "expectedStatus": "*",
+            "updatedAt": "0001-01-01T00:00:00Z"
+        },
+        "负载均衡": {
+            "name": "负载均衡",
+            "type": "Proxy",
+            "vehicleType": "Compatible",
+            "proxies": [
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": true,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:11.070284292+08:00",
+                                    "delay": 1383
+                                },
+                                {
+                                    "time": "2026-11-05T20:36:12.281958017+08:00",
+                                    "delay": 2595
+                                },
+                                {
+                                    "time": "2026-11-05T20:36:12.563063185+08:00",
+                                    "delay": 2876
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:11.070284292+08:00",
+                            "delay": 1383
+                        },
+                        {
+                            "time": "2026-11-05T20:36:12.281958017+08:00",
+                            "delay": 2595
+                        },
+                        {
+                            "time": "2026-11-05T20:36:12.563063185+08:00",
+                            "delay": 2876
+                        }
+                    ],
+                    "id": "e78ea3f8-11e2-4582-a022-c10621acf40a",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "直连 A",
+                    "provider-name": "",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": true,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:12.031827653+08:00",
+                                    "delay": 2345
+                                },
+                                {
+                                    "time": "2026-11-05T20:36:12.064297579+08:00",
+                                    "delay": 2377
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:12.031827653+08:00",
+                            "delay": 2345
+                        },
+                        {
+                            "time": "2026-11-05T20:36:12.064297579+08:00",
+                            "delay": 2377
+                        }
+                    ],
+                    "id": "a47f84ac-1dec-4ca7-a663-b1c52ee4f2b6",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "直连 B",
+                    "provider-name": "",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                }
+            ],
+            "testUrl": "https://www.gstatic.com/generate_204",
+            "expectedStatus": "*",
+            "updatedAt": "0001-01-01T00:00:00Z"
+        },
+        "本地集合": {
+            "name": "本地集合",
+            "type": "Proxy",
+            "vehicleType": "File",
+            "proxies": [
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": true,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:13.109053391+08:00",
+                                    "delay": 3422
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:13.109053391+08:00",
+                            "delay": 3422
+                        }
+                    ],
+                    "id": "b6fee3e5-60ea-4ecd-bf99-370a4f8e0f6e",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "集合 直连 1",
+                    "provider-name": "本地集合",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": true,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:11.084774052+08:00",
+                                    "delay": 1398
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:11.084774052+08:00",
+                            "delay": 1398
+                        }
+                    ],
+                    "id": "7b4dea42-a41f-42f5-9535-44cc3a86e5e5",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "集合 直连 2",
+                    "provider-name": "本地集合",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": false,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": false,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:09.68654132+08:00",
+                                    "delay": 0
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:09.68654132+08:00",
+                            "delay": 0
+                        }
+                    ],
+                    "id": "bbb2f16b-5116-421f-b562-fd2b257e441f",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "集合 死节点",
+                    "provider-name": "本地集合",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Socks5",
+                    "udp": false,
+                    "uot": false,
+                    "xudp": false
+                }
+            ],
+            "testUrl": "https://www.gstatic.com/generate_204",
+            "expectedStatus": "*",
+            "updatedAt": "2026-11-05T18:26:08.170423241+08:00"
+        },
+        "机场 订阅": {
+            "name": "机场 订阅",
+            "type": "Proxy",
+            "vehicleType": "HTTP",
+            "proxies": [
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": true,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:12.119095964+08:00",
+                                    "delay": 2383
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:12.119095964+08:00",
+                            "delay": 2383
+                        }
+                    ],
+                    "id": "e2d43453-c0df-4ae8-9157-0aad7cccc0e3",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "订阅 直连 1",
+                    "provider-name": "机场 订阅",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": true,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": true,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:12.063364243+08:00",
+                                    "delay": 2328
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:12.063364243+08:00",
+                            "delay": 2328
+                        }
+                    ],
+                    "id": "72269360-87cb-4399-8666-e5bceb21df00",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "订阅 直连 2",
+                    "provider-name": "机场 订阅",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Direct",
+                    "udp": true,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": false,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": false,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:09.735380463+08:00",
+                                    "delay": 0
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:09.735380463+08:00",
+                            "delay": 0
+                        }
+                    ],
+                    "id": "ec772b18-b3b0-43c8-9d4e-e829cc8cddb8",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "订阅 死节点",
+                    "provider-name": "机场 订阅",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Socks5",
+                    "udp": false,
+                    "uot": false,
+                    "xudp": false
+                },
+                {
+                    "alive": false,
+                    "dialer-proxy": "",
+                    "extra": {
+                        "https://www.gstatic.com/generate_204": {
+                            "alive": false,
+                            "history": [
+                                {
+                                    "time": "2026-11-05T20:36:14.73601527+08:00",
+                                    "delay": 0
+                                }
+                            ]
+                        }
+                    },
+                    "history": [
+                        {
+                            "time": "2026-11-05T20:36:14.73601527+08:00",
+                            "delay": 0
+                        }
+                    ],
+                    "id": "0efb651a-a022-4eac-8872-71064e21c7c5",
+                    "interface": "",
+                    "mptcp": false,
+                    "name": "订阅 假节点",
+                    "provider-name": "机场 订阅",
+                    "routing-mark": 0,
+                    "smux": false,
+                    "tfo": false,
+                    "type": "Http",
+                    "udp": false,
+                    "uot": false,
+                    "xudp": false
+                }
+            ],
+            "testUrl": "https://www.gstatic.com/generate_204",
+            "expectedStatus": "*",
+            "updatedAt": "2026-11-05T20:36:09.73491726+08:00",
+            "subscriptionInfo": {
+                "Upload": 1288490188,
+                "Download": 12079595520,
+                "Total": 107374182400,
+                "Expire": 1798732800
+            }
+        }
+    }
+}

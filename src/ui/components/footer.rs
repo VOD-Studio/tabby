@@ -100,6 +100,20 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 },
             ),
         ],
+        Page::Providers => vec![
+            hint("u", "更新"),
+            hint(
+                "U",
+                if app.providers_view.filter.value().is_empty() {
+                    "全部更新"
+                } else {
+                    "更新匹配"
+                },
+            ),
+            hint("h", "健康检查"),
+            hint("/", "过滤"),
+            hint("j/k", "移动"),
+        ],
         Page::Rules => vec![hint("/", "过滤"), hint("j/k", "移动"), hint("g/G", "首尾")],
         Page::Logs => {
             let view = &app.logs_view;

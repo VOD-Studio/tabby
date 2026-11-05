@@ -2,6 +2,7 @@ pub mod components;
 pub mod connections;
 pub mod logs;
 pub mod overview;
+pub mod providers;
 pub mod proxies;
 pub mod rules;
 pub mod scroll;
@@ -109,6 +110,7 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
                 proxies::render(frame, area, app, proxies);
             }
         }
+        Page::Providers => providers::render(frame, area, app),
         Page::Rules => {
             if let Some(rows) = ready(
                 frame,
@@ -122,7 +124,7 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
         }
         Page::Connections => connections::render(frame, area, app),
         Page::Logs => logs::render(frame, area, app),
-        _ => draw_unbuilt(frame, area, app),
+        Page::Settings => draw_unbuilt(frame, area, app),
     }
 }
 

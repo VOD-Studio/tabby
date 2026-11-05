@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use super::{
     error::ApiError,
-    models::{Configs, Mode, Proxies, Rule, RuleList, Version},
+    models::{
+        Configs, Mode, ProviderList, Proxies, ProxyProvider, Rule, RuleList, RuleProvider, Version,
+    },
 };
 
 /// Everything except RFC 3986 unreserved characters is escaped, so a name can
@@ -141,6 +143,12 @@ impl ApiClient {
         Ok(())
     }
 
+    /// `PUT base/seg1/seg2/…` without a body, ignoring the reply body.
+    async fn put(&self, segments: &[&str]) -> Result<(), ApiError> {
+        Self::check(self.http.put(self.url(segments)).send().await?).await?;
+        Ok(())
+    }
+
     /// `GET /version`.
     pub async fn version(&self) -> Result<Version, ApiError> {
         self.get_json(&["version"]).await
@@ -221,6 +229,47 @@ impl ApiClient {
     /// `DELETE /connections`: closes every connection. Replies 204.
     pub async fn close_all_connections(&self) -> Result<(), ApiError> {
         self.delete(&["connections"]).await
+    }
+
+    /// `GET /providers/proxies`: the proxy providers that can be updated,
+    /// by name.
+    pub async fn proxy_providers(&self) -> Result<Vec<ProxyProvider>, ApiError> {
+        let list: ProviderList<ProxyProvider> = self.get_json(&["providers", "proxies"]).await?;
+        Ok(list.shown())
+    }
+
+    /// `GET /providers/rules` (mihomo only): the rule providers, by name.
+    pub async fn rule_providers(&self) -> Result<Vec<RuleProvider>, ApiError> {
+        let list: ProviderList<RuleProvider> = self.get_json(&["providers", "rules"]).await?;
+        Ok(list.shown())
+    }
+
+    /// `PUT /providers/proxies/{name}`: reloads a proxy provider from its
+    /// source (a file or inline one too). Replies 204.
+    pub async fn update_proxy_provider(&self, name: &str) -> Result<(), ApiError> {
+        self.put(&["providers", "proxies", name]).await
+    }
+
+    /// `PUT /providers/rules/{name}` (mihomo only). Replies 204.
+    pub async fn update_rule_provider(&self, name: &str) -> Result<(), ApiError> {
+        self.put(&["providers", "rules", name]).await
+    }
+
+    /// `GET /providers/proxies/{name}/healthcheck`: tests every node of the
+    /// provider. The kernel replies 204 only once all of them are done, a
+    /// dead one after the provider's own test timeout, so this request gets
+    /// `timeout` instead of the usual limit.
+    pub async fn healthcheck_proxy_provider(
+        &self,
+        name: &str,
+        timeout: Duration,
+    ) -> Result<(), ApiError> {
+        let request = self
+            .http
+            .get(self.url(&["providers", "proxies", name, "healthcheck"]))
+            .timeout(timeout);
+        Self::check(request.send().await?).await?;
+        Ok(())
     }
 }
 
@@ -354,6 +403,38 @@ mod tests {
         // Anything else is unmatched, which wiremock answers with 404.
         assert!(matches!(
             client.close_connection("gone").await,
+            Err(ApiError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn provider_actions_use_their_methods_and_encoded_names() {
+        const PROXY: &str = "/providers/proxies/%E6%9C%BA%E5%9C%BA%20%E8%AE%A2%E9%98%85%2F1";
+        const RULE: &str = "/providers/rules/%E6%B5%8B%E8%AF%95%20%E5%9F%9F%E5%90%8D%232";
+        let server = MockServer::start().await;
+        for (verb, route) in [
+            ("PUT", PROXY.to_owned()),
+            ("PUT", RULE.to_owned()),
+            ("GET", format!("{PROXY}/healthcheck")),
+        ] {
+            Mock::given(method(verb))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(204))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+
+        let client = ApiClient::new(&server.uri(), None).unwrap();
+        client.update_proxy_provider("机场 订阅/1").await.unwrap();
+        client.update_rule_provider("测试 域名#2").await.unwrap();
+        client
+            .healthcheck_proxy_provider("机场 订阅/1", Duration::from_secs(5))
+            .await
+            .unwrap();
+        // The other kind's endpoint is not the same one.
+        assert!(matches!(
+            client.update_rule_provider("机场 订阅/1").await,
             Err(ApiError::NotFound)
         ));
     }

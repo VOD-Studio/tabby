@@ -18,7 +18,8 @@ use crate::{
         error::ApiError,
         models::{
             self, Baseline, Configs, ConnectionSnapshot, ConnectionStats, CoreKind, Delay, GLOBAL,
-            Log, LogKind, LogLevel, Mode, Proxies, Proxy, Rate, Rule, Traffic, Version,
+            Log, LogKind, LogLevel, Mode, Proxies, Proxy, ProxyProvider, Rate, Rule, RuleProvider,
+            Traffic, Version,
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
@@ -27,7 +28,7 @@ use crate::{
     ui::{
         connections,
         logs::{self, Fit},
-        proxies, regions, rules,
+        providers, proxies, regions, rules,
         scroll::Scroll,
         text::describe,
         theme::Theme,
@@ -662,6 +663,188 @@ impl RulesView {
     }
 }
 
+/// Which list a provider is in, which also picks the endpoints for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProviderKind {
+    Proxy,
+    Rule,
+}
+
+/// A provider by list and name: what an update or a check is sent for.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ProviderRef {
+    pub kind: ProviderKind,
+    pub name: String,
+}
+
+/// What is being done to a provider while its row spins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Work {
+    Updating,
+    Checking,
+}
+
+/// One row of the providers page.
+#[derive(Debug, Clone, Copy)]
+pub enum ProviderRow<'a> {
+    Proxy(&'a ProxyProvider),
+    Rule(&'a RuleProvider),
+}
+
+impl ProviderRow<'_> {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Proxy(provider) => &provider.name,
+            Self::Rule(provider) => &provider.name,
+        }
+    }
+
+    pub fn target(&self) -> ProviderRef {
+        ProviderRef {
+            kind: match self {
+                Self::Proxy(_) => ProviderKind::Proxy,
+                Self::Rule(_) => ProviderKind::Rule,
+            },
+            name: self.name().to_owned(),
+        }
+    }
+}
+
+/// One list of the providers page; `None` until its first load is in.
+pub type ProviderSlot<T> = Option<Result<Vec<T>, ApiError>>;
+
+/// The two lists, cursor, filter and work in progress of the providers
+/// page. The cursor runs through the proxy providers, then the rule
+/// providers, as one list.
+#[derive(Debug, Default)]
+pub struct ProvidersView {
+    pub proxies: ProviderSlot<ProxyProvider>,
+    /// Stays `None` under original Clash, which has no rule providers.
+    pub rules: ProviderSlot<RuleProvider>,
+    /// Index into [`ProvidersView::rows`].
+    pub cursor: usize,
+    pub scroll: Scroll,
+    /// Case-insensitive substring the names must contain.
+    pub filter: Input,
+    /// The filter box has the keyboard.
+    pub typing: bool,
+    /// Providers with an update or a health check in flight.
+    pub busy: HashMap<ProviderRef, Work>,
+}
+
+impl ProvidersView {
+    /// Neither list is in yet: the page is one spinner.
+    pub fn loading(&self) -> bool {
+        self.proxies.is_none() && self.rules.is_none()
+    }
+
+    fn needle(&self) -> String {
+        self.filter.value().to_lowercase()
+    }
+
+    /// The proxy providers whose names pass the filter.
+    pub fn visible_proxies(&self) -> Vec<&ProxyProvider> {
+        let needle = self.needle();
+        let Some(Ok(providers)) = &self.proxies else {
+            return vec![];
+        };
+        providers
+            .iter()
+            .filter(|provider| provider.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    /// The rule providers whose names pass the filter.
+    pub fn visible_rules(&self) -> Vec<&RuleProvider> {
+        let needle = self.needle();
+        let Some(Ok(providers)) = &self.rules else {
+            return vec![];
+        };
+        providers
+            .iter()
+            .filter(|provider| provider.name.to_lowercase().contains(&needle))
+            .collect()
+    }
+
+    /// What the cursor runs through: the visible proxy providers, then the
+    /// visible rule providers.
+    pub fn rows(&self) -> Vec<ProviderRow<'_>> {
+        let proxies = self.visible_proxies().into_iter().map(ProviderRow::Proxy);
+        let rules = self.visible_rules().into_iter().map(ProviderRow::Rule);
+        proxies.chain(rules).collect()
+    }
+
+    /// The row under the cursor.
+    pub fn selected(&self) -> Option<ProviderRow<'_>> {
+        let rows = self.rows();
+        rows.get(self.cursor.min(rows.len().checked_sub(1)?))
+            .copied()
+    }
+
+    /// The provider under the cursor and its position.
+    fn anchor(&self) -> Option<(ProviderRef, usize)> {
+        let rows = self.rows();
+        let index = self.cursor.min(rows.len().checked_sub(1)?);
+        Some((rows[index].target(), index))
+    }
+
+    /// Puts the cursor back on the provider in `anchor`; when it is not
+    /// shown any more, at the same position, within the list.
+    fn restore(&mut self, anchor: Option<(ProviderRef, usize)>) {
+        let rows = self.rows();
+        self.cursor = anchor
+            .map_or(0, |(target, index)| {
+                rows.iter()
+                    .position(|row| row.target() == target)
+                    .unwrap_or(index)
+            })
+            .min(rows.len().saturating_sub(1));
+    }
+
+    /// Takes in a reply for the list `slot` picks. A failed refetch keeps
+    /// the list on screen; anything else that failed shows as an error.
+    /// The cursor stays on its provider while the list was on screen
+    /// before. A list coming in (again) keeps the cursor's position
+    /// instead: the rule providers answering before the proxy providers
+    /// must not drag the cursor down with them when those fill in above.
+    fn apply<T>(
+        &mut self,
+        slot: fn(&mut Self) -> &mut ProviderSlot<T>,
+        refetch: bool,
+        result: Result<Vec<T>, ApiError>,
+    ) {
+        let shown = matches!(slot(self), Some(Ok(_)));
+        let anchor = self.anchor();
+        let list = slot(self);
+        match result {
+            Ok(providers) => *list = Some(Ok(providers)),
+            Err(_) if refetch && matches!(list, Some(Ok(_))) => {}
+            Err(err) => *list = Some(Err(err)),
+        }
+        if shown {
+            self.restore(anchor);
+        } else {
+            self.cursor = self.cursor.min(self.rows().len().saturating_sub(1));
+        }
+    }
+
+    /// Changes the filter; the cursor goes to the first provider that
+    /// passes.
+    fn edit_filter(&mut self, edit: impl FnOnce(&mut Input)) {
+        edit(&mut self.filter);
+        self.cursor = 0;
+    }
+
+    /// Drops the filter and gives the keyboard back. The cursor stays on
+    /// its provider, now among the others.
+    fn clear_filter(&mut self) {
+        let anchor = self.anchor();
+        self.filter.reset();
+        self.typing = false;
+        self.restore(anchor);
+    }
+}
+
 /// Log lines kept: on screen, and in the queue a pause fills, alike.
 pub const LOG_CAPACITY: usize = 2000;
 
@@ -1075,6 +1258,13 @@ pub enum Action {
     CycleLevel,
     /// `c`: empty the log.
     ClearLogs,
+    /// `u`: update the provider under the cursor.
+    UpdateProvider,
+    /// `U`: ask to update the providers the page shows.
+    UpdateProviders,
+    /// `h` on the providers page: health-check the proxy provider under the
+    /// cursor.
+    HealthCheck,
     /// `/`: start typing the current page's filter.
     StartFilter,
     /// A key typed into the filter box.
@@ -1143,10 +1333,40 @@ pub enum Msg {
         count: usize,
         result: Result<(), ApiError>,
     },
+    /// Something about the providers page.
+    Providers(ProviderMsg),
     /// A WebSocket stream connected, dropped, or delivered a frame.
     Stream {
         stream: Stream,
         event: StreamEvent,
+    },
+}
+
+/// A reply to a request of the providers page.
+#[derive(Debug)]
+pub enum ProviderMsg {
+    /// Reply to a `/providers/proxies` fetch. `refetch` marks one made
+    /// while the list is on screen, whose failure must not take it away.
+    Proxies {
+        seq: u64,
+        refetch: bool,
+        result: Result<Vec<ProxyProvider>, ApiError>,
+    },
+    /// Reply to a `/providers/rules` fetch, as for [`ProviderMsg::Proxies`].
+    Rules {
+        seq: u64,
+        refetch: bool,
+        result: Result<Vec<RuleProvider>, ApiError>,
+    },
+    /// Reply to `u` or `h`: one provider, updated or checked.
+    Done {
+        target: ProviderRef,
+        work: Work,
+        result: Result<(), ApiError>,
+    },
+    /// Replies to `U`, all sent at once, back together.
+    Updated {
+        results: Vec<(ProviderRef, Result<(), ApiError>)>,
     },
 }
 
@@ -1176,7 +1396,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
             let sorted = matches!(page, Page::Proxies | Page::Connections);
             let filtered = matches!(
                 page,
-                Page::Proxies | Page::Rules | Page::Connections | Page::Logs
+                Page::Proxies | Page::Providers | Page::Rules | Page::Connections | Page::Logs
             );
             let pausable = matches!(page, Page::Connections | Page::Logs);
             match key.code {
@@ -1209,6 +1429,9 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('c') if page == Page::Logs => Some(Action::ClearLogs),
                 KeyCode::Char('x') if page == Page::Connections => Some(Action::CloseConnection),
                 KeyCode::Char('X') if page == Page::Connections => Some(Action::CloseConnections),
+                KeyCode::Char('u') if page == Page::Providers => Some(Action::UpdateProvider),
+                KeyCode::Char('U') if page == Page::Providers => Some(Action::UpdateProviders),
+                KeyCode::Char('h') if page == Page::Providers => Some(Action::HealthCheck),
                 // Only lowercase: the dialog says `y`, and a dangerous action
                 // should not go ahead on a Shift slip.
                 KeyCode::Char('y') => Some(Action::Accept),
@@ -1269,12 +1492,19 @@ pub enum Closing {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Confirm {
     CloseConnections(Closing),
+    /// `U`: the providers the page showed, under `filter` when it is not
+    /// empty.
+    UpdateProviders {
+        filter: String,
+        targets: Vec<ProviderRef>,
+    },
 }
 
 impl Confirm {
     pub fn title(&self) -> &'static str {
         match self {
             Self::CloseConnections(_) => "关闭连接",
+            Self::UpdateProviders { .. } => "更新 Provider",
         }
     }
 
@@ -1284,6 +1514,12 @@ impl Confirm {
             Self::CloseConnections(Closing::Matching { filter, ids }) => {
                 format!("关闭匹配「{filter}」的 {} 条连接？", ids.len())
             }
+            Self::UpdateProviders { filter, targets } if filter.is_empty() => {
+                format!("更新全部 {} 个 provider？", targets.len())
+            }
+            Self::UpdateProviders { filter, targets } => {
+                format!("更新匹配「{filter}」的 {} 个 provider？", targets.len())
+            }
         }
     }
 
@@ -1291,6 +1527,7 @@ impl Confirm {
     pub fn verb(&self) -> &'static str {
         match self {
             Self::CloseConnections(_) => "确认",
+            Self::UpdateProviders { .. } => "更新",
         }
     }
 }
@@ -1378,6 +1615,19 @@ pub struct App {
     rule_fetches: u64,
     /// The newest `/rules` fetch whose reply has been applied.
     applied_rule_fetch: u64,
+    /// The providers page, loaded the first time it is shown.
+    pub providers_view: ProvidersView,
+    /// `/providers/proxies` fetches issued so far; numbers them.
+    proxy_provider_fetches: u64,
+    /// The newest `/providers/proxies` fetch whose reply has been applied.
+    applied_proxy_provider_fetch: u64,
+    /// `/providers/rules` fetches issued so far; numbers them.
+    rule_provider_fetches: u64,
+    /// The newest `/providers/rules` fetch whose reply has been applied.
+    applied_rule_provider_fetch: u64,
+    /// A `/providers/rules` fetch asked for before the kernel was known to
+    /// be mihomo, with its `refetch` flag; sent once `/version` says so.
+    deferred_rule_providers: Option<bool>,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
     /// What the confirm dialog asks about, while it is open.
@@ -1445,6 +1695,12 @@ impl App {
             rules_view: RulesView::default(),
             rule_fetches: 0,
             applied_rule_fetch: 0,
+            providers_view: ProvidersView::default(),
+            proxy_provider_fetches: 0,
+            applied_proxy_provider_fetch: 0,
+            rule_provider_fetches: 0,
+            applied_rule_provider_fetch: 0,
+            deferred_rule_providers: None,
             local_delays: HashMap::new(),
             toasts: VecDeque::new(),
             overlay: None,
@@ -1507,6 +1763,42 @@ impl App {
                 result: client.rules().await,
             }
         });
+    }
+
+    /// Fetches `/providers/proxies` in the background.
+    fn fetch_proxy_providers(&mut self, refetch: bool) {
+        self.proxy_provider_fetches += 1;
+        let seq = self.proxy_provider_fetches;
+        self.spawn(move |client| async move {
+            Msg::Providers(ProviderMsg::Proxies {
+                seq,
+                refetch,
+                result: client.proxy_providers().await,
+            })
+        });
+    }
+
+    /// Fetches `/providers/rules` in the background, from mihomo only:
+    /// original Clash has no such endpoint, and its section says so instead.
+    /// While the kernel is not known (not asked yet, or unreachable), the
+    /// fetch waits for the `/version` reply that tells.
+    fn fetch_rule_providers(&mut self, refetch: bool) {
+        match self.core_kind() {
+            Some(CoreKind::Mihomo) => {
+                self.deferred_rule_providers = None;
+                self.rule_provider_fetches += 1;
+                let seq = self.rule_provider_fetches;
+                self.spawn(move |client| async move {
+                    Msg::Providers(ProviderMsg::Rules {
+                        seq,
+                        refetch,
+                        result: client.rule_providers().await,
+                    })
+                });
+            }
+            Some(CoreKind::Clash) => {}
+            None => self.deferred_rule_providers = Some(refetch),
+        }
     }
 
     /// Fetches `/configs` in the background and returns the fetch's number.
@@ -1610,34 +1902,55 @@ impl App {
                 self.clear_filter();
                 self.dirty = true;
             }
-            Action::Refresh => {
-                // A failed request shows as loading again while it is retried.
-                if matches!(self.version, Some(Err(_))) {
-                    self.version = None;
-                }
-                if matches!(self.configs, Some(Err(_))) {
-                    self.configs = None;
-                }
-                if matches!(self.proxies, Some(Err(_))) {
-                    self.proxies = None;
-                }
-                // Retry now instead of waiting out the backoff.
-                if let Some(reconnect) = &mut self.reconnect {
-                    reconnect.retry_at = None;
-                }
-                // Rules are not among the startup requests: `r` on their
-                // page is what reloads them.
-                if self.page == Page::Rules {
-                    if matches!(self.rules_view.rows, Some(Err(_))) {
-                        self.rules_view.rows = None;
-                    }
-                    self.fetch_rules(false);
-                }
-                self.refreshing = true;
-                self.streams.retry_now();
-                self.start();
-            }
+            Action::UpdateProvider => self.update_provider(),
+            Action::UpdateProviders => self.ask_update_providers(),
+            Action::HealthCheck => self.health_check(),
+            Action::Refresh => self.refresh(),
         }
+    }
+
+    /// `r`: retries what failed and repeats the startup requests at once,
+    /// plus the current page's own data where it has some.
+    fn refresh(&mut self) {
+        // A failed request shows as loading again while it is retried.
+        if matches!(self.version, Some(Err(_))) {
+            self.version = None;
+        }
+        if matches!(self.configs, Some(Err(_))) {
+            self.configs = None;
+        }
+        if matches!(self.proxies, Some(Err(_))) {
+            self.proxies = None;
+        }
+        // Retry now instead of waiting out the backoff.
+        if let Some(reconnect) = &mut self.reconnect {
+            reconnect.retry_at = None;
+        }
+        // Rules and providers are not among the startup requests: `r` on
+        // their page is what reloads them.
+        match self.page {
+            Page::Rules => {
+                if matches!(self.rules_view.rows, Some(Err(_))) {
+                    self.rules_view.rows = None;
+                }
+                self.fetch_rules(false);
+            }
+            Page::Providers => {
+                let view = &mut self.providers_view;
+                if matches!(view.proxies, Some(Err(_))) {
+                    view.proxies = None;
+                }
+                if matches!(view.rules, Some(Err(_))) {
+                    view.rules = None;
+                }
+                self.fetch_proxy_providers(false);
+                self.fetch_rule_providers(false);
+            }
+            _ => {}
+        }
+        self.refreshing = true;
+        self.streams.retry_now();
+        self.start();
     }
 
     /// `m`: asks the kernel for the next mode and, once it agrees, fetches
@@ -1715,6 +2028,15 @@ impl App {
             }
             Page::Rules => {
                 self.move_in_rules(movement);
+                return;
+            }
+            Page::Providers => {
+                let screen = Rect::from(self.size);
+                let capacity = providers::capacity(regions(screen, self.reconnect.is_some()).body);
+                let half = (capacity / 2).max(1);
+                let view = &mut self.providers_view;
+                view.cursor = movement.apply(view.cursor, view.rows().len(), half);
+                self.dirty = true;
                 return;
             }
             Page::Proxies => {}
@@ -1815,6 +2137,7 @@ impl App {
     pub fn typing(&self) -> bool {
         match self.page {
             Page::Proxies => self.proxies_view.typing,
+            Page::Providers => self.providers_view.typing,
             Page::Connections => self.connections_view.typing,
             Page::Rules => self.rules_view.typing,
             Page::Logs => self.logs_view.typing,
@@ -1826,6 +2149,7 @@ impl App {
     pub fn filter(&self) -> Option<&Input> {
         match self.page {
             Page::Proxies => Some(&self.proxies_view.filter),
+            Page::Providers => Some(&self.providers_view.filter),
             Page::Connections => Some(&self.connections_view.filter),
             Page::Rules => Some(&self.rules_view.filter),
             Page::Logs => Some(&self.logs_view.filter),
@@ -1853,6 +2177,9 @@ impl App {
                 self.proxies_view.filter.handle_event(&event);
                 self.proxies_view.node = None;
             }
+            Page::Providers => self.providers_view.edit_filter(|filter| {
+                filter.handle_event(&event);
+            }),
             Page::Connections => self.connections_view.edit_filter(|filter| {
                 filter.handle_event(&event);
             }),
@@ -1873,6 +2200,7 @@ impl App {
     fn set_typing(&mut self, typing: bool) {
         match self.page {
             Page::Proxies => self.proxies_view.typing = typing,
+            Page::Providers => self.providers_view.typing = typing,
             Page::Connections => self.connections_view.typing = typing,
             Page::Rules => self.rules_view.typing = typing,
             Page::Logs => self.logs_view.typing = typing,
@@ -1889,6 +2217,7 @@ impl App {
                 self.proxies_view.typing = false;
                 self.proxies_view.node = None;
             }
+            Page::Providers => self.providers_view.clear_filter(),
             Page::Connections => self.connections_view.clear_filter(),
             Page::Rules => self.rules_view.clear_filter(),
             Page::Logs => {
@@ -2040,6 +2369,7 @@ impl App {
         };
         match pending {
             Confirm::CloseConnections(closing) => self.close_connections(closing),
+            Confirm::UpdateProviders { targets, .. } => self.update_providers(targets),
         }
     }
 
@@ -2180,6 +2510,25 @@ impl App {
             }
         }
         self.version = Some(result);
+        // Rule providers wait to know the kernel; Clash has none.
+        match self.core_kind() {
+            Some(CoreKind::Mihomo) => {
+                if let Some(refetch) = self.deferred_rule_providers.take() {
+                    self.fetch_rule_providers(refetch);
+                }
+            }
+            Some(CoreKind::Clash) => {
+                self.deferred_rule_providers = None;
+                self.providers_view.rules = None;
+            }
+            None => {}
+        }
+    }
+
+    /// The kernel behind the controller, as its latest `/version` reply
+    /// says; `None` before one came in or after one failed.
+    pub fn core_kind(&self) -> Option<CoreKind> {
+        self.version.as_ref()?.as_ref().ok().map(Version::kind)
     }
 
     /// Swaps in a `/configs` reply from fetch `seq`, and ends the mode
@@ -2227,6 +2576,242 @@ impl App {
         self.applied_rule_fetch = seq;
         self.note_failure(&result);
         self.rules_view.apply(refetch, result);
+    }
+
+    /// Takes in a reply about the providers page.
+    fn on_providers(&mut self, msg: ProviderMsg) {
+        match msg {
+            ProviderMsg::Proxies {
+                seq,
+                refetch,
+                result,
+            } => {
+                // An older reply than one applied would roll the list back.
+                if seq < self.applied_proxy_provider_fetch {
+                    return;
+                }
+                self.applied_proxy_provider_fetch = seq;
+                self.note_failure(&result);
+                self.providers_view
+                    .apply(|view| &mut view.proxies, refetch, result);
+            }
+            ProviderMsg::Rules {
+                seq,
+                refetch,
+                result,
+            } => {
+                if seq < self.applied_rule_provider_fetch {
+                    return;
+                }
+                self.applied_rule_provider_fetch = seq;
+                self.note_failure(&result);
+                self.providers_view
+                    .apply(|view| &mut view.rules, refetch, result);
+            }
+            ProviderMsg::Done {
+                target,
+                work,
+                result,
+            } => self.provider_done(&target, work, result),
+            ProviderMsg::Updated { results } => self.providers_updated(results),
+        }
+    }
+
+    /// Entering the providers page: each list loads the first time,
+    /// refreshes behind what is shown after that, and after a failure
+    /// loads again with the spinner. A load still on its way is not asked
+    /// for twice.
+    fn load_providers(&mut self) {
+        match &self.providers_view.proxies {
+            Some(Ok(_)) => self.fetch_proxy_providers(true),
+            Some(Err(_)) => {
+                self.providers_view.proxies = None;
+                self.fetch_proxy_providers(false);
+            }
+            None if self.proxy_provider_fetches == 0 => self.fetch_proxy_providers(false),
+            None => {}
+        }
+        match &self.providers_view.rules {
+            Some(Ok(_)) => self.fetch_rule_providers(true),
+            Some(Err(_)) => {
+                self.providers_view.rules = None;
+                self.fetch_rule_providers(false);
+            }
+            None if self.rule_provider_fetches == 0 => self.fetch_rule_providers(false),
+            None => {}
+        }
+    }
+
+    /// After an outage: the lists loaded on demand reload too, if they ever
+    /// were. Ones on screen refresh behind it; a failed one is replaced by
+    /// whatever comes back. A page never visited is not asked for.
+    fn reload_visited(&mut self) {
+        if let Some(rows) = &self.rules_view.rows {
+            self.fetch_rules(rows.is_ok());
+        }
+        if let Some(list) = &self.providers_view.proxies {
+            self.fetch_proxy_providers(list.is_ok());
+        }
+        if let Some(list) = &self.providers_view.rules {
+            self.fetch_rule_providers(list.is_ok());
+        }
+    }
+
+    /// `u`: updates the provider under the cursor, unless something is
+    /// already being done to it.
+    fn update_provider(&mut self) {
+        if let Some(row) = self.providers_view.selected() {
+            let target = row.target();
+            self.start_work(target, Work::Updating);
+        }
+    }
+
+    /// `h`: health-checks the proxy provider under the cursor. Rule
+    /// providers have nothing to check.
+    fn health_check(&mut self) {
+        let Some(row) = self.providers_view.selected() else {
+            return;
+        };
+        let target = row.target();
+        if target.kind == ProviderKind::Rule {
+            self.toast(ToastKind::Error, "规则集合不支持健康检查".to_owned());
+            return;
+        }
+        self.start_work(target, Work::Checking);
+    }
+
+    /// Sends `work` for `target`, which spins until the reply.
+    fn start_work(&mut self, target: ProviderRef, work: Work) {
+        if self.providers_view.busy.contains_key(&target) {
+            return;
+        }
+        self.providers_view.busy.insert(target.clone(), work);
+        self.dirty = true;
+        let timeout = healthcheck_timeout(self.settings.delay_timeout_ms);
+        self.spawn(move |client| async move {
+            let result = match work {
+                Work::Updating => update_one(&client, &target).await,
+                Work::Checking => {
+                    client
+                        .healthcheck_proxy_provider(&target.name, timeout)
+                        .await
+                }
+            };
+            Msg::Providers(ProviderMsg::Done {
+                target,
+                work,
+                result,
+            })
+        });
+    }
+
+    /// `U`: asks before updating what the page shows: every provider, or
+    /// with a filter only the ones that pass it. Nothing shown, nothing
+    /// asked.
+    fn ask_update_providers(&mut self) {
+        let view = &self.providers_view;
+        let targets: Vec<ProviderRef> = view.rows().iter().map(ProviderRow::target).collect();
+        if targets.is_empty() {
+            return;
+        }
+        self.pending = Some(Confirm::UpdateProviders {
+            filter: view.filter.value().to_owned(),
+            targets,
+        });
+        self.overlay = Some(Overlay::Confirm);
+        self.dirty = true;
+    }
+
+    /// Updates what `U` was confirmed for, all at once; the replies come
+    /// back together in one message. Providers already being worked on
+    /// are left to that.
+    fn update_providers(&mut self, mut targets: Vec<ProviderRef>) {
+        let busy = &mut self.providers_view.busy;
+        targets.retain(|target| !busy.contains_key(target));
+        if targets.is_empty() {
+            return;
+        }
+        for target in &targets {
+            busy.insert(target.clone(), Work::Updating);
+        }
+        self.spawn(move |client| async move {
+            let results = join_all(targets.iter().map(|target| update_one(&client, target))).await;
+            Msg::Providers(ProviderMsg::Updated {
+                results: targets.into_iter().zip(results).collect(),
+            })
+        });
+    }
+
+    /// The reply to `u` or `h`: a toast either way, and on success the list
+    /// fetched again to show the new count, health and time. A health check
+    /// changes the delays the proxies page shows too.
+    fn provider_done(&mut self, target: &ProviderRef, work: Work, result: Result<(), ApiError>) {
+        self.providers_view.busy.remove(target);
+        let name = &target.name;
+        match (work, result) {
+            (Work::Updating, Ok(())) => {
+                self.toast(ToastKind::Success, format!("已更新 {name}"));
+                self.refetch_providers(target.kind);
+            }
+            (Work::Checking, Ok(())) => {
+                self.toast(ToastKind::Success, format!("{name} 健康检查完成"));
+                self.refetch_providers(ProviderKind::Proxy);
+                if matches!(self.proxies, Some(Ok(_))) {
+                    self.fetch_proxies(true);
+                }
+            }
+            // No name: a toast has room for about 44 columns, the reason
+            // takes most of them, and the provider is the one under the
+            // cursor anyway.
+            (Work::Updating, Err(err)) => {
+                self.toast(ToastKind::Error, format!("更新失败：{}", describe(&err)));
+            }
+            (Work::Checking, Err(err)) => {
+                self.toast(
+                    ToastKind::Error,
+                    format!("健康检查失败：{}", describe(&err)),
+                );
+            }
+        }
+    }
+
+    /// The replies to `U`, in one toast: how many were updated and, if any
+    /// failed, how many and the first reason. The lists that changed are
+    /// fetched again.
+    fn providers_updated(&mut self, results: Vec<(ProviderRef, Result<(), ApiError>)>) {
+        let mut updated = 0;
+        let mut changed = HashSet::new();
+        let mut failed = vec![];
+        for (target, result) in results {
+            self.providers_view.busy.remove(&target);
+            match result {
+                Ok(()) => {
+                    updated += 1;
+                    changed.insert(target.kind);
+                }
+                Err(err) => failed.push(err),
+            }
+        }
+        match failed.first() {
+            None => self.toast(ToastKind::Success, format!("已更新 {updated} 个 provider")),
+            Some(first) => self.toast(
+                ToastKind::Error,
+                format!("成功 {updated}，失败 {}：{}", failed.len(), describe(first)),
+            ),
+        }
+        for kind in [ProviderKind::Proxy, ProviderKind::Rule] {
+            if changed.contains(&kind) {
+                self.refetch_providers(kind);
+            }
+        }
+    }
+
+    /// Fetches one list again behind what is shown.
+    fn refetch_providers(&mut self, kind: ProviderKind) {
+        match kind {
+            ProviderKind::Proxy => self.fetch_proxy_providers(true),
+            ProviderKind::Rule => self.fetch_rule_providers(true),
+        }
     }
 
     pub fn handle_msg(&mut self, msg: Msg) {
@@ -2328,6 +2913,7 @@ impl App {
                     format!("关闭连接失败：{}", describe(&err)),
                 ),
             },
+            Msg::Providers(msg) => self.on_providers(msg),
             Msg::Stream { stream, event } => self.on_stream(stream, event),
         }
         self.dirty = true;
@@ -2340,7 +2926,12 @@ impl App {
         if self.toasts.len() != shown {
             self.dirty = true;
         }
-        if self.is_loading() || (self.page == Page::Proxies && !self.testing.is_empty()) {
+        let spinning = match self.page {
+            Page::Proxies => !self.testing.is_empty(),
+            Page::Providers => self.providers_spinning(),
+            _ => false,
+        };
+        if self.is_loading() || spinning {
             self.spinner = self.spinner.wrapping_add(1);
             self.dirty = true;
         }
@@ -2366,8 +2957,9 @@ impl App {
     /// - Every stream down at once, with no banner yet: probe now, instead of
     ///   waiting for the next request to fail.
     /// - First stream back after that: the kernel may have been replaced, so
-    ///   repeat the startup requests, as a REST retry does. Streams that are
-    ///   already running are left alone.
+    ///   repeat the startup requests, as a REST retry does, and reload the
+    ///   pages loaded on demand that were. Streams that are already running
+    ///   are left alone.
     fn on_stream(&mut self, stream: Stream, event: StreamEvent) {
         match event {
             StreamEvent::Connected => {
@@ -2377,6 +2969,7 @@ impl App {
                 }
                 if std::mem::take(&mut self.links.outage) {
                     self.start();
+                    self.reload_visited();
                 }
             }
             StreamEvent::Disconnected => {
@@ -2459,9 +3052,25 @@ impl App {
             Page::Proxies => self.proxies.is_none(),
             Page::Connections => self.connections_view.rows.is_none(),
             Page::Rules => self.rules_view.rows.is_none(),
+            Page::Providers => self.providers_view.loading(),
             Page::Logs => self.logs_view.waiting(),
-            _ => false,
+            Page::Settings => false,
         }
+    }
+
+    /// Whether the kernel can have rule providers: anything but original
+    /// Clash, which has none. Not known yet counts as yes.
+    pub fn rule_providers_supported(&self) -> bool {
+        self.core_kind() != Some(CoreKind::Clash)
+    }
+
+    /// Whether something on the providers page spins besides the page
+    /// spinner: a list still loading, or a provider being worked on.
+    fn providers_spinning(&self) -> bool {
+        let view = &self.providers_view;
+        !view.busy.is_empty()
+            || view.proxies.is_none()
+            || (view.rules.is_none() && self.rule_providers_supported())
     }
 
     /// Whether the kernel is mihomo (group delay tests and the like need it).
@@ -2647,6 +3256,8 @@ impl App {
                 // The first load is still on its way.
                 None => {}
             },
+            // Like the rules, one list at a time.
+            Page::Providers => self.load_providers(),
             _ => {}
         }
     }
@@ -2676,6 +3287,23 @@ fn failed_test(err: &ApiError) -> Option<Delay> {
         ApiError::Http { status: 504, .. } | ApiError::Timeout => Some(Delay::Timeout),
         _ => None,
     }
+}
+
+/// Updates one provider, at the endpoint of its kind.
+async fn update_one(client: &ApiClient, target: &ProviderRef) -> Result<(), ApiError> {
+    match target.kind {
+        ProviderKind::Proxy => client.update_proxy_provider(&target.name).await,
+        ProviderKind::Rule => client.update_rule_provider(&target.name).await,
+    }
+}
+
+/// How long a provider health check may take: twice the delay timeout plus
+/// 30 s, 40 s by default. The kernel only replies once every node is
+/// tested, at most 10 at a time, a dead one after the provider's own test
+/// timeout (5 s unless configured), so this is well above the usual request
+/// limit.
+fn healthcheck_timeout(delay_timeout_ms: u32) -> Duration {
+    Duration::from_millis(u64::from(delay_timeout_ms) * 2) + Duration::from_secs(30)
 }
 
 #[cfg(test)]
@@ -3519,12 +4147,18 @@ mod tests {
         }
         // Page keys, the mode key and page numbers all go into the box of
         // the page being filtered, with nothing else happening.
-        for page in [Page::Proxies, Page::Rules, Page::Connections, Page::Logs] {
+        for page in [
+            Page::Proxies,
+            Page::Providers,
+            Page::Rules,
+            Page::Connections,
+            Page::Logs,
+        ] {
             let (mut app, _rx) = app_without_controller();
             app.page = page;
             app.logs_view.receive(log_entry(LogLevel::Info, "kept"));
             app.update(press('/', page, app.typing()).unwrap());
-            for key in ['p', 's', 'S', 'm', '5', 'l', 'c'] {
+            for key in ['p', 's', 'S', 'm', '5', 'l', 'c', 'u', 'U', 'h'] {
                 let action = press(key, page, app.typing());
                 assert_eq!(
                     action,
@@ -3536,13 +4170,14 @@ mod tests {
                 );
                 app.update(action.unwrap());
             }
-            assert_eq!(app.filter().unwrap().value(), "psSm5lc", "{page:?}");
+            assert_eq!(app.filter().unwrap().value(), "psSm5lcuUh", "{page:?}");
             assert_eq!(app.page, page);
             assert!(!app.connections_view.paused);
             let logs = &app.logs_view;
             assert!(!logs.paused && logs.level == LogLevel::Info && logs.entries.len() == 1);
             assert_eq!(app.connections_view.sort, ConnectionSort::default());
             assert_eq!(app.proxies_view.sort, Sort::Default);
+            assert!(app.providers_view.busy.is_empty() && app.overlay.is_none());
             // `m` would have complained that there is no mode yet.
             assert!(app.toasts.is_empty());
         }
@@ -4721,5 +5356,364 @@ mod tests {
         assert!(app.logs_view.link == LogLink::Down && !app.is_loading());
         // Kept, the tab a space and the escape dropped.
         assert_eq!(app.logs_view.entries[0].message, "a b[0m");
+    }
+
+    fn kernel(meta: bool) -> Version {
+        Version {
+            version: "v1".to_owned(),
+            meta,
+        }
+    }
+
+    /// On the providers page of a mihomo kernel, with these proxy and rule
+    /// providers loaded.
+    fn providers_app(proxies: &[&str], rules: &[&str]) -> (App, mpsc::Receiver<Msg>) {
+        let (mut app, rx) = app_without_controller();
+        app.page = Page::Providers;
+        app.version = Some(Ok(kernel(true)));
+        let view = &mut app.providers_view;
+        view.proxies = Some(Ok(proxies
+            .iter()
+            .map(|name| ProxyProvider {
+                name: (*name).to_owned(),
+                vehicle_type: "HTTP".to_owned(),
+                ..ProxyProvider::default()
+            })
+            .collect()));
+        view.rules = Some(Ok(rules
+            .iter()
+            .map(|name| RuleProvider {
+                name: (*name).to_owned(),
+                vehicle_type: "File".to_owned(),
+                ..RuleProvider::default()
+            })
+            .collect()));
+        (app, rx)
+    }
+
+    fn proxy_ref(name: &str) -> ProviderRef {
+        ProviderRef {
+            kind: ProviderKind::Proxy,
+            name: name.to_owned(),
+        }
+    }
+
+    fn rule_ref(name: &str) -> ProviderRef {
+        ProviderRef {
+            kind: ProviderKind::Rule,
+            name: name.to_owned(),
+        }
+    }
+
+    /// A request the providers page made, told by its reply.
+    #[derive(Debug, PartialEq, Eq)]
+    enum ProviderSent {
+        /// A list fetch, and its `refetch` flag.
+        Proxies(bool),
+        Rules(bool),
+        /// `/rules`, for the rules page.
+        RulePage(bool),
+        Done(ProviderRef, Work),
+        Updated(Vec<ProviderRef>),
+    }
+
+    /// The provider requests the app made, from the replies they leave on
+    /// the channel, in no particular order.
+    async fn providers_sent(app: App, mut rx: mpsc::Receiver<Msg>) -> Vec<ProviderSent> {
+        drop(app);
+        let mut sent = vec![];
+        while let Some(msg) = rx.recv().await {
+            sent.push(match msg {
+                Msg::Providers(ProviderMsg::Proxies { refetch, .. }) => {
+                    ProviderSent::Proxies(refetch)
+                }
+                Msg::Providers(ProviderMsg::Rules { refetch, .. }) => ProviderSent::Rules(refetch),
+                Msg::Rules { refetch, .. } => ProviderSent::RulePage(refetch),
+                Msg::Providers(ProviderMsg::Done { target, work, .. }) => {
+                    ProviderSent::Done(target, work)
+                }
+                Msg::Providers(ProviderMsg::Updated { results }) => {
+                    ProviderSent::Updated(results.into_iter().map(|(target, _)| target).collect())
+                }
+                _ => continue,
+            });
+        }
+        sent
+    }
+
+    #[tokio::test]
+    async fn a_provider_in_the_works_is_not_sent_twice() {
+        let (mut app, rx) = providers_app(&["a"], &["r"]);
+        for key in ['u', 'u', 'h'] {
+            app.update(press(key, Page::Providers, false).unwrap());
+        }
+        assert_eq!(app.providers_view.busy[&proxy_ref("a")], Work::Updating);
+        // On the rule provider, `h` has nothing to check.
+        app.update(Action::Cursor(Move::Down));
+        app.update(press('h', Page::Providers, false).unwrap());
+        assert_eq!(app.toasts[0].text, "规则集合不支持健康检查");
+        app.update(press('u', Page::Providers, false).unwrap());
+        assert_eq!(providers_sent(app, rx).await.len(), 2, "one update of each");
+    }
+
+    #[tokio::test]
+    async fn finished_work_frees_the_provider_and_refetches_its_list() {
+        let (mut app, _rx) = providers_app(&["a"], &["r"]);
+        app.providers_view
+            .busy
+            .insert(rule_ref("r"), Work::Updating);
+        app.handle_msg(Msg::Providers(ProviderMsg::Done {
+            target: rule_ref("r"),
+            work: Work::Updating,
+            result: Ok(()),
+        }));
+        assert!(app.providers_view.busy.is_empty());
+        assert_eq!(app.toasts[0].text, "已更新 r");
+        assert_eq!(
+            (app.proxy_provider_fetches, app.rule_provider_fetches),
+            (0, 1)
+        );
+
+        // A health check changes delays: `/proxies` too, once it is loaded.
+        let check = |result| {
+            Msg::Providers(ProviderMsg::Done {
+                target: proxy_ref("a"),
+                work: Work::Checking,
+                result,
+            })
+        };
+        app.providers_view
+            .busy
+            .insert(proxy_ref("a"), Work::Checking);
+        app.handle_msg(check(Ok(())));
+        assert_eq!((app.proxy_provider_fetches, app.fetches), (1, 0));
+        app.proxies = Some(Ok(reply(&[("n", &[])])));
+        app.handle_msg(check(Ok(())));
+        assert_eq!((app.proxy_provider_fetches, app.fetches), (2, 1));
+        assert_eq!(app.toasts.back().unwrap().text, "a 健康检查完成");
+
+        // A failure frees it as well, and only says why.
+        app.providers_view
+            .busy
+            .insert(proxy_ref("a"), Work::Checking);
+        app.handle_msg(check(Err(ApiError::Timeout)));
+        assert!(app.providers_view.busy.is_empty());
+        assert_eq!((app.proxy_provider_fetches, app.fetches), (2, 1));
+        let toast = app.toasts.back().unwrap();
+        assert_eq!(
+            (toast.kind, toast.text.as_str()),
+            (ToastKind::Error, "健康检查失败：请求超时")
+        );
+    }
+
+    #[tokio::test]
+    async fn capital_u_under_a_filter_updates_only_what_is_shown() {
+        let (mut app, rx) = providers_app(&["hk-1", "us-1", "hk-2"], &["hk-rules", "ads"]);
+        app.update(press('U', Page::Providers, false).unwrap());
+        assert_eq!(dialog_body(&app), "更新全部 5 个 provider？");
+        app.update(Action::Cancel);
+
+        type_filter(&mut app, "HK");
+        // One of them is already being updated: it is not sent again.
+        app.providers_view
+            .busy
+            .insert(proxy_ref("hk-2"), Work::Updating);
+        app.update(press('U', Page::Providers, false).unwrap());
+        assert_eq!(dialog_body(&app), "更新匹配「HK」的 3 个 provider？");
+        app.update(Action::Accept);
+        assert_eq!(app.providers_view.busy.len(), 3);
+        assert_eq!(
+            providers_sent(app, rx).await,
+            [ProviderSent::Updated(vec![
+                proxy_ref("hk-1"),
+                rule_ref("hk-rules")
+            ])]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_replies_to_capital_u_come_as_one_toast() {
+        let (mut app, _rx) = providers_app(&["a", "b"], &["r"]);
+        let all = [proxy_ref("a"), proxy_ref("b"), rule_ref("r")];
+        for target in &all {
+            app.providers_view
+                .busy
+                .insert(target.clone(), Work::Updating);
+        }
+        app.handle_msg(Msg::Providers(ProviderMsg::Updated {
+            results: vec![
+                (all[0].clone(), Ok(())),
+                (all[1].clone(), Ok(())),
+                (all[2].clone(), Err(http(502))),
+            ],
+        }));
+        assert!(app.providers_view.busy.is_empty());
+        assert_eq!(app.toasts.len(), 1);
+        assert_eq!(
+            app.toasts[0].text,
+            "成功 2，失败 1：控制器返回错误（HTTP 502）"
+        );
+        // Only the list that changed is fetched again.
+        assert_eq!(
+            (app.proxy_provider_fetches, app.rule_provider_fetches),
+            (1, 0)
+        );
+
+        app.handle_msg(Msg::Providers(ProviderMsg::Updated {
+            results: vec![(all[2].clone(), Ok(()))],
+        }));
+        assert_eq!(app.toasts[1].text, "已更新 1 个 provider");
+        assert_eq!(app.toasts[1].kind, ToastKind::Success);
+    }
+
+    #[tokio::test]
+    async fn rule_providers_are_only_asked_of_mihomo() {
+        // Original Clash: no `/providers/rules` at all.
+        let (mut app, rx) = app_without_controller();
+        app.version = Some(Ok(kernel(false)));
+        app.update(Action::SelectPage(Page::Providers));
+        app.update(Action::Refresh);
+        let sent = providers_sent(app, rx).await;
+        assert!(
+            !sent.iter().any(|s| matches!(s, ProviderSent::Rules(_))),
+            "{sent:?}"
+        );
+        assert_eq!(sent.len(), 2);
+
+        // Not known yet: the fetch waits for `/version`, then goes once.
+        let (mut app, rx) = app_without_controller();
+        app.update(Action::SelectPage(Page::Providers));
+        // Away and back before any reply: nothing is asked twice.
+        app.update(Action::SelectPage(Page::Logs));
+        app.update(Action::SelectPage(Page::Providers));
+        assert_eq!(
+            (app.proxy_provider_fetches, app.rule_provider_fetches),
+            (1, 0)
+        );
+        app.handle_msg(Msg::Version(Ok(kernel(true))));
+        assert_eq!(app.rule_provider_fetches, 1);
+        assert_eq!(
+            providers_sent(app, rx).await,
+            [ProviderSent::Proxies(false), ProviderSent::Rules(false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn providers_load_on_the_first_visit_and_refresh_behind_later_ones() {
+        let (mut app, _rx) = app_without_controller();
+        app.version = Some(Ok(kernel(true)));
+        app.update(Action::SelectPage(Page::Providers));
+        assert!(app.is_loading());
+        let proxies = |seq, result| {
+            Msg::Providers(ProviderMsg::Proxies {
+                seq,
+                refetch: false,
+                result,
+            })
+        };
+        app.handle_msg(proxies(1, Ok(vec![])));
+        // One list in: the panel shows, the other list still loading.
+        assert!(!app.is_loading());
+        app.handle_msg(Msg::Providers(ProviderMsg::Rules {
+            seq: 1,
+            refetch: false,
+            result: Err(http(500)),
+        }));
+        app.update(Action::SelectPage(Page::Logs));
+        app.update(Action::SelectPage(Page::Providers));
+        // Behind the list on screen; the failed one again from scratch.
+        assert_eq!(
+            (app.proxy_provider_fetches, app.rule_provider_fetches),
+            (2, 2)
+        );
+        assert!(app.providers_view.rules.is_none());
+        // A late reply to the first fetch does not roll the list back.
+        app.handle_msg(proxies(2, Ok(vec![ProxyProvider::default()])));
+        app.handle_msg(proxies(1, Ok(vec![])));
+        assert!(matches!(&app.providers_view.proxies, Some(Ok(list)) if list.len() == 1));
+    }
+
+    #[tokio::test]
+    async fn the_cursor_runs_through_both_lists_and_stays_on_its_provider() {
+        let (mut app, _rx) = providers_app(&["a", "b"], &["c"]);
+        app.update(Action::Cursor(Move::Bottom));
+        assert_eq!(
+            app.providers_view.selected().unwrap().target(),
+            rule_ref("c")
+        );
+        // A provider added above it: the cursor stays on `c`.
+        app.handle_msg(Msg::Providers(ProviderMsg::Proxies {
+            seq: 1,
+            refetch: true,
+            result: Ok(["a", "b", "b2"]
+                .iter()
+                .map(|name| ProxyProvider {
+                    name: (*name).to_owned(),
+                    ..ProxyProvider::default()
+                })
+                .collect()),
+        }));
+        assert_eq!(app.providers_view.cursor, 3);
+        assert_eq!(
+            app.providers_view.selected().unwrap().target(),
+            rule_ref("c")
+        );
+
+        // The rule providers answering first: once the proxy providers fill
+        // in above, the cursor is at the top, not dragged down with them.
+        let (mut app, _rx) = providers_app(&[], &[]);
+        app.providers_view = ProvidersView::default();
+        app.handle_msg(Msg::Providers(ProviderMsg::Rules {
+            seq: 1,
+            refetch: false,
+            result: Ok(vec![RuleProvider {
+                name: "c".to_owned(),
+                ..RuleProvider::default()
+            }]),
+        }));
+        app.handle_msg(Msg::Providers(ProviderMsg::Proxies {
+            seq: 1,
+            refetch: false,
+            result: Ok(vec![ProxyProvider {
+                name: "a".to_owned(),
+                ..ProxyProvider::default()
+            }]),
+        }));
+        assert_eq!(
+            app.providers_view.selected().unwrap().target(),
+            proxy_ref("a")
+        );
+    }
+
+    #[tokio::test]
+    async fn the_first_stream_back_reloads_the_pages_that_were_loaded() {
+        let outage = |app: &mut App| {
+            connect(app, Stream::Traffic);
+            disconnect(app, Stream::Traffic);
+            connect(app, Stream::Traffic);
+        };
+        // Never visited: not asked for.
+        let (mut app, rx) = app_without_controller();
+        app.version = Some(Ok(kernel(true)));
+        outage(&mut app);
+        assert_eq!(providers_sent(app, rx).await, Vec::new());
+
+        // Rules failed, proxy providers on screen, rule providers failed:
+        // the failed ones without `refetch`, so their reply replaces the
+        // error; the one on screen behind it.
+        let (mut app, rx) = providers_app(&["a"], &[]);
+        app.rules_view.rows = Some(Err(http(500)));
+        app.providers_view.rules = Some(Err(http(500)));
+        outage(&mut app);
+        let mut sent = providers_sent(app, rx).await;
+        sent.sort_by_key(|s| format!("{s:?}"));
+        assert_eq!(
+            sent,
+            [
+                ProviderSent::Proxies(true),
+                ProviderSent::RulePage(false),
+                ProviderSent::Rules(false),
+            ]
+        );
     }
 }

@@ -28,6 +28,16 @@ fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
             ("g / G", "顶部 / 底部"),
             ("Ctrl+d / Ctrl+u", "翻半页"),
         ],
+        Page::Providers => &[
+            ("u", "更新当前 provider"),
+            ("U", "更新全部 / 匹配的"),
+            ("h", "健康检查代理集合"),
+            ("/", "按名称过滤"),
+            ("Esc", "清除过滤"),
+            ("j / k / ↓ / ↑", "上下移动"),
+            ("g / G", "顶部 / 底部"),
+            ("Ctrl+d / Ctrl+u", "翻半页"),
+        ],
         Page::Rules => &[
             ("/", "过滤规则"),
             ("Esc", "清除过滤"),

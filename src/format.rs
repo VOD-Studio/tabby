@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use jiff::{Timestamp, Zoned};
 use unicode_width::UnicodeWidthChar;
 
 const ELLIPSIS: char = '…';
@@ -90,6 +91,24 @@ pub fn duration(secs: u64) -> String {
         MINUTE..HOUR => format!("{}m{:02}s", secs / MINUTE, secs % MINUTE),
         HOUR..DAY => format!("{}h{:02}m", secs / HOUR, secs % HOUR / MINUTE),
         _ => format!("{}d{:02}h", secs / DAY, secs % DAY / HOUR),
+    }
+}
+
+/// How long ago `then` was, as of `now`: `刚刚` under a minute, then
+/// `N 分钟前`, `N 小时前`, `N 天前` up to 30 days, and past that the date
+/// in `now`'s time zone (`2026-10-01`). A time in the future, which only a
+/// clock running ahead of the kernel's gives, counts as `刚刚`.
+pub fn ago(then: Timestamp, now: &Zoned) -> String {
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    let secs = now.timestamp().as_second() - then.as_second();
+    match secs {
+        ..MINUTE => "刚刚".to_owned(),
+        MINUTE..HOUR => format!("{} 分钟前", secs / MINUTE),
+        HOUR..DAY => format!("{} 小时前", secs / HOUR),
+        _ if secs / DAY <= 30 => format!("{} 天前", secs / DAY),
+        _ => then.to_zoned(now.time_zone().clone()).date().to_string(),
     }
 }
 
@@ -259,5 +278,33 @@ mod tests {
         ] {
             assert_eq!(duration(secs), text, "{secs}");
         }
+    }
+
+    #[test]
+    fn relative_times_switch_units_at_the_boundaries() {
+        let now: Zoned = "2026-11-05T12:00:00+08:00[Asia/Shanghai]".parse().unwrap();
+        let ago_secs = |secs: i64| {
+            let then = now.timestamp() - jiff::SignedDuration::from_secs(secs);
+            ago(then, &now)
+        };
+        for (secs, text) in [
+            (-3600, "刚刚"),
+            (0, "刚刚"),
+            (59, "刚刚"),
+            (60, "1 分钟前"),
+            (59 * 60 + 59, "59 分钟前"),
+            (3600, "1 小时前"),
+            (23 * 3600 + 59 * 60, "23 小时前"),
+            (86_400, "1 天前"),
+            (30 * 86_400, "30 天前"),
+            (30 * 86_400 + 86_399, "30 天前"),
+            (31 * 86_400, "2026-10-05"),
+        ] {
+            assert_eq!(ago_secs(secs), text, "{secs}");
+        }
+        // The date is the one in `now`'s time zone: 23:30 UTC is the next
+        // day in Shanghai.
+        let then: Timestamp = "2026-09-30T23:30:00Z".parse().unwrap();
+        assert_eq!(ago(then, &now), "2026-10-01");
     }
 }

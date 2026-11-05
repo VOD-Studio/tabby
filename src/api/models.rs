@@ -3,6 +3,8 @@ use std::collections::HashMap;
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer};
 
+use crate::format::natural_cmp;
+
 /// Which kernel is behind the controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CoreKind {
@@ -368,6 +370,16 @@ where
     Ok(value.as_str().and_then(|text| text.parse().ok()))
 }
 
+/// When a provider was last loaded: like [`lenient_timestamp`], and the
+/// zero time `0001-01-01T00:00:00Z` the kernel reports for one that never
+/// was is `None` too. Anything before 1970 counts as that.
+fn provider_time<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(lenient_timestamp(deserializer)?.filter(|time| *time > Timestamp::UNIX_EPOCH))
+}
+
 /// The name of the built-in group that lists every proxy and group, in
 /// configuration order.
 pub const GLOBAL: &str = "GLOBAL";
@@ -561,6 +573,136 @@ pub struct Rule {
     pub payload: String,
     /// The proxy or group it sends traffic to.
     pub proxy: String,
+}
+
+/// What both kinds of provider share: where they load from, under which
+/// name.
+pub trait Provider {
+    fn vehicle(&self) -> &str;
+    fn name_mut(&mut self) -> &mut String;
+}
+
+/// `GET /providers/proxies` and `GET /providers/rules`: providers by name.
+#[derive(Debug, Deserialize)]
+#[serde(bound = "T: Deserialize<'de>")]
+pub struct ProviderList<T> {
+    #[serde(default, deserialize_with = "null_as_default")]
+    providers: HashMap<String, T>,
+}
+
+impl<T: Provider> ProviderList<T> {
+    /// The providers that load from a source of their own (`HTTP`, `File`,
+    /// `Inline`), by name. The rest are `Compatible`: the proxies written
+    /// straight into the configuration (`default`) and each proxy group,
+    /// which the kernel lists here too but which cannot be updated.
+    pub fn shown(self) -> Vec<T> {
+        let mut shown: Vec<(String, T)> = self
+            .providers
+            .into_iter()
+            .filter(|(_, provider)| matches!(provider.vehicle(), "HTTP" | "File" | "Inline"))
+            .map(|(name, mut provider)| {
+                // The key is the name the endpoints take; the field echoes it.
+                provider.name_mut().clone_from(&name);
+                (name.to_lowercase(), provider)
+            })
+            .collect();
+        shown.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
+        shown.into_iter().map(|(_, provider)| provider).collect()
+    }
+}
+
+/// One entry of `GET /providers/proxies`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ProxyProvider {
+    pub name: String,
+    /// `HTTP`, `File`, `Inline` or `Compatible`.
+    pub vehicle_type: String,
+    /// `None` when missing, unreadable, or never loaded.
+    #[serde(deserialize_with = "provider_time")]
+    pub updated_at: Option<Timestamp>,
+    #[serde(deserialize_with = "null_as_default")]
+    pub proxies: Vec<Proxy>,
+    /// From the `subscription-userinfo` header of an HTTP provider; mihomo
+    /// only, and only when the server sends one.
+    pub subscription_info: Option<Subscription>,
+}
+
+impl Provider for ProxyProvider {
+    fn vehicle(&self) -> &str {
+        &self.vehicle_type
+    }
+
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
+}
+
+/// Traffic and expiry of a subscription, as its server reports them. Zero
+/// means not reported (`total`, `expire`). Signed like the kernel's own
+/// fields, so an odd value from a server cannot fail the whole reply.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "PascalCase")]
+pub struct Subscription {
+    pub upload: i64,
+    pub download: i64,
+    pub total: i64,
+    /// Unix seconds.
+    pub expire: i64,
+}
+
+/// How many nodes of a proxy provider answered their latest test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Health {
+    /// Nodes whose latest test came back with a delay.
+    pub alive: usize,
+    pub total: usize,
+    /// Whether any node has been tested at all.
+    pub tested: bool,
+}
+
+impl ProxyProvider {
+    pub fn health(&self) -> Health {
+        let latest = || self.proxies.iter().map(|proxy| proxy.history.last());
+        Health {
+            alive: latest()
+                .filter(|record| record.is_some_and(|record| record.delay > 0))
+                .count(),
+            total: self.proxies.len(),
+            tested: latest().any(|record| record.is_some()),
+        }
+    }
+
+    /// The subscription, unless its server reported nothing in it.
+    pub fn subscription(&self) -> Option<Subscription> {
+        self.subscription_info
+            .filter(|info| *info != Subscription::default())
+    }
+}
+
+/// One entry of `GET /providers/rules` (mihomo only). Its `format` is not
+/// read: the page does not show it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct RuleProvider {
+    pub name: String,
+    /// `HTTP`, `File` or `Inline`.
+    pub vehicle_type: String,
+    /// `Domain`, `IPCIDR` or `Classical`.
+    pub behavior: String,
+    pub rule_count: u64,
+    #[serde(deserialize_with = "provider_time")]
+    pub updated_at: Option<Timestamp>,
+}
+
+impl Provider for RuleProvider {
+    fn vehicle(&self) -> &str {
+        &self.vehicle_type
+    }
+
+    fn name_mut(&mut self) -> &mut String {
+        &mut self.name
+    }
 }
 
 #[cfg(test)]
@@ -937,5 +1079,158 @@ mod tests {
             let list: RuleList = serde_json::from_str(json).unwrap();
             assert!(list.rules.is_empty(), "{json}");
         }
+    }
+
+    fn names<'a, T>(providers: &'a [T], name: impl Fn(&'a T) -> &'a str) -> Vec<&'a str> {
+        providers.iter().map(name).collect()
+    }
+
+    #[test]
+    fn parses_mihomo_providers_without_the_compatible_ones() {
+        let list: ProviderList<ProxyProvider> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/mihomo_proxy_providers.json"
+        ))
+        .unwrap();
+        // `default` and the group `负载均衡` are `Compatible`.
+        let proxies = list.shown();
+        assert_eq!(names(&proxies, |p| &p.name), ["本地集合", "机场 订阅"]);
+        let [file, http] = &proxies[..] else {
+            unreachable!()
+        };
+        assert_eq!(file.vehicle_type, "File");
+        assert_eq!(
+            file.updated_at,
+            Some("2026-11-05T18:26:08.170423241+08:00".parse().unwrap())
+        );
+        assert_eq!(file.subscription(), None);
+        assert_eq!(http.vehicle_type, "HTTP");
+        assert_eq!(
+            http.subscription(),
+            Some(Subscription {
+                upload: 1_288_490_188,
+                download: 12_079_595_520,
+                total: 107_374_182_400,
+                expire: 1_798_732_800,
+            })
+        );
+        assert_eq!(
+            (file.health(), http.health()),
+            (
+                Health {
+                    alive: 2,
+                    total: 3,
+                    tested: true
+                },
+                Health {
+                    alive: 2,
+                    total: 4,
+                    tested: true
+                }
+            )
+        );
+
+        let list: ProviderList<RuleProvider> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/mihomo_rule_providers.json"
+        ))
+        .unwrap();
+        let rules = list.shown();
+        assert_eq!(names(&rules, |r| &r.name), ["测试域名", "远程 IP"]);
+        assert_eq!(
+            [&rules[0].behavior, &rules[1].behavior],
+            ["Domain", "IPCIDR"]
+        );
+        assert_eq!([rules[0].rule_count, rules[1].rule_count], [3, 2]);
+        assert_eq!(rules[1].vehicle_type, "HTTP");
+        assert!(rules[1].updated_at.is_some());
+    }
+
+    #[test]
+    fn unknown_or_zero_update_times_and_empty_subscriptions_read_as_none() {
+        let json = r#"{"providers":{
+            "zero":{"vehicleType":"HTTP","updatedAt":"0001-01-01T00:00:00Z"},
+            "missing":{"vehicleType":"File"},
+            "garbage":{"vehicleType":"Inline","updatedAt":"yesterday",
+                       "subscriptionInfo":{"Upload":0,"Download":0,"Total":0,"Expire":0}},
+            "number":{"vehicleType":"HTTP","updatedAt":17,"subscriptionInfo":null}}}"#;
+        let providers = serde_json::from_str::<ProviderList<ProxyProvider>>(json)
+            .unwrap()
+            .shown();
+        assert_eq!(providers.len(), 4);
+        for provider in &providers {
+            assert_eq!(provider.updated_at, None, "{}", provider.name);
+            assert_eq!(provider.subscription(), None, "{}", provider.name);
+        }
+        for json in [r#"{"providers":null}"#, "{}"] {
+            let list: ProviderList<RuleProvider> = serde_json::from_str(json).unwrap();
+            assert!(list.shown().is_empty(), "{json}");
+        }
+    }
+
+    #[test]
+    fn parses_clash_providers() {
+        // Original Clash: no subscription, no test URL, a compatible provider
+        // without `updatedAt`, and a history with `meanDelay`.
+        let json = r#"{"providers":{
+            "default":{"name":"default","type":"Proxy","vehicleType":"Compatible",
+                "proxies":[{"name":"DIRECT","type":"Direct","history":[]}]},
+            "sub":{"name":"sub","type":"Proxy","vehicleType":"HTTP",
+                "updatedAt":"2026-11-01T08:00:00.123456789+08:00",
+                "proxies":[{"name":"a","type":"Shadowsocks",
+                    "history":[{"time":"2026-11-05T12:00:00Z","delay":120,"meanDelay":130}]}]}}}"#;
+        let providers = serde_json::from_str::<ProviderList<ProxyProvider>>(json)
+            .unwrap()
+            .shown();
+        assert_eq!(names(&providers, |p| &p.name), ["sub"]);
+        assert!(providers[0].updated_at.is_some());
+        assert_eq!(providers[0].subscription(), None);
+        assert_eq!(
+            providers[0].health(),
+            Health {
+                alive: 1,
+                total: 1,
+                tested: true
+            }
+        );
+    }
+
+    /// A provider whose nodes' histories end in these delays (`None`: never
+    /// tested).
+    fn provider(latest: &[Option<u32>]) -> ProxyProvider {
+        let proxies = latest
+            .iter()
+            .map(|delay| Proxy {
+                history: delay
+                    .iter()
+                    .flat_map(|delay| {
+                        [
+                            DelayRecord::default(),
+                            DelayRecord {
+                                delay: *delay,
+                                timed_out: false,
+                            },
+                        ]
+                    })
+                    .collect(),
+                ..Proxy::default()
+            })
+            .collect();
+        ProxyProvider {
+            proxies,
+            ..ProxyProvider::default()
+        }
+    }
+
+    #[test]
+    fn health_counts_nodes_whose_latest_test_answered() {
+        let health = |latest: &[Option<u32>]| {
+            let health = provider(latest).health();
+            (health.alive, health.total, health.tested)
+        };
+        // Only the latest test counts: every history starts with a failure.
+        assert_eq!(health(&[Some(80), Some(120)]), (2, 2, true));
+        assert_eq!(health(&[Some(80), Some(0), None]), (1, 3, true));
+        assert_eq!(health(&[Some(0), Some(0)]), (0, 2, true));
+        assert_eq!(health(&[None, None]), (0, 2, false));
+        assert_eq!(health(&[]), (0, 0, false));
     }
 }
