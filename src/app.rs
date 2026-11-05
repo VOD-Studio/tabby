@@ -145,6 +145,8 @@ pub struct App {
     pub configs: Option<Result<Configs, ApiError>>,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
+    /// Frame counter of the loading spinner; advances while one is visible.
+    pub spinner: usize,
     /// Set by `r` until the next `/version` reply, which then reports success.
     refreshing: bool,
     should_quit: bool,
@@ -163,6 +165,7 @@ impl App {
             configs: None,
             toasts: VecDeque::new(),
             overlay: None,
+            spinner: 0,
             refreshing: false,
             should_quit: false,
             dirty: false,
@@ -204,6 +207,13 @@ impl App {
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
             Action::Refresh => {
+                // A failed request shows as loading again while it is retried.
+                if matches!(self.version, Some(Err(_))) {
+                    self.version = None;
+                }
+                if matches!(self.configs, Some(Err(_))) {
+                    self.configs = None;
+                }
                 self.refreshing = true;
                 self.start();
             }
@@ -231,13 +241,23 @@ impl App {
         self.dirty = true;
     }
 
-    /// Drops expired toasts.
+    /// Drops expired toasts and steps the spinner.
     pub fn on_tick(&mut self, now: Instant) {
         let shown = self.toasts.len();
         self.toasts.retain(|toast| toast.expires_at > now);
         if self.toasts.len() != shown {
             self.dirty = true;
         }
+        if self.is_loading() {
+            self.spinner = self.spinner.wrapping_add(1);
+            self.dirty = true;
+        }
+    }
+
+    /// Whether the current page is waiting for data (and so shows a spinner).
+    /// The overview is the only page with data to wait for so far.
+    pub fn is_loading(&self) -> bool {
+        self.page == Page::Overview && self.configs.is_none()
     }
 
     /// Shows a toast. An identical one already on screen is renewed instead of

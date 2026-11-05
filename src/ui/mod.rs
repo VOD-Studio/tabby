@@ -49,9 +49,24 @@ pub fn page_title(page: Page) -> &'static str {
     }
 }
 
-/// Every page body is still to come; routing is real, content is not.
+/// Page bodies are still to come; routing and the data states are real.
 fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
+    if app.page == Page::Overview {
+        match &app.configs {
+            None => return components::states::loading(frame, area, app, "正在连接控制器…"),
+            Some(Err(err)) => {
+                return components::states::error(
+                    frame,
+                    area,
+                    app,
+                    "无法加载概览",
+                    &err.to_string(),
+                );
+            }
+            Some(Ok(_)) => {}
+        }
+    }
     let [_, middle, _] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(2),
