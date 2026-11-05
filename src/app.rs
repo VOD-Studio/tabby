@@ -3,8 +3,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use tokio::sync::mpsc;
+use tui_input::{Input, backend::crossterm::EventHandler};
 
 use crate::{
     api::{
@@ -93,17 +94,43 @@ pub enum Pane {
     Nodes,
 }
 
-/// Cursor and focus of the proxies page.
+/// How the nodes of a group are ordered.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Sort {
+    /// The order of the configuration.
+    #[default]
+    Default,
+    /// Fastest first; nodes without a result go last.
+    Delay,
+    Name,
+}
+
+impl Sort {
+    fn next(self) -> Self {
+        match self {
+            Self::Default => Self::Delay,
+            Self::Delay => Self::Name,
+            Self::Name => Self::Default,
+        }
+    }
+}
+
+/// Cursor, focus, ordering and filter of the proxies page.
 #[derive(Debug, Default)]
 pub struct ProxiesView {
     pub focus: Pane,
     /// Index into [`App::visible_groups`].
     pub group: usize,
     pub group_scroll: Scroll,
-    /// Index into the selected group's members; `None` rests on the group's
+    /// Index into [`App::visible_nodes`]; `None` rests on the group's
     /// current node.
     pub node: Option<usize>,
     pub node_scroll: Scroll,
+    pub sort: Sort,
+    /// Case-insensitive substring the node names must contain.
+    pub filter: Input,
+    /// The filter box has the keyboard.
+    pub typing: bool,
 }
 
 /// A user intent, derived from a terminal event.
@@ -123,8 +150,18 @@ pub enum Action {
     TestNode,
     /// `T`: delay-test every member of the selected group.
     TestGroup,
+    /// `s`: next node ordering.
+    CycleSort,
+    /// `/`: start typing a node filter.
+    StartFilter,
+    /// A key typed into the filter box.
+    FilterInput(KeyEvent),
+    /// `Enter` in the filter box: keep the filter, stop typing.
+    FilterAccept,
+    /// `Esc` in the filter box: drop the filter.
+    FilterClear,
     ToggleHelp,
-    /// `Esc`: closes the topmost overlay.
+    /// `Esc`: closes the topmost overlay, or clears an applied filter.
     Dismiss,
 }
 
@@ -153,7 +190,23 @@ pub enum Msg {
 }
 
 /// Maps a terminal event to an [`Action`]; `None` means the event is ignored.
-pub fn action_for(event: &Event, page: Page) -> Option<Action> {
+pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
+    if typing {
+        return match event {
+            Event::Key(key) if key.kind == KeyEventKind::Press => {
+                let ctrl_c =
+                    key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL);
+                Some(match key.code {
+                    _ if ctrl_c => Action::Quit,
+                    KeyCode::Esc => Action::FilterClear,
+                    KeyCode::Enter => Action::FilterAccept,
+                    _ => Action::FilterInput(*key),
+                })
+            }
+            Event::Resize(..) => Some(Action::Resize),
+            _ => None,
+        };
+    }
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
@@ -178,6 +231,8 @@ pub fn action_for(event: &Event, page: Page) -> Option<Action> {
                 KeyCode::Char('l') if page == Page::Proxies => Some(Action::Focus(Pane::Nodes)),
                 KeyCode::Char('t') if page == Page::Proxies => Some(Action::TestNode),
                 KeyCode::Char('T') if page == Page::Proxies => Some(Action::TestGroup),
+                KeyCode::Char('s') if page == Page::Proxies => Some(Action::CycleSort),
+                KeyCode::Char('/') if page == Page::Proxies => Some(Action::StartFilter),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -313,7 +368,9 @@ impl App {
                 self.dirty = true;
             }
             Action::Dismiss => {
-                self.overlay = None;
+                if self.overlay.take().is_none() && self.page == Page::Proxies {
+                    self.clear_filter();
+                }
                 self.dirty = true;
             }
             // Overlays are modal: everything else waits until they close.
@@ -325,6 +382,25 @@ impl App {
             Action::Confirm => self.confirm(),
             Action::TestNode => self.test_node(),
             Action::TestGroup => self.test_group(),
+            Action::CycleSort => {
+                self.proxies_view.sort = self.proxies_view.sort.next();
+                self.proxies_view.node = None;
+                self.dirty = true;
+            }
+            Action::StartFilter => {
+                self.proxies_view.typing = true;
+                self.dirty = true;
+            }
+            Action::FilterInput(key) => {
+                self.proxies_view.filter.handle_event(&Event::Key(key));
+                self.proxies_view.node = None;
+                self.dirty = true;
+            }
+            Action::FilterAccept => {
+                self.proxies_view.typing = false;
+                self.dirty = true;
+            }
+            Action::FilterClear => self.clear_filter(),
             Action::Focus(pane) => {
                 if self.page == Page::Proxies && self.visible_groups().next().is_some() {
                     self.proxies_view.focus = pane;
@@ -384,16 +460,68 @@ impl App {
                 }
             }
             Pane::Nodes => {
-                let Some(group) = self.selected_group() else {
-                    return;
-                };
-                let len = group.all.as_ref().map_or(0, Vec::len);
-                let current = group.current_index();
-                let view = &mut self.proxies_view;
-                view.node = Some(movement.apply(view.node.unwrap_or(current), len));
+                let len = self.visible_nodes().len();
+                let current = self.node_cursor();
+                self.proxies_view.node = Some(movement.apply(current, len));
             }
         }
         self.dirty = true;
+    }
+
+    /// Drops the node filter and gives the keyboard back.
+    fn clear_filter(&mut self) {
+        self.proxies_view.filter.reset();
+        self.proxies_view.typing = false;
+        self.proxies_view.node = None;
+    }
+
+    /// The selected group's members that pass the filter, in display order.
+    pub fn visible_nodes(&self) -> Vec<&str> {
+        let Some(group) = self.selected_group() else {
+            return vec![];
+        };
+        let view = &self.proxies_view;
+        let filter = view.filter.value().to_lowercase();
+        let mut nodes: Vec<&str> = group
+            .all
+            .iter()
+            .flatten()
+            .map(String::as_str)
+            .filter(|name| filter.is_empty() || name.to_lowercase().contains(&filter))
+            .collect();
+        let proxies = self
+            .proxies
+            .as_ref()
+            .and_then(|proxies| proxies.as_ref().ok());
+        match view.sort {
+            Sort::Default => {}
+            Sort::Name => nodes.sort_by_cached_key(|name| name.to_lowercase()),
+            Sort::Delay => nodes.sort_by_key(|name| {
+                match proxies
+                    .and_then(|proxies| proxies.get(name))
+                    .and_then(Proxy::delay)
+                {
+                    Some(millis) if millis > 0 => (0, millis),
+                    _ => (1, 0),
+                }
+            }),
+        }
+        nodes
+    }
+
+    /// Where the node cursor is in [`App::visible_nodes`]: wherever it was
+    /// moved to, else on the group's current node.
+    pub fn node_cursor(&self) -> usize {
+        let nodes = self.visible_nodes();
+        let resting = self
+            .selected_group()
+            .and_then(|group| group.now.as_deref())
+            .and_then(|now| nodes.iter().position(|name| *name == now))
+            .unwrap_or(0);
+        self.proxies_view
+            .node
+            .unwrap_or(resting)
+            .min(nodes.len().saturating_sub(1))
     }
 
     /// `Enter` on the proxies page: from the group list, moves into the nodes;
@@ -419,15 +547,11 @@ impl App {
             self.toast(ToastKind::Error, "该组为自动选择".to_owned());
             return;
         }
-        let members = group.all.as_deref().unwrap_or_default();
-        let index = self
-            .proxies_view
-            .node
-            .unwrap_or_else(|| group.current_index());
-        let Some(node) = members.get(index.min(members.len().saturating_sub(1))) else {
+        let nodes = self.visible_nodes();
+        let Some(node) = nodes.get(self.node_cursor()) else {
             return;
         };
-        let (group, node) = (group.name.clone(), node.clone());
+        let (group, node) = (group.name.clone(), (*node).to_owned());
         self.spawn(move |client| async move {
             let result = client.select_proxy(&group, &node).await;
             Msg::Selected {
@@ -581,16 +705,10 @@ impl App {
         };
         let target = match self.proxies_view.focus {
             Pane::Groups => group.now.clone(),
-            Pane::Nodes => {
-                let members = group.all.as_deref().unwrap_or_default();
-                let index = self
-                    .proxies_view
-                    .node
-                    .unwrap_or_else(|| group.current_index());
-                members
-                    .get(index.min(members.len().saturating_sub(1)))
-                    .cloned()
-            }
+            Pane::Nodes => self
+                .visible_nodes()
+                .get(self.node_cursor())
+                .map(|name| (*name).to_owned()),
         };
         let Some(name) = target else {
             return;

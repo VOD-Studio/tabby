@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     api::models::{Proxies, Proxy},
-    app::{App, Pane},
+    app::{App, Pane, Sort},
     format::truncate,
     ui::components::states,
 };
@@ -168,21 +168,50 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
     let theme = app.theme;
     let view = &app.proxies_view;
     let focused = view.focus == Pane::Nodes;
-    let members = group.all.as_deref().unwrap_or_default();
+    let members = app.visible_nodes();
+    let total = group.all.as_ref().map_or(0, Vec::len);
+    let filter = view.filter.value();
+
+    let mut details = if filter.is_empty() {
+        format!("  {} · {total} 个节点", group.kind)
+    } else {
+        format!(
+            "  {} · {}/{total} 个节点 · 过滤「{filter}」",
+            group.kind,
+            members.len()
+        )
+    };
+    details.push_str(match view.sort {
+        Sort::Default => " · 默认顺序 ",
+        Sort::Delay => " · 按延迟 ↑ ",
+        Sort::Name => " · 按名称 ↑ ",
+    });
     let name_span = Span::styled(
         format!(" {}", group.name),
         Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
     );
-    let kind_span = Span::styled(
-        format!("  {} · {} 个节点 ", group.kind, members.len()),
-        Style::new().fg(theme.muted),
+    let block = panel(
+        app,
+        focused,
+        Line::from(vec![
+            name_span,
+            Span::styled(details, Style::new().fg(theme.muted)),
+        ]),
     );
-
-    let block = panel(app, focused, Line::from(vec![name_span, kind_span]));
     let inner = block.inner(area);
     if members.is_empty() {
         frame.render_widget(block, area);
-        states::empty(frame, inner, app, "该组没有节点", &[("r", "刷新")]);
+        if total == 0 {
+            states::empty(frame, inner, app, "该组没有节点", &[("r", "刷新")]);
+        } else {
+            states::empty(
+                frame,
+                inner,
+                app,
+                &format!("没有名称含「{filter}」的节点"),
+                &[("Esc", "清除过滤"), ("/", "修改过滤")],
+            );
+        }
         return;
     }
 
@@ -190,10 +219,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
     let card_width = inner.width / columns;
     let columns = usize::from(columns);
     let total_rows = members.len().div_ceil(columns);
-    let cursor = view
-        .node
-        .unwrap_or_else(|| group.current_index())
-        .min(members.len() - 1);
+    let cursor = app.node_cursor();
     let rows = view.node_scroll.window(
         cursor / columns,
         total_rows,
@@ -215,7 +241,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
     for (row, row_index) in rows.enumerate() {
         for column in 0..columns {
             let index = row_index * columns + column;
-            let Some(name) = members.get(index) else {
+            let Some(&name) = members.get(index) else {
                 break;
             };
             let column_x = u16::try_from(column).unwrap_or(0) * card_width;
@@ -228,7 +254,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
             let card = Card {
                 name,
                 proxy: proxies.get(name),
-                current: group.now.as_ref() == Some(name),
+                current: group.now.as_deref() == Some(name),
                 cursor: focused && index == cursor,
             };
             render_card(frame, rect, app, &card);

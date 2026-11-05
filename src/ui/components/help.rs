@@ -16,6 +16,11 @@ fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
     match page {
         Page::Proxies => &[
             ("Enter", "选择节点"),
+            ("t", "测当前节点"),
+            ("T", "测整组（mihomo）"),
+            ("s", "切换排序"),
+            ("/", "过滤节点"),
+            ("Esc", "清除过滤"),
             ("j / k / ↓ / ↑", "移动"),
             ("g / G", "顶部 / 底部"),
             ("Ctrl+d / Ctrl+u", "翻半页"),

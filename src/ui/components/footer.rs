@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::app::{App, Overlay, Page};
 
@@ -32,21 +33,29 @@ fn help_hints() -> Vec<Hint> {
 /// Keys that only work on the given page.
 fn page_hints(app: &App) -> Vec<Hint> {
     match app.page {
-        Page::Proxies => vec![
-            hint("Enter", "选择"),
-            hint("t", "测速"),
-            Hint {
-                key: "T",
-                description: if app.is_mihomo() {
-                    "整组测速"
-                } else {
-                    "整组测速（需要 mihomo）"
+        Page::Proxies => {
+            let mut hints = vec![
+                hint("Enter", "选择"),
+                hint("t", "测速"),
+                Hint {
+                    key: "T",
+                    description: if app.is_mihomo() {
+                        "整组测速"
+                    } else {
+                        "整组测速（需要 mihomo）"
+                    },
+                    enabled: app.is_mihomo(),
                 },
-                enabled: app.is_mihomo(),
-            },
-            hint("j/k", "移动"),
-            hint("h/l", "切换面板"),
-        ],
+                hint("s", "排序"),
+                hint("/", "过滤"),
+                hint("j/k", "移动"),
+                hint("h/l", "切换面板"),
+            ];
+            if !app.proxies_view.filter.value().is_empty() {
+                hints.push(hint("Esc", "清除过滤"));
+            }
+            hints
+        }
         _ => vec![],
     }
 }
@@ -82,6 +91,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let hints_area = divider.inner(area);
     frame.render_widget(divider, area);
 
+    if app.page == Page::Proxies && app.proxies_view.typing {
+        render_filter(frame, hints_area, app);
+        return;
+    }
     let hints = hints(app);
     let mut spans = Vec::with_capacity(hints.len() * 3);
     for (index, hint) in hints.into_iter().enumerate() {
@@ -100,4 +113,42 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         ));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), hints_area);
+}
+
+/// The filter box that replaces the hints while typing: `/ text`, with the
+/// terminal cursor at the insertion point.
+fn render_filter(frame: &mut Frame, area: Rect, app: &App) {
+    const PROMPT: &str = "/ ";
+    const HINT: &str = "  Enter 确定   Esc 清除";
+
+    let theme = app.theme;
+    let input = &app.proxies_view.filter;
+    let room = usize::from(area.width).saturating_sub(PROMPT.len() + HINT.width());
+    let scroll = input.visual_scroll(room);
+
+    // Drop the leading columns that scrolled out of the box.
+    let mut skipped = 0;
+    let visible: String = input
+        .value()
+        .chars()
+        .skip_while(|ch| {
+            let skip = skipped < scroll;
+            skipped += ch.width().unwrap_or(0);
+            skip
+        })
+        .collect();
+
+    let line = Line::from(vec![
+        Span::styled(
+            PROMPT,
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(visible, Style::new().fg(theme.fg)),
+        Span::styled(HINT, Style::new().fg(theme.muted)),
+    ]);
+    frame.render_widget(Paragraph::new(line), area);
+
+    let cursor_x = area.x
+        + u16::try_from(PROMPT.len() + input.visual_cursor().saturating_sub(scroll)).unwrap_or(0);
+    frame.set_cursor_position((cursor_x, area.y));
 }

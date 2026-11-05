@@ -46,7 +46,7 @@ pub async fn run(
             Some(msg) = msg_rx.recv() => app.handle_msg(msg),
             event = events.next() => {
                 let Some(event) = event else { break };
-                if let Some(action) = action_for(&event?, app.page) {
+                if let Some(action) = action_for(&event?, app.page, app.proxies_view.typing) {
                     app.update(action);
                 }
                 if app.take_dirty() {

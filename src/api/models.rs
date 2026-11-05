@@ -86,15 +86,6 @@ impl Proxy {
         self.history.last().map(|record| record.delay)
     }
 
-    /// Position of [`Proxy::now`] among the members, or 0 when there is none.
-    pub fn current_index(&self) -> usize {
-        self.all
-            .iter()
-            .flatten()
-            .position(|name| Some(name) == self.now.as_ref())
-            .unwrap_or(0)
-    }
-
     /// Whether the user picks this group's member (only `Selector` groups).
     pub fn is_selector(&self) -> bool {
         self.kind == "Selector"
