@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 
 use crate::{
     api::{
+        backoff,
         client::ApiClient,
         error::ApiError,
         models::{Configs, Version},
@@ -125,6 +126,17 @@ pub enum Overlay {
     Help,
 }
 
+/// Bookkeeping while the controller is unreachable.
+#[derive(Debug, Clone, Copy)]
+pub struct Reconnect {
+    /// The retry being waited for, or in flight (1 after the first failure).
+    pub attempt: u32,
+    /// When the next retry fires; `None` while one is in flight or not coming.
+    pub retry_at: Option<Instant>,
+    /// The secret was rejected: retrying cannot help.
+    pub unauthorized: bool,
+}
+
 /// Whether the controller has answered the `/version` probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
@@ -147,6 +159,8 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Frame counter of the loading spinner; advances while one is visible.
     pub spinner: usize,
+    /// `Some` from the first failed `/version` probe until one succeeds.
+    pub reconnect: Option<Reconnect>,
     /// Set by `r` until the next `/version` reply, which then reports success.
     refreshing: bool,
     should_quit: bool,
@@ -166,6 +180,7 @@ impl App {
             toasts: VecDeque::new(),
             overlay: None,
             spinner: 0,
+            reconnect: None,
             refreshing: false,
             should_quit: false,
             dirty: false,
@@ -214,6 +229,10 @@ impl App {
                 if matches!(self.configs, Some(Err(_))) {
                     self.configs = None;
                 }
+                // Retry now instead of waiting out the backoff.
+                if let Some(reconnect) = &mut self.reconnect {
+                    reconnect.retry_at = None;
+                }
                 self.refreshing = true;
                 self.start();
             }
@@ -225,14 +244,28 @@ impl App {
             Msg::Version(result) => {
                 let refreshed = std::mem::take(&mut self.refreshing);
                 match &result {
-                    Ok(_) if refreshed => self.toast(ToastKind::Success, "已刷新".to_owned()),
-                    Ok(_) => {}
-                    Err(err) => self.toast(ToastKind::Error, describe(err)),
+                    Ok(_) => {
+                        if self.reconnect.take().is_some() {
+                            self.toast(ToastKind::Success, "已重新连接".to_owned());
+                        } else if refreshed {
+                            self.toast(ToastKind::Success, "已刷新".to_owned());
+                        }
+                    }
+                    Err(err) => {
+                        // Automatic retries stay quiet; the banner covers them.
+                        let first_failure = self.reconnect.is_none();
+                        self.schedule_reconnect(err);
+                        if first_failure || refreshed {
+                            self.toast(ToastKind::Error, describe(err));
+                        }
+                    }
                 }
                 self.version = Some(result);
             }
             Msg::Configs(result) => {
-                if let Err(err) = &result {
+                if let Err(err) = &result
+                    && !matches!(self.version, Some(Err(_)))
+                {
                     self.toast(ToastKind::Error, describe(err));
                 }
                 self.configs = Some(result);
@@ -241,7 +274,7 @@ impl App {
         self.dirty = true;
     }
 
-    /// Drops expired toasts and steps the spinner.
+    /// Drops expired toasts, fires due reconnects and steps the animations.
     pub fn on_tick(&mut self, now: Instant) {
         let shown = self.toasts.len();
         self.toasts.retain(|toast| toast.expires_at > now);
@@ -252,6 +285,34 @@ impl App {
             self.spinner = self.spinner.wrapping_add(1);
             self.dirty = true;
         }
+        let mut retry_due = false;
+        if let Some(reconnect) = &mut self.reconnect
+            && let Some(at) = reconnect.retry_at
+        {
+            if now >= at {
+                reconnect.retry_at = None;
+                retry_due = true;
+            }
+            // Either way the banner's countdown changed.
+            self.dirty = true;
+        }
+        if retry_due {
+            self.start();
+        }
+    }
+
+    /// Plans the next retry after a failed `/version` probe: 1 s, 2 s, 4 s …
+    /// up to 30 s. A rejected secret is not retried.
+    fn schedule_reconnect(&mut self, err: &ApiError) {
+        let attempt = self
+            .reconnect
+            .map_or(1, |reconnect| reconnect.attempt.saturating_add(1));
+        let unauthorized = matches!(err, ApiError::Unauthorized);
+        self.reconnect = Some(Reconnect {
+            attempt,
+            retry_at: (!unauthorized).then(|| Instant::now() + backoff(attempt - 1)),
+            unauthorized,
+        });
     }
 
     /// Whether the current page is waiting for data (and so shows a spinner).

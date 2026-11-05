@@ -13,6 +13,8 @@ pub struct Theme {
     pub accent: Color,
     /// Healthy / connected / on.
     pub success: Color,
+    /// Degraded / needs attention: reconnecting.
+    pub warning: Color,
     /// Failed / timed out / off-limits.
     pub error: Color,
 }
@@ -24,6 +26,7 @@ impl Theme {
         muted: Color::DarkGray,
         accent: Color::Blue,
         success: Color::Green,
+        warning: Color::Yellow,
         error: Color::Red,
     };
 
@@ -32,6 +35,7 @@ impl Theme {
         muted: Color::Rgb(0x73, 0x7a, 0xa2),
         accent: Color::Rgb(0x7a, 0xa2, 0xf7),
         success: Color::Rgb(0x9e, 0xce, 0x6a),
+        warning: Color::Rgb(0xe0, 0xaf, 0x68),
         error: Color::Rgb(0xf7, 0x76, 0x8e),
     };
 
@@ -40,6 +44,7 @@ impl Theme {
         muted: Color::Rgb(0x7f, 0x84, 0x9c),
         accent: Color::Rgb(0x89, 0xb4, 0xfa),
         success: Color::Rgb(0xa6, 0xe3, 0xa1),
+        warning: Color::Rgb(0xf9, 0xe2, 0xaf),
         error: Color::Rgb(0xf3, 0x8b, 0xa8),
     };
 }

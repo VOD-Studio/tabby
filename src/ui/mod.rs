@@ -21,6 +21,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     .areas(frame.area());
     components::header::render(frame, header, app);
     components::tabs::render(frame, tabs, app);
+    let body = match &app.reconnect {
+        Some(reconnect) => {
+            let [banner, rest] =
+                Layout::vertical([Constraint::Length(1), Constraint::Fill(1)]).areas(body);
+            components::banner::render(frame, banner, app, reconnect);
+            rest
+        }
+        None => body,
+    };
     draw_page(frame, body, app);
     components::footer::render(frame, footer, app);
     match app.overlay {
