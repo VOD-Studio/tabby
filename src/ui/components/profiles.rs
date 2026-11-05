@@ -53,7 +53,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         let choice = &profiles.choices[index];
         let marker = if index == profiles.current {
             Span::styled(
-                "✓ ",
+                format!("{} ", app.icons.check),
                 Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
             )
         } else {

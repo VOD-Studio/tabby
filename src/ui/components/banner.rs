@@ -10,7 +10,7 @@ use ratatui::{
 
 use crate::{
     app::{App, Reconnect},
-    ui::theme::Theme,
+    ui::{icons::Icons, theme::Theme},
 };
 
 /// One-row notice at the top of the content area while the controller is
@@ -18,6 +18,7 @@ use crate::{
 pub fn render(frame: &mut Frame, area: Rect, app: &App, reconnect: &Reconnect) {
     let line = line(
         app.theme,
+        &app.icons,
         reconnect,
         Instant::now(),
         usize::from(area.width),
@@ -28,14 +29,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, reconnect: &Reconnect) {
 /// The banner `width` columns wide at `now`. The hint to switch profiles
 /// comes last and is the first to go when the row is too narrow, so the
 /// state of the reconnect is always there to read.
-fn line(theme: Theme, reconnect: &Reconnect, now: Instant, width: usize) -> Line<'static> {
+fn line(
+    theme: Theme,
+    icons: &Icons,
+    reconnect: &Reconnect,
+    now: Instant,
+    width: usize,
+) -> Line<'static> {
     let bold = Modifier::BOLD;
     let key = Style::new().fg(theme.accent).add_modifier(bold);
     let muted = Style::new().fg(theme.muted);
 
     let mut line = if reconnect.unauthorized {
         Line::styled(
-            "✗ Secret 错误，请用 --secret 或修改配置",
+            format!("{} Secret 错误，请用 --secret 或修改配置", icons.cross),
             Style::new().fg(theme.error).add_modifier(bold),
         )
     } else {
@@ -44,11 +51,12 @@ fn line(theme: Theme, reconnect: &Reconnect, now: Instant, width: usize) -> Line
             Some(at) => {
                 let wait = at.saturating_duration_since(now);
                 format!(
-                    "⚠ 正在重连（第 {attempt} 次，{}s 后）",
+                    "{} 正在重连（第 {attempt} 次，{}s 后）",
+                    icons.warning,
                     wait.as_millis().div_ceil(1000)
                 )
             }
-            None => format!("⚠ 正在重连（第 {attempt} 次）"),
+            None => format!("{} 正在重连（第 {attempt} 次）", icons.warning),
         };
         Line::from(vec![
             Span::styled(status, Style::new().fg(theme.warning).add_modifier(bold)),
@@ -72,11 +80,18 @@ fn line(theme: Theme, reconnect: &Reconnect, now: Instant, width: usize) -> Line
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ThemeName;
+    use crate::config::{IconSet, ThemeName};
 
     fn text(reconnect: &Reconnect, width: usize) -> String {
         let now = Instant::now();
-        line(ThemeName::Terminal.into(), reconnect, now, width).to_string()
+        line(
+            ThemeName::Terminal.into(),
+            &IconSet::Unicode.into(),
+            reconnect,
+            now,
+            width,
+        )
+        .to_string()
     }
 
     #[test]

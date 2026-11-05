@@ -34,7 +34,7 @@ pub fn error(frame: &mut Frame, area: Rect, app: &App, title: &str, detail: Opti
     let theme = app.theme;
     let detail_width = usize::from(area.width.saturating_sub(4));
     let mut lines = vec![Line::styled(
-        format!("✗ {title}"),
+        format!("{} {title}", app.icons.cross),
         Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
     )];
     if let Some(detail) = detail {
@@ -77,7 +77,10 @@ pub fn empty(frame: &mut Frame, area: Rect, app: &App, reason: &str, keys: &[(&s
         ));
     }
     let lines = vec![
-        Line::styled(format!("○ {reason}"), Style::new().fg(theme.fg)),
+        Line::styled(
+            format!("{} {reason}", app.icons.empty),
+            Style::new().fg(theme.fg),
+        ),
         Line::from(hint),
     ];
     frame.render_widget(

@@ -28,6 +28,7 @@ use crate::{
     ui::{
         components::help,
         connections,
+        icons::Icons,
         logs::{self, Fit},
         providers, proxies, regions, rules,
         scroll::Scroll,
@@ -1998,6 +1999,7 @@ fn push_sample<T>(history: &mut VecDeque<T>, sample: T) {
 pub struct App {
     pub settings: Settings,
     pub theme: Theme,
+    pub icons: Icons,
     pub page: Page,
     client: ApiClient,
     /// Where background work reports, stamped with the current connection.
@@ -2114,6 +2116,7 @@ impl App {
         let streams = Streams::new(&settings.url, settings.secret.as_deref(), outbox.clone());
         Self {
             theme: settings.theme.into(),
+            icons: settings.icons.into(),
             settings,
             page: Page::Overview,
             client,
@@ -3054,8 +3057,8 @@ impl App {
     ///
     /// Everything learnt from the old controller goes, the way it came: the
     /// app starts over on the new one as it does at launch. Only what is
-    /// the user's and not the controller's stays: the theme and the delay
-    /// test settings, the page, the orderings of the proxies and the
+    /// the user's and not the controller's stays: the theme, the icons and
+    /// the delay test settings, the page, the orderings of the proxies and the
     /// connections, and the level the log is subscribed at. The old
     /// streams stop as their [`Streams`] is dropped; what they or the old
     /// requests still send is stamped with the old epoch and dropped on
@@ -6231,11 +6234,7 @@ mod tests {
     async fn the_title_is_not_live_until_the_resubscribed_log_is_in() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Logs;
-        let status = |app: &App| {
-            logs::status(&app.logs_view, &app.theme)
-                .content
-                .into_owned()
-        };
+        let status = |app: &App| logs::status(app).content.into_owned();
         connect(&mut app, Stream::Logs);
         assert_eq!(status(&app).trim(), "● 实时");
         // The new connection may never get in, and would then never report

@@ -13,14 +13,14 @@ use crate::{
     format,
 };
 
-const LOGO: &str = "◆";
 const NAME: &str = " tabby";
 /// Between the logo, the kernel badge and the mode pill, and between the
 /// rates and the status dot.
 const SEPARATOR: &str = "  ";
 /// Columns kept clear between the two sides.
 const GAP: usize = 2;
-/// `↑ 1023.9 KB/s`: arrow, number and unit as [`rate`] pads them.
+/// `↑ 1023.9 KB/s`: arrow, number and unit as [`rate`] pads them. The
+/// arrow, like the logo mark and the status dot, is an icon: one column.
 const RATE_WIDTH: usize = 13;
 
 /// The parts of the top bar that come and go, in the order they go as it
@@ -81,7 +81,8 @@ impl Shown {
     fn width(self) -> usize {
         let widths = self.widths;
         let part = |part: Part, width: usize| if self.has(part) { width } else { 0 };
-        let left = LOGO.width()
+        // The logo mark: one column, as every icon is.
+        let left = 1
             + part(Part::Name, NAME.width())
             + part(Part::Core, SEPARATOR.len() + widths.core)
             + part(Part::Mode, SEPARATOR.len() + widths.mode);
@@ -144,7 +145,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let accent = Style::new().fg(theme.accent).add_modifier(bold);
-    let mut left = vec![Span::styled(LOGO, accent)];
+    let icons = &app.icons;
+    let mut left = vec![Span::styled(icons.logo, accent)];
     if shown.has(Part::Name) {
         left.push(Span::styled(NAME, accent));
     }
@@ -166,15 +168,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let mut right = vec![];
     if let Some(traffic) = app.traffic {
         if shown.has(Part::Up) {
-            right.extend(rate(theme.c1, "↑", traffic.up, theme.muted));
+            right.extend(rate(theme.c1, icons.upload, traffic.up, theme.muted));
             right.push(Span::raw(SEPARATOR));
         }
         if shown.has(Part::Down) {
-            right.extend(rate(theme.c2, "↓", traffic.down, theme.muted));
+            right.extend(rate(theme.c2, icons.download, traffic.down, theme.muted));
             right.push(Span::raw(SEPARATOR));
         }
     }
-    right.push(Span::styled("●", Style::new().fg(dot)));
+    right.push(Span::styled(icons.dot, Style::new().fg(dot)));
     if shown.has(Part::Profile) {
         right.push(Span::styled(
             format!(" {profile}"),

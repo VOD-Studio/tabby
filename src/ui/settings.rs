@@ -12,10 +12,7 @@ use crate::{
     api::models::Configs,
     app::{App, Gate, Setting},
     format,
-    ui::{
-        components::{states, title},
-        theme::Theme,
-    },
+    ui::components::{states, title},
 };
 
 /// The spinner and the space after it, in front of every name.
@@ -225,8 +222,8 @@ fn value(
                 .map_or_else(|| configs.mode.clone(), |mode| mode.name().to_uppercase());
             vec![Span::styled(mode, fg.add_modifier(Modifier::BOLD))]
         }
-        Setting::AllowLan => vec![switch(&theme, configs.allow_lan == Some(true))],
-        Setting::Ipv6 => vec![switch(&theme, configs.ipv6 == Some(true))],
+        Setting::AllowLan => vec![switch(app, configs.allow_lan == Some(true))],
+        Setting::Ipv6 => vec![switch(app, configs.ipv6 == Some(true))],
         Setting::LogLevel => vec![Span::styled(configs.log_level.clone(), fg)],
         Setting::Port(port) => match port.of(configs) {
             Some(0) | None => vec![Span::styled("未启用", muted)],
@@ -236,7 +233,7 @@ fn value(
             let Some(tun) = &configs.tun else {
                 return vec![Span::styled(NO_VALUE, muted)];
             };
-            let mut spans = vec![switch(&theme, tun.enable)];
+            let mut spans = vec![switch(app, tun.enable)];
             let about: Vec<&str> = [tun.stack.as_str(), tun.device.as_str()]
                 .into_iter()
                 .filter(|part| !part.is_empty())
@@ -261,11 +258,17 @@ fn value(
 }
 
 /// `● 开` in success, `○ 关` in muted.
-fn switch(theme: &Theme, on: bool) -> Span<'static> {
+fn switch(app: &App, on: bool) -> Span<'static> {
     if on {
-        Span::styled("● 开", Style::new().fg(theme.success))
+        Span::styled(
+            format!("{} 开", app.icons.on),
+            Style::new().fg(app.theme.success),
+        )
     } else {
-        Span::styled("○ 关", Style::new().fg(theme.muted))
+        Span::styled(
+            format!("{} 关", app.icons.off),
+            Style::new().fg(app.theme.muted),
+        )
     }
 }
 

@@ -209,11 +209,13 @@ pub fn render_picker(frame: &mut Frame, body: Rect, app: &App) {
             height: 1,
             ..inner
         };
-        let mark = if index == selected { "✓ " } else { "  " };
-        let mut spans = vec![Span::styled(
-            mark,
-            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
-        )];
+        let mark = if index == selected {
+            app.icons.check
+        } else {
+            " "
+        };
+        let accent = Style::new().fg(theme.accent).add_modifier(Modifier::BOLD);
+        let mut spans = vec![Span::styled(mark, accent), Span::styled(" ", accent)];
         let name = Style::new()
             .fg(theme.fg)
             .add_modifier(if index == selected {
@@ -529,7 +531,7 @@ fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
     frame.render_widget(block, rect);
     let width = usize::from(inner.width);
 
-    let mark = if card.current { "✓" } else { " " };
+    let mark = if card.current { app.icons.check } else { " " };
     let name = truncate(card.name, width.saturating_sub(2));
     let padding = width.saturating_sub(name.width() + 1);
     let title = Line::from(vec![

@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     api::models::{LogKind, LogLevel},
-    app::{App, LogEntry, LogLink, LogsView},
+    app::{App, LogEntry, LogLink},
     format,
     ui::{
         components::{states, title},
@@ -111,15 +111,25 @@ pub fn line(entry: &LogEntry, row: usize, text: String, theme: &Theme) -> Line<'
 /// The right side of the title: whether the stream is connected, and else
 /// whether the view is paused. Nothing claims live while a resubscription
 /// is under way.
-pub fn status(view: &LogsView, theme: &Theme) -> Span<'static> {
+pub fn status(app: &App) -> Span<'static> {
+    let (view, theme, icons) = (&app.logs_view, &app.theme, &app.icons);
     match view.link {
-        LogLink::Down => Span::styled(" ○ 未连接 ", Style::new().fg(theme.error)),
-        LogLink::Resubscribing => Span::styled(" ◌ 连接中 ", Style::new().fg(theme.muted)),
+        LogLink::Down => Span::styled(
+            format!(" {} 未连接 ", icons.down),
+            Style::new().fg(theme.error),
+        ),
+        LogLink::Resubscribing => Span::styled(
+            format!(" {} 连接中 ", icons.connecting),
+            Style::new().fg(theme.muted),
+        ),
         LogLink::Live if view.paused => Span::styled(
-            format!(" ⏸ 已暂停 · 新增 {} 条 ", view.arrived()),
+            format!(" {} 已暂停 · 新增 {} 条 ", icons.paused, view.arrived()),
             Style::new().fg(theme.warning),
         ),
-        LogLink::Live => Span::styled(" ● 实时 ", Style::new().fg(theme.success)),
+        LogLink::Live => Span::styled(
+            format!(" {} 实时 ", icons.dot),
+            Style::new().fg(theme.success),
+        ),
     }
 }
 
@@ -160,7 +170,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             ),
             Span::styled(count, muted),
         ],
-        vec![status(view, &theme)],
+        vec![status(app)],
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);

@@ -1,5 +1,6 @@
 pub mod components;
 pub mod connections;
+pub mod icons;
 pub mod logs;
 pub mod overview;
 pub mod providers;

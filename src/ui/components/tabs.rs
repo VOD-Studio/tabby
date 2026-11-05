@@ -12,7 +12,9 @@ use crate::{
 };
 
 /// Numbered tab row (`1 概览  2 代理 …`, only `1  2 …` below
-/// [`NARROW_WIDTH`]) with a divider underneath. Needs two rows.
+/// [`NARROW_WIDTH`]) with a divider underneath. Icon sets with page icons
+/// put one before each number and title, but not before a bare number.
+/// Needs two rows.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
     let divider = Block::new()
@@ -27,10 +29,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         if index > 0 {
             spans.push(Span::raw("  "));
         }
-        let label = if numbers_only {
-            (index + 1).to_string()
-        } else {
-            format!("{} {}", index + 1, page_title(page))
+        let label = match app.icons.pages {
+            _ if numbers_only => (index + 1).to_string(),
+            Some(icons) => format!("{} {} {}", icons[index], index + 1, page_title(page)),
+            None => format!("{} {}", index + 1, page_title(page)),
         };
         spans.push(if page == app.page {
             Span::styled(

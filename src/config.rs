@@ -32,12 +32,24 @@ pub enum ThemeName {
     CatppuccinMocha,
 }
 
+/// The `icons` setting: which symbols the UI draws (plan §7.2).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum IconSet {
+    /// Symbols any font has.
+    #[default]
+    Unicode,
+    /// Nerd Fonts v3 glyphs, for a terminal font patched with them.
+    Nerd,
+}
+
 /// Contents of `config.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     default: Option<String>,
     theme: Option<ThemeName>,
+    icons: IconSet,
     delay: DelayConfig,
     profiles: BTreeMap<String, Profile>,
 }
@@ -83,6 +95,7 @@ pub struct Settings {
     pub url: String,
     pub secret: Option<String>,
     pub theme: ThemeName,
+    pub icons: IconSet,
     pub delay_url: String,
     pub delay_timeout_ms: u32,
 }
@@ -197,6 +210,7 @@ impl Config {
                 .or_else(|| profile.and_then(|p| p.secret.as_deref()))
                 .map(str::to_owned),
             theme: overrides.theme.or(self.theme).unwrap_or_default(),
+            icons: self.icons,
             delay_url: self
                 .delay
                 .url
@@ -263,6 +277,7 @@ mod tests {
     const FILE: &str = r#"
 default = "local"
 theme = "tokyo-night"
+icons = "nerd"
 
 [delay]
 url = "http://delay.test/204"
@@ -290,6 +305,7 @@ url = "http://router:9090"
                 url: DEFAULT_URL.into(),
                 secret: None,
                 theme: ThemeName::Terminal,
+                icons: IconSet::Unicode,
                 delay_url: DEFAULT_DELAY_URL.into(),
                 delay_timeout_ms: DEFAULT_DELAY_TIMEOUT_MS,
             }
@@ -306,6 +322,7 @@ url = "http://router:9090"
                 url: "http://local:9090".into(),
                 secret: Some("file-secret".into()),
                 theme: ThemeName::TokyoNight,
+                icons: IconSet::Nerd,
                 delay_url: "http://delay.test/204".into(),
                 delay_timeout_ms: 2500,
             }
@@ -328,6 +345,7 @@ url = "http://router:9090"
                 url: "http://cli:1".into(),
                 secret: Some("cli-secret".into()),
                 theme: ThemeName::CatppuccinMocha,
+                icons: IconSet::Nerd,
                 delay_url: "http://delay.test/204".into(),
                 delay_timeout_ms: 2500,
             }
@@ -352,6 +370,16 @@ url = "http://router:9090"
             ..Overrides::default()
         };
         assert!(file().resolve(&overrides).is_err());
+    }
+
+    #[test]
+    fn icons_are_read_by_name_and_an_unknown_one_is_an_error() {
+        let icons = |text: &str| toml::from_str::<Config>(text).map(|config| config.icons);
+        assert_eq!(icons("").unwrap(), IconSet::Unicode);
+        assert_eq!(icons(r#"icons = "unicode""#).unwrap(), IconSet::Unicode);
+        assert_eq!(icons(r#"icons = "nerd""#).unwrap(), IconSet::Nerd);
+        let err = icons(r#"icons = "emoji""#).unwrap_err().to_string();
+        assert!(err.contains("icons"), "{err}");
     }
 
     fn offered(config: &Config, overrides: &Overrides) -> Profiles {

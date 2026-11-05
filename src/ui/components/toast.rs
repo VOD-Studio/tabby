@@ -15,8 +15,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let mut y = area.y;
     for toast in &app.toasts {
         let (icon, color) = match toast.kind {
-            ToastKind::Success => ("✓", theme.success),
-            ToastKind::Error => ("✗", theme.error),
+            ToastKind::Success => (app.icons.check, theme.success),
+            ToastKind::Error => (app.icons.cross, theme.error),
         };
         let width = MAX_WIDTH.min(area.width);
         // Two border columns and one column of padding on each side.

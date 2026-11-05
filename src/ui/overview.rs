@@ -93,9 +93,9 @@ fn title(theme: Theme, name: &'static str, hint: &'static str) -> Vec<Span<'stat
 fn render_traffic(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
     let legend = vec![
-        Span::styled("● 上传", Style::new().fg(theme.c1)),
+        Span::styled(format!("{} 上传", app.icons.dot), Style::new().fg(theme.c1)),
         Span::raw("  "),
-        Span::styled("● 下载", Style::new().fg(theme.c2)),
+        Span::styled(format!("{} 下载", app.icons.dot), Style::new().fg(theme.c2)),
         Span::raw(" "),
     ];
     let block = panel(
@@ -267,13 +267,12 @@ fn render_kernel(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
         Some(port) => (port.to_string(), theme.fg),
     };
     let tun = match &configs.tun {
-        Some(tun) => switch(theme, tun.enable),
+        Some(tun) => switch(app, tun.enable),
         None => ("需要 mihomo".to_owned(), theme.muted),
     };
-    let lan = configs.allow_lan.map_or_else(
-        || (NO_VALUE.to_owned(), theme.muted),
-        |on| switch(theme, on),
-    );
+    let lan = configs
+        .allow_lan
+        .map_or_else(|| (NO_VALUE.to_owned(), theme.muted), |on| switch(app, on));
     let rows = [
         ("版本", version),
         ("混合端口", port),
@@ -288,11 +287,11 @@ fn render_kernel(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     frame.render_widget(Paragraph::new(lines), inner);
 }
 
-fn switch(theme: Theme, on: bool) -> (String, Color) {
+fn switch(app: &App, on: bool) -> (String, Color) {
     if on {
-        ("● 开启".to_owned(), theme.success)
+        (format!("{} 开启", app.icons.on), app.theme.success)
     } else {
-        ("○ 关闭".to_owned(), theme.muted)
+        (format!("{} 关闭", app.icons.off), app.theme.muted)
     }
 }
 

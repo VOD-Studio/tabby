@@ -280,7 +280,10 @@ fn note_line(app: &App, note: Note) -> Line<'static> {
     let failed = |reason: String| {
         Line::from(vec![
             indent(),
-            Span::styled(format!("✗ {reason}"), Style::new().fg(theme.error)),
+            Span::styled(
+                format!("{} {reason}", app.icons.cross),
+                Style::new().fg(theme.error),
+            ),
             Span::styled("  按 r 重试", muted),
         ])
     };

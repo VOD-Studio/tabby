@@ -153,9 +153,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let filter = view.filter.value();
 
     let status = if view.paused {
-        Span::styled(" ⏸ 已暂停 ", Style::new().fg(theme.warning))
+        Span::styled(
+            format!(" {} 已暂停 ", app.icons.paused),
+            Style::new().fg(theme.warning),
+        )
     } else {
-        Span::styled(" ● 实时 ", Style::new().fg(theme.success))
+        Span::styled(
+            format!(" {} 实时 ", app.icons.dot),
+            Style::new().fg(theme.success),
+        )
     };
     let count = if filter.is_empty() {
         format!("  {} ", rows.len())
