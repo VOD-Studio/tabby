@@ -1,3 +1,5 @@
+use std::cmp::Ordering;
+
 use unicode_width::UnicodeWidthChar;
 
 const ELLIPSIS: char = '…';
@@ -34,6 +36,46 @@ pub fn truncate(text: &str, max_width: usize) -> String {
         out.push(ELLIPSIS);
     }
     out
+}
+
+/// Orders `a` and `b` char by char, except that a run of ASCII digits on both
+/// sides compares as a number: `"2" < "10"`, `"07" == "7"`. Everything else
+/// compares by Unicode scalar value, so callers that want case-insensitive
+/// order lowercase both sides first.
+pub fn natural_cmp(mut a: &str, mut b: &str) -> Ordering {
+    loop {
+        let (Some(x), Some(y)) = (a.chars().next(), b.chars().next()) else {
+            // One side ran out (or both): the shorter remainder sorts first.
+            return a.len().cmp(&b.len());
+        };
+        if x.is_ascii_digit() && y.is_ascii_digit() {
+            let (digits_a, rest_a) = split_digits(a);
+            let (digits_b, rest_b) = split_digits(b);
+            match cmp_numbers(digits_a, digits_b) {
+                Ordering::Equal => (a, b) = (rest_a, rest_b),
+                other => return other,
+            }
+        } else {
+            match x.cmp(&y) {
+                Ordering::Equal => (a, b) = (&a[x.len_utf8()..], &b[y.len_utf8()..]),
+                other => return other,
+            }
+        }
+    }
+}
+
+/// Splits off the leading run of ASCII digits.
+fn split_digits(text: &str) -> (&str, &str) {
+    text.split_at(
+        text.find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(text.len()),
+    )
+}
+
+/// Compares two digit runs by value, however long they are.
+fn cmp_numbers(a: &str, b: &str) -> Ordering {
+    let (a, b) = (a.trim_start_matches('0'), b.trim_start_matches('0'));
+    a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
 
 #[cfg(test)]

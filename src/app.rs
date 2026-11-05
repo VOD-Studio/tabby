@@ -16,6 +16,7 @@ use crate::{
         models::{Configs, CoreKind, Delay, GLOBAL, Proxies, Proxy, Version},
     },
     config::Settings,
+    format::natural_cmp,
     ui::{proxies, regions, scroll::Scroll, text::describe, theme::Theme},
 };
 
@@ -620,7 +621,14 @@ impl App {
             .and_then(|proxies| proxies.as_ref().ok());
         match view.sort {
             Sort::Default => {}
-            Sort::Name => nodes.sort_by_cached_key(|name| name.to_lowercase()),
+            Sort::Name => {
+                let mut keyed: Vec<(String, &str)> = nodes
+                    .into_iter()
+                    .map(|name| (name.to_lowercase(), name))
+                    .collect();
+                keyed.sort_by(|(a, _), (b, _)| natural_cmp(a, b));
+                nodes = keyed.into_iter().map(|(_, name)| name).collect();
+            }
             Sort::Delay => nodes.sort_by_key(|name| {
                 match proxies
                     .and_then(|proxies| proxies.get(name))
