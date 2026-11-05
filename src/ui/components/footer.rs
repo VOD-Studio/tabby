@@ -8,7 +8,7 @@ use ratatui::{
 use tui_input::Input;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Overlay, Page, Pane};
+use crate::app::{App, Confirm, Overlay, Page, Pane};
 
 /// One entry of the key bar. A disabled one is shown dimmed: the key exists
 /// but the connected kernel cannot do it.
@@ -34,6 +34,12 @@ fn help_hints() -> Vec<Hint> {
 /// Keys while the connection detail popup is open.
 fn detail_hints() -> Vec<Hint> {
     vec![hint("Esc", "关闭"), hint("q", "退出")]
+}
+
+/// Keys while the confirm dialog is open.
+fn confirm_hints(app: &App) -> Vec<Hint> {
+    let verb = app.pending.as_ref().map_or("确认", Confirm::verb);
+    vec![hint("y", verb), hint("n/Esc", "取消")]
 }
 
 /// Keys that only work on the given page.
@@ -71,6 +77,15 @@ fn page_hints(app: &App) -> Vec<Hint> {
         }
         Page::Connections => vec![
             hint("Enter", "详情"),
+            hint("x", "关闭"),
+            hint(
+                "X",
+                if app.connections_view.filter.value().is_empty() {
+                    "全部关闭"
+                } else {
+                    "关闭匹配"
+                },
+            ),
             hint("s", "排序"),
             hint("S", "反转"),
             hint("/", "过滤"),
@@ -111,6 +126,7 @@ fn hints(app: &App) -> Vec<Hint> {
     match app.overlay {
         Some(Overlay::Help) => help_hints(),
         Some(Overlay::Connection) => detail_hints(),
+        Some(Overlay::Confirm) => confirm_hints(app),
         None => {
             let mut hints = page_hints(app);
             hints.extend(global_hints(app.page));

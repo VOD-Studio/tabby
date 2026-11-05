@@ -30,6 +30,8 @@ fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
         ],
         Page::Connections => &[
             ("Enter", "连接详情"),
+            ("x", "关闭选中连接"),
+            ("X", "关闭全部 / 匹配的"),
             ("s", "切换排序列"),
             ("S", "反转排序"),
             ("/", "过滤连接"),

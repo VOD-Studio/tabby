@@ -67,6 +67,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     match app.overlay {
         Some(Overlay::Help) => components::help::render(frame, frame.area(), app),
         Some(Overlay::Connection) => connections::render_detail(frame, frame.area(), app),
+        Some(Overlay::Confirm) => components::confirm::render(frame, frame.area(), app),
         None => {}
     }
     // Below the header row, over whatever lies underneath.

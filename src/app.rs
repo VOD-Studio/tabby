@@ -5,6 +5,7 @@ use std::{
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use futures_util::future::join_all;
 use jiff::Timestamp;
 use ratatui::layout::{Rect, Size};
 use tokio::sync::mpsc;
@@ -514,6 +515,18 @@ impl ConnectionsView {
         self.typing = false;
     }
 
+    /// Takes the connections `closed` picks out of the table at once, paused
+    /// or not: a frozen table must not keep what is gone. The cursor keeps
+    /// its row, or its position when that row went. The baseline is left
+    /// alone; the next frame lines up with it by itself.
+    fn remove(&mut self, closed: impl Fn(&str) -> bool) {
+        let anchor = self.anchor();
+        if let Some(rows) = &mut self.rows {
+            rows.retain(|row| !closed(&row.connection.id));
+        }
+        self.restore(anchor);
+    }
+
     /// The stream is gone: the table, what it was measured against and the
     /// popup's connection go with it. Pausing, the order and the filter are
     /// the user's settings and stay.
@@ -544,6 +557,14 @@ pub enum Action {
     /// `Enter`: acts on the item under the cursor: picks a node, opens a
     /// connection's details.
     Confirm,
+    /// `x`: close the connection under the cursor.
+    CloseConnection,
+    /// `X`: ask to close the connections the table shows.
+    CloseConnections,
+    /// `y`: go ahead with what the confirm dialog asks about.
+    Accept,
+    /// `n`: drop what the confirm dialog asks about.
+    Cancel,
     /// `t`: delay-test the node under the cursor.
     TestNode,
     /// `T`: delay-test every member of the selected group.
@@ -604,6 +625,18 @@ pub enum Msg {
         members: Vec<String>,
         result: Result<HashMap<String, u32>, ApiError>,
     },
+    /// Replies to closing connections one request each: `x`, or `X` under a
+    /// filter. `report` asks for a toast on success, too.
+    ConnectionsClosed {
+        results: Vec<(String, Result<(), ApiError>)>,
+        report: bool,
+    },
+    /// Reply to closing every connection; the table held `count` when it was
+    /// sent.
+    AllConnectionsClosed {
+        count: usize,
+        result: Result<(), ApiError>,
+    },
     /// A WebSocket stream connected, dropped, or delivered a frame.
     Stream {
         stream: Stream,
@@ -661,6 +694,12 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('S') if page == Page::Connections => Some(Action::ReverseSort),
                 KeyCode::Char('/') if filtered => Some(Action::StartFilter),
                 KeyCode::Char('p') if page == Page::Connections => Some(Action::TogglePause),
+                KeyCode::Char('x') if page == Page::Connections => Some(Action::CloseConnection),
+                KeyCode::Char('X') if page == Page::Connections => Some(Action::CloseConnections),
+                // Only lowercase: the dialog says `y`, and a dangerous action
+                // should not go ahead on a Shift slip.
+                KeyCode::Char('y') => Some(Action::Accept),
+                KeyCode::Char('n') => Some(Action::Cancel),
                 KeyCode::Char('m') => Some(Action::CycleMode),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
@@ -697,6 +736,50 @@ pub enum Overlay {
     Help,
     /// Details of one connection, kept in [`ConnectionsView::detail`].
     Connection,
+    /// The question in [`App::pending`].
+    Confirm,
+}
+
+/// Which connections `X` closes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Closing {
+    /// Every connection, with one `DELETE /connections`; the table held
+    /// `count`.
+    All { count: usize },
+    /// The ones that passed `filter`, one `DELETE /connections/{id}` each:
+    /// closing what the user cannot see would come as a surprise.
+    Matching { filter: String, ids: Vec<String> },
+}
+
+/// A dangerous action waiting for `y`, with what it is to act on. It says
+/// what the dialog shows; the dialog only draws it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Confirm {
+    CloseConnections(Closing),
+}
+
+impl Confirm {
+    pub fn title(&self) -> &'static str {
+        match self {
+            Self::CloseConnections(_) => "关闭连接",
+        }
+    }
+
+    pub fn body(&self) -> String {
+        match self {
+            Self::CloseConnections(Closing::All { count }) => format!("关闭全部 {count} 条连接？"),
+            Self::CloseConnections(Closing::Matching { filter, ids }) => {
+                format!("关闭匹配「{filter}」的 {} 条连接？", ids.len())
+            }
+        }
+    }
+
+    /// What `y` does, for the dialog and the key bar.
+    pub fn verb(&self) -> &'static str {
+        match self {
+            Self::CloseConnections(_) => "确认",
+        }
+    }
 }
 
 /// Bookkeeping while the controller is unreachable.
@@ -778,6 +861,8 @@ pub struct App {
     local_delays: HashMap<String, u64>,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
+    /// What the confirm dialog asks about, while it is open.
+    pub pending: Option<Confirm>,
     /// Frame counter of the loading spinner; advances while one is visible.
     pub spinner: usize,
     streams: Streams,
@@ -838,6 +923,7 @@ impl App {
             local_delays: HashMap::new(),
             toasts: VecDeque::new(),
             overlay: None,
+            pending: None,
             spinner: 0,
             streams,
             links: Links::default(),
@@ -918,6 +1004,7 @@ impl App {
                 self.size = size;
                 self.dirty = true;
             }
+            _ if self.overlay == Some(Overlay::Confirm) => self.answer(action),
             Action::ToggleHelp => {
                 // The connection popup is not swapped for the help.
                 self.overlay = match self.overlay {
@@ -928,10 +1015,10 @@ impl App {
                 self.dirty = true;
             }
             Action::Dismiss => {
-                match self.overlay.take() {
-                    Some(Overlay::Connection) => self.connections_view.detail = None,
-                    Some(Overlay::Help) => {}
-                    None => self.clear_filter(),
+                if self.overlay.is_some() {
+                    self.close_overlay();
+                } else {
+                    self.clear_filter();
                 }
                 self.dirty = true;
             }
@@ -943,6 +1030,10 @@ impl App {
             Action::Cursor(movement) => self.move_cursor(movement),
             Action::CycleMode => self.cycle_mode(),
             Action::Confirm => self.confirm(),
+            Action::CloseConnection => self.close_connection(),
+            Action::CloseConnections => self.ask_close_connections(),
+            // Only the confirm dialog takes these.
+            Action::Accept | Action::Cancel => {}
             Action::TestNode => self.test_node(),
             Action::TestGroup => self.test_group(),
             Action::CycleSort => {
@@ -1285,6 +1376,149 @@ impl App {
         });
     }
 
+    /// The confirm dialog answers to `y`, `n` and `Esc` only; quitting and
+    /// resizing are handled before it is asked.
+    fn answer(&mut self, action: Action) {
+        match action {
+            Action::Accept => self.accept(),
+            Action::Cancel | Action::Dismiss => self.close_overlay(),
+            _ => {}
+        }
+    }
+
+    /// Closes the overlay along with what it showed.
+    fn close_overlay(&mut self) {
+        match self.overlay.take() {
+            Some(Overlay::Connection) => self.connections_view.detail = None,
+            Some(Overlay::Confirm) => self.pending = None,
+            Some(Overlay::Help) | None => {}
+        }
+        self.dirty = true;
+    }
+
+    /// `y`: closes the confirm dialog and does what it asked about.
+    fn accept(&mut self) {
+        self.overlay = None;
+        self.dirty = true;
+        let Some(pending) = self.pending.take() else {
+            return;
+        };
+        match pending {
+            Confirm::CloseConnections(closing) => self.close_connections(closing),
+        }
+    }
+
+    /// `x`: closes the connection under the cursor. No question asked: it
+    /// is one connection, the one in plain sight.
+    fn close_connection(&self) {
+        if let Some(row) = self.connections_view.selected_connection() {
+            self.close_each(vec![row.connection.id.clone()], false);
+        }
+    }
+
+    /// `X`: asks before closing what the table shows: every connection, or
+    /// with a filter only the ones that pass it. Nothing shown, nothing
+    /// asked.
+    fn ask_close_connections(&mut self) {
+        let view = &self.connections_view;
+        let visible = view.visible();
+        if visible.is_empty() {
+            return;
+        }
+        let filter = view.filter.value();
+        let closing = if filter.is_empty() {
+            Closing::All {
+                count: visible.len(),
+            }
+        } else {
+            Closing::Matching {
+                filter: filter.to_owned(),
+                ids: visible
+                    .iter()
+                    .map(|row| row.connection.id.clone())
+                    .collect(),
+            }
+        };
+        self.pending = Some(Confirm::CloseConnections(closing));
+        self.overlay = Some(Overlay::Confirm);
+        self.dirty = true;
+    }
+
+    /// Closes what `X` was confirmed for, as far as the table still has it:
+    /// connections may have ended meanwhile, and without a table there is
+    /// nothing to go by.
+    fn close_connections(&self, closing: Closing) {
+        let Some(rows) = &self.connections_view.rows else {
+            return;
+        };
+        match closing {
+            Closing::All { .. } => {
+                let count = rows.len();
+                if count > 0 {
+                    self.spawn(move |client| async move {
+                        Msg::AllConnectionsClosed {
+                            count,
+                            result: client.close_all_connections().await,
+                        }
+                    });
+                }
+            }
+            Closing::Matching { mut ids, .. } => {
+                let present: HashSet<&str> =
+                    rows.iter().map(|row| row.connection.id.as_str()).collect();
+                ids.retain(|id| present.contains(id.as_str()));
+                if !ids.is_empty() {
+                    self.close_each(ids, true);
+                }
+            }
+        }
+    }
+
+    /// Closes `ids`, one request each, all sent at once; the replies come
+    /// back together in one message.
+    fn close_each(&self, ids: Vec<String>, report: bool) {
+        self.spawn(move |client| async move {
+            let results = join_all(ids.iter().map(|id| client.close_connection(id))).await;
+            Msg::ConnectionsClosed {
+                results: ids.into_iter().zip(results).collect(),
+                report,
+            }
+        });
+    }
+
+    /// Takes the connections that closed out of the table and reports the
+    /// ones that did not in a single toast. A 404 means the connection had
+    /// ended by itself: it is gone, as asked, and counts as closed (mihomo
+    /// replies 204 to an id it does not know anyway). `report` adds a toast
+    /// for the ones closed.
+    fn apply_closed(&mut self, results: Vec<(String, Result<(), ApiError>)>, report: bool) {
+        let mut closed = HashSet::new();
+        let mut failed = vec![];
+        for (id, result) in results {
+            match result {
+                Ok(()) | Err(ApiError::NotFound) => {
+                    closed.insert(id);
+                }
+                Err(err) => failed.push(err),
+            }
+        }
+        self.connections_view.remove(|id| closed.contains(id));
+        if report && !closed.is_empty() {
+            self.toast(
+                ToastKind::Success,
+                format!("已关闭 {} 条连接", closed.len()),
+            );
+        }
+        if let Some(first) = failed.first() {
+            let text = if report {
+                format!("{} 条关闭失败：{}", failed.len(), describe(first))
+            } else {
+                format!("关闭连接失败：{}", describe(first))
+            };
+            self.toast(ToastKind::Error, text);
+        }
+    }
+
     /// Applies a `/version` reply: the connection state, the banner and the
     /// toast that goes with it.
     fn apply_version(&mut self, result: Result<Version, ApiError>) {
@@ -1432,6 +1666,17 @@ impl App {
                     self.fetch_proxies(true);
                 }
             }
+            Msg::ConnectionsClosed { results, report } => self.apply_closed(results, report),
+            Msg::AllConnectionsClosed { count, result } => match result {
+                Ok(()) => {
+                    self.connections_view.remove(|_| true);
+                    self.toast(ToastKind::Success, format!("已关闭 {count} 条连接"));
+                }
+                Err(err) => self.toast(
+                    ToastKind::Error,
+                    format!("关闭连接失败：{}", describe(&err)),
+                ),
+            },
             Msg::Stream { stream, event } => self.on_stream(stream, event),
         }
         self.dirty = true;
@@ -1493,9 +1738,12 @@ impl App {
                         self.connections = None;
                         self.connection_history.clear();
                         self.connections_view.reset();
-                        // Its connection went with the table.
-                        if self.overlay == Some(Overlay::Connection) {
-                            self.overlay = None;
+                        // What the popup or the dialog was about went with
+                        // the table.
+                        if self.overlay == Some(Overlay::Connection)
+                            || matches!(self.pending, Some(Confirm::CloseConnections(_)))
+                        {
+                            self.close_overlay();
                         }
                     }
                     Stream::Memory => {
@@ -3133,20 +3381,224 @@ mod tests {
 
     #[tokio::test]
     async fn the_popup_ignores_other_keys_and_closes_with_the_stream() {
-        let (mut app, _rx) = app_without_controller();
+        let (mut app, rx) = app_without_controller();
         app.page = Page::Connections;
         connect(&mut app, Stream::Connections);
         feed(&mut app, vec![flow("a", "01", 0, 0)]);
         app.update(Action::Confirm);
-        for action in [Action::ToggleHelp, Action::CycleSort, Action::StartFilter] {
+        for action in [
+            Action::ToggleHelp,
+            Action::CycleSort,
+            Action::StartFilter,
+            Action::CloseConnection,
+            Action::CloseConnections,
+        ] {
             app.update(action);
         }
         assert_eq!(app.overlay, Some(Overlay::Connection));
         assert_eq!(app.connections_view.sort, ConnectionSort::default());
         assert!(!app.typing());
+        assert!(app.pending.is_none());
 
         disconnect(&mut app, Stream::Connections);
         assert_eq!(app.overlay, None);
         assert!(app.connections_view.detail.is_none());
+        assert_eq!(closes_sent(app, rx).await, Vec::<Sent>::new());
+    }
+
+    /// A close request the app sent.
+    #[derive(Debug, PartialEq)]
+    enum Sent {
+        /// `DELETE /connections`.
+        All,
+        /// `DELETE /connections/{id}` for these, in table order.
+        Each(Vec<String>),
+    }
+
+    fn each(ids: &[&str]) -> Sent {
+        Sent::Each(ids.iter().map(|id| (*id).to_owned()).collect())
+    }
+
+    /// The closes the app sent, from the replies they leave on the channel.
+    /// Dropping the app first lets the channel close once they are
+    /// answered.
+    async fn closes_sent(app: App, mut rx: mpsc::Receiver<Msg>) -> Vec<Sent> {
+        drop(app);
+        let mut sent = vec![];
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                Msg::AllConnectionsClosed { .. } => sent.push(Sent::All),
+                Msg::ConnectionsClosed { results, .. } => {
+                    sent.push(Sent::Each(results.into_iter().map(|(id, _)| id).collect()));
+                }
+                _ => {}
+            }
+        }
+        sent
+    }
+
+    /// Newest first: `a`, `b`, `c`, on the connections page.
+    fn three_connections() -> (App, mpsc::Receiver<Msg>) {
+        let (mut app, rx) = app_without_controller();
+        app.page = Page::Connections;
+        connect(&mut app, Stream::Connections);
+        feed(
+            &mut app,
+            vec![
+                named("c", "01", "c.mirror.example", ""),
+                named("a", "03", "a.mirror.example", ""),
+                named("b", "02", "b.other.example", ""),
+            ],
+        );
+        (app, rx)
+    }
+
+    fn dialog_body(app: &App) -> String {
+        assert_eq!(app.overlay, Some(Overlay::Confirm));
+        app.pending.as_ref().unwrap().body()
+    }
+
+    #[tokio::test]
+    async fn the_dialog_goes_ahead_on_y_only_and_ignores_other_keys() {
+        let (mut app, rx) = three_connections();
+        for cancel in [Action::Cancel, Action::Dismiss] {
+            app.update(press('X', Page::Connections, false).unwrap());
+            assert_eq!(dialog_body(&app), "关闭全部 3 条连接？");
+            app.update(cancel);
+            assert_eq!(app.overlay, None);
+            assert!(app.pending.is_none());
+        }
+
+        app.update(Action::CloseConnections);
+        for key in ['?', 'x', 'X', '5', 'm', 'p', 's', '/', 'Y'] {
+            if let Some(action) = press(key, Page::Connections, false) {
+                app.update(action);
+            }
+        }
+        app.update(Action::Confirm);
+        assert_eq!(dialog_body(&app), "关闭全部 3 条连接？");
+        assert_eq!(app.page, Page::Connections);
+        assert!(!app.connections_view.paused && !app.typing());
+        assert_eq!(app.connections_view.sort, ConnectionSort::default());
+        // `m` would have complained that there is no mode yet.
+        assert!(app.toasts.is_empty());
+
+        app.update(press('y', Page::Connections, false).unwrap());
+        assert_eq!(app.overlay, None);
+        assert!(app.pending.is_none());
+        assert_eq!(closes_sent(app, rx).await, [Sent::All]);
+    }
+
+    #[tokio::test]
+    async fn capital_x_under_a_filter_closes_only_the_rows_shown() {
+        let (mut app, rx) = three_connections();
+        type_filter(&mut app, "MIRROR");
+        app.update(Action::CloseConnections);
+        assert_eq!(dialog_body(&app), "关闭匹配「MIRROR」的 2 条连接？");
+        app.update(Action::Accept);
+
+        // Nothing shown, nothing asked.
+        type_filter(&mut app, "nomatch");
+        app.update(Action::CloseConnections);
+        assert_eq!(app.overlay, None);
+        app.update(Action::FilterClear);
+        feed(&mut app, vec![]);
+        app.update(Action::CloseConnections);
+        assert_eq!(app.overlay, None);
+
+        assert_eq!(closes_sent(app, rx).await, [each(&["a", "c"])]);
+    }
+
+    #[tokio::test]
+    async fn y_closes_only_what_the_table_still_has() {
+        let (mut app, rx) = three_connections();
+        type_filter(&mut app, "mirror");
+        app.update(Action::CloseConnections);
+        // `c` ends while the dialog is up.
+        feed(&mut app, vec![flow("a", "03", 0, 0), flow("b", "02", 0, 0)]);
+        app.update(Action::Accept);
+
+        // All of them end: `y` closes nothing.
+        feed(&mut app, vec![named("a", "03", "a.mirror.example", "")]);
+        app.update(Action::CloseConnections);
+        feed(&mut app, vec![]);
+        app.update(Action::Accept);
+        assert_eq!(app.overlay, None);
+
+        assert_eq!(closes_sent(app, rx).await, [each(&["a"])]);
+    }
+
+    #[tokio::test]
+    async fn the_dialog_closes_with_the_stream_and_y_then_sends_nothing() {
+        let (mut app, rx) = three_connections();
+        app.update(Action::CloseConnections);
+        disconnect(&mut app, Stream::Connections);
+        assert_eq!(app.overlay, None);
+        assert!(app.pending.is_none());
+        app.update(Action::Accept);
+        assert_eq!(closes_sent(app, rx).await, Vec::<Sent>::new());
+    }
+
+    #[tokio::test]
+    async fn x_closes_the_cursor_s_row_and_takes_it_out_at_once_even_paused() {
+        let (mut app, rx) = three_connections();
+        app.update(Action::Cursor(Move::Down));
+        app.update(press('x', Page::Connections, false).unwrap());
+        assert_eq!(app.overlay, None);
+
+        app.handle_msg(Msg::ConnectionsClosed {
+            results: vec![("b".to_owned(), Ok(()))],
+            report: false,
+        });
+        assert_eq!(table_ids(&app), ["a", "c"]);
+        // Its position, now `c`'s.
+        assert_eq!(selected_id(&app), "c");
+
+        // Paused, and the frame that dropped `c` held back: it still goes at
+        // once. It had ended by itself (404): not an error either.
+        app.connections_view.paused = true;
+        feed(&mut app, vec![flow("a", "03", 0, 0)]);
+        app.handle_msg(Msg::ConnectionsClosed {
+            results: vec![("c".to_owned(), Err(ApiError::NotFound))],
+            report: false,
+        });
+        assert_eq!(table_ids(&app), ["a"]);
+        assert_eq!(selected_id(&app), "a");
+        assert!(app.toasts.is_empty());
+
+        assert_eq!(closes_sent(app, rx).await, [each(&["b"])]);
+    }
+
+    #[test]
+    fn closing_one_by_one_reports_one_summary_of_the_failures() {
+        let (mut app, _rx) = app_without_controller();
+        feed(
+            &mut app,
+            ["a", "b", "c", "d", "e"]
+                .map(|id| flow(id, "01", 0, 0))
+                .to_vec(),
+        );
+        app.handle_msg(Msg::ConnectionsClosed {
+            results: vec![
+                ("a".to_owned(), Ok(())),
+                ("b".to_owned(), Err(http(500))),
+                ("c".to_owned(), Err(ApiError::Timeout)),
+                ("d".to_owned(), Err(ApiError::NotFound)),
+            ],
+            report: true,
+        });
+        assert_eq!(table_ids(&app), ["b", "c", "e"]);
+        let toasts: Vec<_> = app
+            .toasts
+            .iter()
+            .map(|toast| (toast.kind, toast.text.as_str()))
+            .collect();
+        assert_eq!(
+            toasts,
+            [
+                (ToastKind::Success, "已关闭 2 条连接"),
+                (ToastKind::Error, "2 条关闭失败：控制器返回错误（HTTP 500）"),
+            ]
+        );
     }
 }

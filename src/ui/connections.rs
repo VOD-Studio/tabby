@@ -6,12 +6,15 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Cell, Paragraph, Row, Table},
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, ConnectionRow, ConnectionSort, Detail, SortColumn},
     format,
-    ui::components::{popup, states},
+    ui::{
+        components::{popup, states},
+        text::wrap,
+    },
 };
 
 /// Below this terminal width the process and total columns are left out
@@ -550,42 +553,6 @@ fn traffic(app: &App, total: u64, rate_now: Option<u64>, color: Color) -> Vec<Sp
     spans
 }
 
-/// Breaks `spans` into lines at most `width` columns wide, each piece keeping
-/// its style. Wide characters are never split; a space a line would start
-/// with is dropped.
-fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
-    let mut lines: Vec<Vec<Span<'static>>> = vec![vec![]];
-    let mut used = 0;
-    for span in spans {
-        let mut piece = String::new();
-        for ch in span.content.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if used > 0 && used + ch_width > width {
-                if !piece.is_empty() {
-                    lines
-                        .last_mut()
-                        .unwrap_or_else(|| unreachable!())
-                        .push(Span::styled(std::mem::take(&mut piece), span.style));
-                }
-                lines.push(vec![]);
-                used = 0;
-            }
-            if used == 0 && ch == ' ' && lines.len() > 1 {
-                continue;
-            }
-            piece.push(ch);
-            used += ch_width;
-        }
-        if !piece.is_empty() {
-            lines
-                .last_mut()
-                .unwrap_or_else(|| unreachable!())
-                .push(Span::styled(piece, span.style));
-        }
-    }
-    lines
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,23 +564,5 @@ mod tests {
         assert_eq!(address("203.0.113.10", ""), "203.0.113.10");
         assert_eq!(address("2001:db8::1", ""), "2001:db8::1");
         assert_eq!(address("", "443"), "");
-    }
-
-    fn texts(lines: &[Vec<Span<'static>>]) -> Vec<String> {
-        lines
-            .iter()
-            .map(|line| line.iter().map(|span| span.content.as_ref()).collect())
-            .collect()
-    }
-
-    #[test]
-    fn wrapping_keeps_wide_characters_whole_and_styles_apart() {
-        let muted = Style::new().fg(Color::DarkGray);
-        let lines = wrap(vec![Span::raw("abc"), Span::styled("本 de", muted)], 4);
-        // `本` would straddle the edge of the first line: it moves down whole.
-        assert_eq!(texts(&lines), ["abc", "本 d", "e"]);
-        assert_eq!(lines[1][0].style, muted);
-        // A line does not start with the space it broke at.
-        assert_eq!(texts(&wrap(vec![Span::raw("ab cd")], 2)), ["ab", "cd"]);
     }
 }

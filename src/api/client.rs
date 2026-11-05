@@ -135,6 +135,12 @@ impl ApiClient {
         Ok(())
     }
 
+    /// `DELETE base/seg1/seg2/…`, ignoring the reply body.
+    async fn delete(&self, segments: &[&str]) -> Result<(), ApiError> {
+        Self::check(self.http.delete(self.url(segments)).send().await?).await?;
+        Ok(())
+    }
+
     /// `GET /version`.
     pub async fn version(&self) -> Result<Version, ApiError> {
         self.get_json(&["version"]).await
@@ -198,6 +204,17 @@ impl ApiClient {
             &[("url", url), ("timeout", &timeout)],
         )
         .await
+    }
+
+    /// `DELETE /connections/{id}`: closes one connection. Replies 204; mihomo
+    /// does so for an id it does not know, too.
+    pub async fn close_connection(&self, id: &str) -> Result<(), ApiError> {
+        self.delete(&["connections", id]).await
+    }
+
+    /// `DELETE /connections`: closes every connection. Replies 204.
+    pub async fn close_all_connections(&self) -> Result<(), ApiError> {
+        self.delete(&["connections"]).await
     }
 }
 
@@ -307,6 +324,32 @@ mod tests {
 
         let client = ApiClient::new(&server.uri(), None).unwrap();
         client.set_mode(Mode::Global).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closing_deletes_one_encoded_id_or_every_connection() {
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/connections/a%2Fb%20c%3F"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/connections"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&server.uri(), None).unwrap();
+        client.close_connection("a/b c?").await.unwrap();
+        client.close_all_connections().await.unwrap();
+        // Anything else is unmatched, which wiremock answers with 404.
+        assert!(matches!(
+            client.close_connection("gone").await,
+            Err(ApiError::NotFound)
+        ));
     }
 
     #[tokio::test]
