@@ -28,6 +28,11 @@ pub struct Theme {
     /// Cursor row background. A style rather than a color: the `terminal`
     /// theme has no background of its own to pick and inverts instead.
     pub surface: Style,
+    /// Background of every other table row. Between the page background and
+    /// `surface`, so the cursor row still stands out. The `terminal` theme
+    /// has none: no 16-color background is faint enough to leave muted text
+    /// readable.
+    pub stripe: Style,
 }
 
 impl Theme {
@@ -44,6 +49,7 @@ impl Theme {
         c3: Color::LightRed,
         c4: Color::LightCyan,
         surface: Style::new().add_modifier(Modifier::REVERSED),
+        stripe: Style::new(),
     };
 
     const TOKYO_NIGHT: Self = Self {
@@ -58,6 +64,7 @@ impl Theme {
         c3: Color::Rgb(0xff, 0x9e, 0x64),
         c4: Color::Rgb(0x73, 0xda, 0xca),
         surface: Style::new().bg(Color::Rgb(0x29, 0x2e, 0x42)),
+        stripe: Style::new().bg(Color::Rgb(0x21, 0x24, 0x34)),
     };
 
     const CATPPUCCIN_MOCHA: Self = Self {
@@ -72,6 +79,7 @@ impl Theme {
         c3: Color::Rgb(0xfa, 0xb3, 0x87),
         c4: Color::Rgb(0x94, 0xe2, 0xd5),
         surface: Style::new().bg(Color::Rgb(0x31, 0x32, 0x44)),
+        stripe: Style::new().bg(Color::Rgb(0x27, 0x26, 0x39)),
     };
 
     /// Color for a delay test result: under 200 ms good, up to 500 ms slow,

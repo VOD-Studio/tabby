@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use jiff::Timestamp;
 use serde::{Deserialize, Deserializer};
 
 /// Which kernel is behind the controller.
@@ -118,7 +119,8 @@ pub struct Traffic {
 /// One `/connections` frame, also the reply of `GET /connections`: the
 /// totals since the kernel started and the connections open right now.
 ///
-/// Only what the stat cards need is read; the connections page adds the rest.
+/// Only what the stat cards and the connections table show is read; the
+/// detail popup adds the rest.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ConnectionSnapshot {
@@ -132,7 +134,21 @@ pub struct ConnectionSnapshot {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct Connection {
+    pub id: String,
     pub metadata: Metadata,
+    /// Bytes sent so far, over the connection's whole life.
+    pub upload: u64,
+    /// Bytes received so far, over the connection's whole life.
+    pub download: u64,
+    /// When the connection opened. `None` when the kernel's timestamp is
+    /// missing or unreadable: one odd value must not cost the whole frame.
+    #[serde(deserialize_with = "lenient_timestamp")]
+    pub start: Option<Timestamp>,
+    /// The route, innermost first: `[Node 1, Auto, Proxy]`.
+    #[serde(deserialize_with = "null_as_default")]
+    pub chains: Vec<String>,
+    /// The type of the rule that matched, without its payload.
+    pub rule: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -140,6 +156,32 @@ pub struct Connection {
 pub struct Metadata {
     /// `tcp` or `udp`.
     pub network: String,
+    /// The name the client asked for; empty when it connected by address.
+    pub host: String,
+    #[serde(rename = "destinationIP")]
+    pub destination_ip: String,
+    /// The local process that opened it. mihomo only, and only when it can
+    /// tell; empty otherwise.
+    pub process: String,
+}
+
+/// What a connection had transferred in total, as of one frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Totals {
+    pub upload: u64,
+    pub download: u64,
+}
+
+/// The totals of every connection in the last frame, by connection id: what
+/// the next frame is measured against.
+pub type Baseline = HashMap<String, Totals>;
+
+/// Bytes per frame of one connection, which is bytes per second at the
+/// kernel's default of one frame a second.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Rate {
+    pub up: u64,
+    pub down: u64,
 }
 
 /// What the stat cards keep of a [`ConnectionSnapshot`] frame: counts, not the
@@ -172,6 +214,38 @@ impl ConnectionSnapshot {
         }
         stats
     }
+
+    /// What each connection of this frame moved since `previous`, and the
+    /// baseline for the frame after this one. Pure: the caller owns the state.
+    ///
+    /// The rates come in the order of `self.connections`:
+    /// - in both frames: this frame's totals minus the last one's (0 when the
+    ///   total shrank, which a live connection never does);
+    /// - new in this frame: `None`, there is nothing to compare with.
+    ///
+    /// A connection that went away is in neither the rates nor the new
+    /// baseline, so the baseline never outgrows the open connections.
+    pub fn rates(&self, previous: &Baseline) -> (Vec<Option<Rate>>, Baseline) {
+        let mut baseline = Baseline::with_capacity(self.connections.len());
+        let rates = self
+            .connections
+            .iter()
+            .map(|connection| {
+                baseline.insert(
+                    connection.id.clone(),
+                    Totals {
+                        upload: connection.upload,
+                        download: connection.download,
+                    },
+                );
+                previous.get(&connection.id).map(|before| Rate {
+                    up: connection.upload.saturating_sub(before.upload),
+                    down: connection.download.saturating_sub(before.download),
+                })
+            })
+            .collect();
+        (rates, baseline)
+    }
 }
 
 /// One `/memory` frame. mihomo only.
@@ -190,6 +264,15 @@ where
     T: Default + Deserialize<'de>,
 {
     Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// An RFC 3339 timestamp, or `None` for anything else, whatever it is.
+fn lenient_timestamp<'de, D>(deserializer: D) -> Result<Option<Timestamp>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    Ok(value.as_str().and_then(|text| text.parse().ok()))
 }
 
 /// The name of the built-in group that lists every proxy and group, in
@@ -458,6 +541,114 @@ mod tests {
             .unwrap()
             .stats();
         assert_eq!((stats.active, stats.tcp, stats.udp), (3, 1, 0));
+    }
+
+    fn mihomo_snapshot() -> ConnectionSnapshot {
+        serde_json::from_str(include_str!("../../tests/fixtures/mihomo_connections.json")).unwrap()
+    }
+
+    #[test]
+    fn reads_what_the_table_shows_from_a_mihomo_connection() {
+        let snapshot = mihomo_snapshot();
+        let first = &snapshot.connections[0];
+        assert_eq!(first.id, "00000000-0000-4000-8000-000000000001");
+        assert_eq!(first.metadata.host, "www.example.com");
+        assert_eq!(first.metadata.destination_ip, "203.0.113.10");
+        assert_eq!(first.metadata.process, "");
+        assert_eq!((first.upload, first.download), (296_708, 27_027));
+        assert_eq!(first.chains, ["Node 1", "Auto", "Proxy"]);
+        assert_eq!(first.rule, "RuleSet");
+        // Nanoseconds and an offset: 16:30 at +08:00 is 08:30 UTC.
+        assert_eq!(
+            first.start,
+            Some("2026-11-05T08:30:00Z".parse::<Timestamp>().unwrap())
+        );
+        // No host: the table falls back to the address.
+        let udp = &snapshot.connections[3];
+        assert_eq!(udp.metadata.host, "");
+        assert_eq!(udp.metadata.destination_ip, "198.51.100.53");
+        assert_eq!(udp.chains, ["Node 4", "Auto", "Proxy"]);
+    }
+
+    #[test]
+    fn an_unreadable_start_costs_that_value_only() {
+        // Original Clash has no `process`; the second connection's `start`
+        // is not a timestamp at all, the third one's is not even a string.
+        let json = r#"{"connections":[
+            {"id":"a","metadata":{"host":"h"},"upload":1,"download":2,
+             "start":"2026-11-05T16:30:00.5+08:00","chains":["DIRECT"],"rule":"Match"},
+            {"id":"b","metadata":{"host":"h"},"upload":3,"download":4,
+             "start":"yesterday","chains":["Proxy"],"rule":"Match"},
+            {"id":"c","upload":5,"download":6,"start":12,"chains":null}
+        ]}"#;
+        let snapshot: ConnectionSnapshot = serde_json::from_str(json).unwrap();
+        let [a, b, c] = &snapshot.connections[..] else {
+            panic!("three connections expected");
+        };
+        assert!(a.start.is_some());
+        assert_eq!(a.metadata.process, "");
+        assert_eq!(b.start, None);
+        assert_eq!(
+            (b.id.as_str(), b.upload, b.download, b.chains.as_slice()),
+            ("b", 3, 4, ["Proxy".to_owned()].as_slice())
+        );
+        assert_eq!(b.rule, "Match");
+        assert_eq!((c.start, c.upload, c.chains.len()), (None, 5, 0));
+    }
+
+    fn frame(connections: &[(&str, u64, u64)]) -> ConnectionSnapshot {
+        ConnectionSnapshot {
+            connections: connections
+                .iter()
+                .map(|&(id, upload, download)| Connection {
+                    id: id.to_owned(),
+                    upload,
+                    download,
+                    ..Connection::default()
+                })
+                .collect(),
+            ..ConnectionSnapshot::default()
+        }
+    }
+
+    #[test]
+    fn rates_are_the_growth_since_the_previous_frame() {
+        let (_, baseline) = frame(&[("a", 100, 1000), ("b", 5, 5)]).rates(&Baseline::new());
+        let (rates, _) = frame(&[("b", 5, 50), ("a", 164, 1000)]).rates(&baseline);
+        // In the order of the frame, not of the baseline.
+        assert_eq!(
+            rates,
+            [
+                Some(Rate { up: 0, down: 45 }),
+                Some(Rate { up: 64, down: 0 })
+            ]
+        );
+    }
+
+    #[test]
+    fn a_connection_new_in_the_frame_has_no_rate() {
+        let (_, baseline) = frame(&[("a", 100, 100)]).rates(&Baseline::new());
+        let (rates, _) = frame(&[("a", 150, 100), ("new", 9_999, 9_999)]).rates(&baseline);
+        assert_eq!(rates, [Some(Rate { up: 50, down: 0 }), None]);
+    }
+
+    #[test]
+    fn a_connection_that_is_gone_leaves_the_baseline() {
+        let (_, baseline) = frame(&[("a", 1, 1), ("gone", 1, 1)]).rates(&Baseline::new());
+        let (rates, baseline) = frame(&[("a", 2, 2)]).rates(&baseline);
+        assert_eq!(rates.len(), 1);
+        assert_eq!(baseline.keys().collect::<Vec<_>>(), ["a"]);
+        // Were it still there, an id that comes back would be measured
+        // against bytes from long ago.
+        let (rates, _) = frame(&[("gone", 50, 50)]).rates(&baseline);
+        assert_eq!(rates, [None]);
+    }
+
+    #[test]
+    fn totals_that_shrink_count_as_no_traffic() {
+        let (_, baseline) = frame(&[("a", 500, 500)]).rates(&Baseline::new());
+        let (rates, _) = frame(&[("a", 100, 900)]).rates(&baseline);
+        assert_eq!(rates, [Some(Rate { up: 0, down: 400 })]);
     }
 
     #[test]

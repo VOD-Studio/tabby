@@ -78,6 +78,21 @@ fn cmp_numbers(a: &str, b: &str) -> Ordering {
     a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
 
+/// How long something has lasted, in the two leading units: `45s`, `12m05s`,
+/// `3h05m`, `2d03h`. Seconds are dropped once there are hours, as they would
+/// only flicker.
+pub fn duration(secs: u64) -> String {
+    const MINUTE: u64 = 60;
+    const HOUR: u64 = 60 * MINUTE;
+    const DAY: u64 = 24 * HOUR;
+    match secs {
+        0..MINUTE => format!("{secs}s"),
+        MINUTE..HOUR => format!("{}m{:02}s", secs / MINUTE, secs % MINUTE),
+        HOUR..DAY => format!("{}h{:02}m", secs / HOUR, secs % HOUR / MINUTE),
+        _ => format!("{}d{:02}h", secs / DAY, secs % DAY / HOUR),
+    }
+}
+
 /// Units of a transfer rate, 1024 apart. The only place unit names live:
 /// plain byte sizes use them without the `/s`.
 const RATE_UNITS: [&str; 4] = ["B/s", "KB/s", "MB/s", "GB/s"];
@@ -225,6 +240,24 @@ mod tests {
             let (_, size_unit) = bytes(count);
             let (_, rate_unit) = rate(count);
             assert_eq!(format!("{size_unit}/s"), rate_unit, "{count}");
+        }
+    }
+
+    #[test]
+    fn durations_keep_the_two_leading_units_and_roll_over_at_the_boundaries() {
+        for (secs, text) in [
+            (0, "0s"),
+            (59, "59s"),
+            (60, "1m00s"),
+            (725, "12m05s"),
+            (3599, "59m59s"),
+            (3600, "1h00m"),
+            (3 * 3600 + 5 * 60 + 59, "3h05m"),
+            (86_399, "23h59m"),
+            (86_400, "1d00h"),
+            (2 * 86_400 + 3 * 3600, "2d03h"),
+        ] {
+            assert_eq!(duration(secs), text, "{secs}");
         }
     }
 }

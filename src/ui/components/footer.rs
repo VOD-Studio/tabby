@@ -66,6 +66,18 @@ fn page_hints(app: &App) -> Vec<Hint> {
             }
             hints
         }
+        Page::Connections => vec![
+            hint("j/k", "移动"),
+            hint("g/G", "首尾"),
+            hint(
+                "p",
+                if app.connections_view.paused {
+                    "恢复"
+                } else {
+                    "暂停"
+                },
+            ),
+        ],
         _ => vec![],
     }
 }

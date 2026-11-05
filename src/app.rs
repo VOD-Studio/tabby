@@ -4,6 +4,7 @@ use std::{
 };
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use jiff::Timestamp;
 use ratatui::layout::{Rect, Size};
 use tokio::sync::mpsc;
 use tui_input::{Input, backend::crossterm::EventHandler};
@@ -14,14 +15,14 @@ use crate::{
         client::ApiClient,
         error::ApiError,
         models::{
-            Configs, ConnectionStats, CoreKind, Delay, GLOBAL, Mode, Proxies, Proxy, Traffic,
-            Version,
+            self, Baseline, Configs, ConnectionSnapshot, ConnectionStats, CoreKind, Delay, GLOBAL,
+            Mode, Proxies, Proxy, Rate, Traffic, Version,
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
     config::Settings,
     format::natural_cmp,
-    ui::{proxies, regions, scroll::Scroll, text::describe, theme::Theme},
+    ui::{connections, proxies, regions, scroll::Scroll, text::describe, theme::Theme},
 };
 
 /// The seven top-level pages, in tab order.
@@ -178,6 +179,116 @@ pub struct ProxiesView {
     pub typing: bool,
 }
 
+/// Frames a new connection stays highlighted: about three seconds at the
+/// kernel's default of one frame a second.
+const FRESH_FRAMES: u8 = 3;
+
+/// One row of the connections table.
+#[derive(Debug)]
+pub struct ConnectionRow {
+    pub connection: models::Connection,
+    /// What it moved since the frame before; `None` when it was not in that
+    /// frame, so there is nothing to measure against.
+    pub rate: Option<Rate>,
+    /// It appeared within the last [`FRESH_FRAMES`] frames.
+    pub fresh: bool,
+}
+
+/// Table, cursor and pause state of the connections page.
+#[derive(Debug, Default)]
+pub struct ConnectionsView {
+    /// The table, newest connection first, as of the last frame it was
+    /// updated for. `None` until the first frame, and again while the stream
+    /// is down.
+    pub rows: Option<Vec<ConnectionRow>>,
+    /// When `rows` was taken. Durations count up to it rather than to the
+    /// clock, so a paused table keeps still.
+    pub as_of: Option<Timestamp>,
+    /// Index into `rows`.
+    pub cursor: usize,
+    pub scroll: Scroll,
+    /// The table stays as it is; frames only keep the baseline up to date.
+    pub paused: bool,
+    /// Totals of the last frame, whether or not it reached the table: the
+    /// frame after is measured against it, so resuming shows one frame's
+    /// traffic rather than everything moved while paused.
+    baseline: Baseline,
+    /// Frames of highlight left, for the connections that are still new.
+    fresh: HashMap<String, u8>,
+}
+
+impl ConnectionsView {
+    /// Takes in a frame: rates, highlights and baseline always, the table
+    /// unless it is paused. The first frame after (re)connecting is let
+    /// through even then: a table that was never filled has nothing to freeze.
+    fn apply(&mut self, frame: ConnectionSnapshot, now: Timestamp) {
+        // Everything is new then; lighting up the whole table says nothing.
+        let first = self.rows.is_none();
+        let (rates, baseline) = frame.rates(&self.baseline);
+        let mut fresh = HashMap::new();
+        for connection in &frame.connections {
+            let frames = match self.fresh.get(&connection.id) {
+                Some(left) => left.saturating_sub(1),
+                None if !first && !self.baseline.contains_key(&connection.id) => FRESH_FRAMES,
+                None => 0,
+            };
+            if frames > 0 {
+                fresh.insert(connection.id.clone(), frames);
+            }
+        }
+        self.baseline = baseline;
+        self.fresh = fresh;
+        if self.paused && !first {
+            return;
+        }
+
+        let anchor = self.anchor();
+        let mut rows: Vec<ConnectionRow> = frame
+            .connections
+            .into_iter()
+            .zip(rates)
+            .map(|(connection, rate)| ConnectionRow {
+                fresh: self.fresh.contains_key(&connection.id),
+                connection,
+                rate,
+            })
+            .collect();
+        // The kernel sends them in no particular order, and a different one
+        // every frame. Without a fixed order the table would shuffle.
+        rows.sort_by(|a, b| {
+            b.connection
+                .start
+                .cmp(&a.connection.start)
+                .then_with(|| a.connection.id.cmp(&b.connection.id))
+        });
+        self.cursor = anchor
+            .map_or(0, |(id, index)| {
+                rows.iter()
+                    .position(|row| row.connection.id == id)
+                    .unwrap_or(index)
+            })
+            .min(rows.len().saturating_sub(1));
+        self.rows = Some(rows);
+        self.as_of = Some(now);
+    }
+
+    /// The id and position of the connection under the cursor.
+    fn anchor(&self) -> Option<(String, usize)> {
+        let rows = self.rows.as_ref()?;
+        let index = self.cursor.min(rows.len().checked_sub(1)?);
+        Some((rows[index].connection.id.clone(), index))
+    }
+
+    /// The stream is gone: the table and what it was measured against go
+    /// with it. Pausing is the user's setting and stays.
+    fn reset(&mut self) {
+        *self = Self {
+            paused: self.paused,
+            ..Self::default()
+        };
+    }
+}
+
 /// A user intent, derived from a terminal event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -199,6 +310,8 @@ pub enum Action {
     TestGroup,
     /// `s`: next node ordering.
     CycleSort,
+    /// `p`: freeze or resume the connections table.
+    TogglePause,
     /// `/`: start typing a node filter.
     StartFilter,
     /// A key typed into the filter box.
@@ -301,6 +414,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('T') if page == Page::Proxies => Some(Action::TestGroup),
                 KeyCode::Char('s') if page == Page::Proxies => Some(Action::CycleSort),
                 KeyCode::Char('/') if page == Page::Proxies => Some(Action::StartFilter),
+                KeyCode::Char('p') if page == Page::Connections => Some(Action::TogglePause),
                 KeyCode::Char('m') => Some(Action::CycleMode),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
@@ -428,6 +542,8 @@ pub struct App {
     /// Counts of the latest `/connections` frame; `None` while that stream is
     /// down.
     pub connections: Option<ConnectionStats>,
+    /// The connections table, from the same stream.
+    pub connections_view: ConnectionsView,
     /// Open connections over the last [`TRAFFIC_HISTORY`] frames, oldest
     /// first; empty while that stream is down.
     pub connection_history: VecDeque<u64>,
@@ -480,6 +596,7 @@ impl App {
             traffic: None,
             traffic_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
             connections: None,
+            connections_view: ConnectionsView::default(),
             connection_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
             memory: None,
             memory_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
@@ -581,6 +698,10 @@ impl App {
                 self.proxies_view.node = None;
                 self.dirty = true;
             }
+            Action::TogglePause => {
+                self.connections_view.paused = !self.connections_view.paused;
+                self.dirty = true;
+            }
             Action::StartFilter => {
                 self.proxies_view.typing = true;
                 self.dirty = true;
@@ -679,6 +800,10 @@ impl App {
     }
 
     fn move_cursor(&mut self, movement: Move) {
+        if self.page == Page::Connections {
+            self.move_in_connections(movement);
+            return;
+        }
         if self.page != Page::Proxies {
             return;
         }
@@ -719,6 +844,21 @@ impl App {
     fn proxies_fit(&self) -> proxies::Fit {
         let screen = Rect::from(self.size);
         proxies::fit(regions(screen, self.reconnect.is_some()).body)
+    }
+
+    /// Table rows that fit the terminal, laid out by the function that
+    /// draws them.
+    fn connections_capacity(&self) -> usize {
+        let screen = Rect::from(self.size);
+        connections::capacity(regions(screen, self.reconnect.is_some()).body)
+    }
+
+    fn move_in_connections(&mut self, movement: Move) {
+        let half = (self.connections_capacity() / 2).max(1);
+        let view = &mut self.connections_view;
+        let len = view.rows.as_ref().map_or(0, Vec::len);
+        view.cursor = movement.apply(view.cursor, len, half);
+        self.dirty = true;
     }
 
     /// Drops the node filter and gives the keyboard back.
@@ -971,7 +1111,7 @@ impl App {
                     self.fetch_proxies(true);
                 }
             }
-            Msg::Stream { stream, event } => self.on_stream(stream, &event),
+            Msg::Stream { stream, event } => self.on_stream(stream, event),
         }
         self.dirty = true;
     }
@@ -1011,7 +1151,7 @@ impl App {
     /// - First stream back after that: the kernel may have been replaced, so
     ///   repeat the startup requests, as a REST retry does. Streams that are
     ///   already running are left alone.
-    fn on_stream(&mut self, stream: Stream, event: &StreamEvent) {
+    fn on_stream(&mut self, stream: Stream, event: StreamEvent) {
         match event {
             StreamEvent::Connected => {
                 self.links.up.insert(stream);
@@ -1031,6 +1171,7 @@ impl App {
                     Stream::Connections => {
                         self.connections = None;
                         self.connection_history.clear();
+                        self.connections_view.reset();
                     }
                     Stream::Memory => {
                         self.memory = None;
@@ -1046,13 +1187,14 @@ impl App {
                 }
             }
             StreamEvent::Traffic(traffic) => {
-                self.traffic = Some(*traffic);
-                push_sample(&mut self.traffic_history, *traffic);
+                self.traffic = Some(traffic);
+                push_sample(&mut self.traffic_history, traffic);
             }
             StreamEvent::Connections(frame) => {
                 let stats = frame.stats();
                 self.connections = Some(stats);
                 push_sample(&mut self.connection_history, stats.active);
+                self.connections_view.apply(frame, Timestamp::now());
             }
             // The first frame after connecting reports 0: no process uses
             // none, it is the kernel having sampled nothing yet.
@@ -1083,6 +1225,7 @@ impl App {
         match self.page {
             Page::Overview => self.configs.is_none(),
             Page::Proxies => self.proxies.is_none(),
+            Page::Connections => self.connections_view.rows.is_none(),
             _ => false,
         }
     }
@@ -1936,8 +2079,16 @@ mod tests {
         disconnect(&mut app, Stream::Memory);
         assert!(app.memory.is_none() && app.memory_history.is_empty());
         assert!(app.connections.is_some());
+        // The table and what it is measured against live and die with the
+        // stream; the user's pause outlasts it.
+        app.connections_view.paused = true;
+        assert!(app.connections_view.rows.is_some());
+        assert!(!app.connections_view.baseline.is_empty());
         disconnect(&mut app, Stream::Connections);
         assert!(app.connections.is_none() && app.connection_history.is_empty());
+        let view = &app.connections_view;
+        assert!(view.rows.is_none() && view.baseline.is_empty() && view.fresh.is_empty());
+        assert!(view.paused);
     }
 
     fn press(key: char, page: Page, typing: bool) -> Option<Action> {
@@ -2060,5 +2211,217 @@ mod tests {
         set_mode(&mut app, "Global");
         assert!(app.is_global_mode());
         assert_eq!(group_names(&app)[0], GLOBAL);
+    }
+
+    /// A connection that started `secs` past 10:00:00 UTC; `""` for a start
+    /// the kernel could not give.
+    fn flow(id: &str, secs: &str, upload: u64, download: u64) -> Connection {
+        Connection {
+            id: id.to_owned(),
+            upload,
+            download,
+            start: secs
+                .parse::<u32>()
+                .ok()
+                .map(|secs| format!("2026-11-05T10:00:{secs:02}Z").parse().unwrap()),
+            ..Connection::default()
+        }
+    }
+
+    fn feed(app: &mut App, connections: Vec<Connection>) {
+        let frame = ConnectionSnapshot {
+            connections,
+            ..ConnectionSnapshot::default()
+        };
+        stream_event(app, Stream::Connections, StreamEvent::Connections(frame));
+    }
+
+    fn rows(app: &App) -> &[ConnectionRow] {
+        app.connections_view.rows.as_deref().unwrap()
+    }
+
+    fn table_ids(app: &App) -> Vec<&str> {
+        rows(app)
+            .iter()
+            .map(|row| row.connection.id.as_str())
+            .collect()
+    }
+
+    fn row<'a>(app: &'a App, id: &str) -> &'a ConnectionRow {
+        rows(app)
+            .iter()
+            .find(|row| row.connection.id == id)
+            .unwrap()
+    }
+
+    fn is_fresh(app: &App, id: &str) -> bool {
+        row(app, id).fresh
+    }
+
+    #[test]
+    fn the_table_lists_the_newest_first_whatever_order_the_kernel_sends() {
+        let (mut app, _rx) = app_without_controller();
+        feed(
+            &mut app,
+            vec![
+                flow("old", "01", 0, 0),
+                flow("zz", "", 0, 0),
+                flow("b", "05", 0, 0),
+                flow("new", "09", 0, 0),
+                flow("a", "05", 0, 0),
+                flow("aa", "", 0, 0),
+            ],
+        );
+        // Equal starts, and starts that could not be read, by id.
+        assert_eq!(table_ids(&app), ["new", "a", "b", "old", "aa", "zz"]);
+    }
+
+    #[test]
+    fn the_cursor_stays_on_its_connection_as_the_table_changes() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        // Ids are single letters, started in alphabetical order.
+        let pick = |ids: &str| -> Vec<Connection> {
+            ids.chars()
+                .map(|id| {
+                    let secs = format!("{:02}", u32::from(id) - u32::from('a') + 1);
+                    flow(&id.to_string(), &secs, 0, 0)
+                })
+                .collect()
+        };
+        feed(&mut app, pick("abc"));
+        assert_eq!(table_ids(&app), ["c", "b", "a"]);
+        app.update(Action::Cursor(Move::Down));
+        assert_eq!(app.connections_view.cursor, 1);
+
+        // Two new connections above push `b` down to the fourth row.
+        feed(&mut app, pick("abcde"));
+        assert_eq!(table_ids(&app), ["e", "d", "c", "b", "a"]);
+        assert_eq!(app.connections_view.cursor, 3);
+
+        // `b` ends with the cursor on it, which was past the new end.
+        feed(&mut app, pick("acd"));
+        assert_eq!(table_ids(&app), ["d", "c", "a"]);
+        assert_eq!(app.connections_view.cursor, 2);
+
+        // The cursor's own connection ends in the middle: its row stays.
+        app.update(Action::Cursor(Move::Up));
+        feed(&mut app, pick("ad"));
+        assert_eq!(table_ids(&app), ["d", "a"]);
+        assert_eq!(app.connections_view.cursor, 1);
+    }
+
+    #[test]
+    fn a_vanished_connection_leaves_the_cursor_on_its_row() {
+        let (mut app, _rx) = app_without_controller();
+        let all: Vec<_> = ["a", "b", "c", "d"]
+            .into_iter()
+            .zip(["04", "03", "02", "01"])
+            .map(|(id, secs)| flow(id, secs, 0, 0))
+            .collect();
+        feed(&mut app, all.clone());
+        app.page = Page::Connections;
+        app.update(Action::Cursor(Move::Down));
+        app.update(Action::Cursor(Move::Down));
+        assert_eq!(row_under_cursor(&app), "c");
+        feed(
+            &mut app,
+            vec![all[0].clone(), all[1].clone(), all[3].clone()],
+        );
+        assert_eq!(app.connections_view.cursor, 2);
+        assert_eq!(row_under_cursor(&app), "d");
+    }
+
+    fn row_under_cursor(app: &App) -> &str {
+        &rows(app)[app.connections_view.cursor].connection.id
+    }
+
+    #[test]
+    fn resuming_shows_one_frame_of_traffic_not_everything_moved_while_paused() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        feed(&mut app, vec![flow("a", "01", 0, 1_000)]);
+        feed(&mut app, vec![flow("a", "01", 0, 2_000)]);
+        assert_eq!(row(&app, "a").rate, Some(Rate { up: 0, down: 1_000 }));
+
+        app.update(Action::TogglePause);
+        let as_of = app.connections_view.as_of;
+        feed(&mut app, vec![flow("a", "01", 0, 5_000)]);
+        feed(
+            &mut app,
+            vec![flow("a", "01", 0, 9_000), flow("late", "02", 0, 0)],
+        );
+        // The table is as it was, rate and clock included; the overview's
+        // numbers are not held back.
+        assert_eq!(table_ids(&app), ["a"]);
+        assert_eq!(row(&app, "a").rate, Some(Rate { up: 0, down: 1_000 }));
+        assert_eq!(row(&app, "a").connection.download, 2_000);
+        assert_eq!(app.connections_view.as_of, as_of);
+        assert_eq!(app.connections.unwrap().active, 2);
+
+        app.update(Action::TogglePause);
+        feed(
+            &mut app,
+            vec![flow("a", "01", 0, 9_500), flow("late", "02", 0, 70)],
+        );
+        assert_eq!(row(&app, "a").rate, Some(Rate { up: 0, down: 500 }));
+        // It came up while paused: it has a baseline by now.
+        assert_eq!(row(&app, "late").rate, Some(Rate { up: 0, down: 70 }));
+    }
+
+    #[test]
+    fn a_table_paused_before_its_first_frame_still_gets_that_frame() {
+        let (mut app, _rx) = app_without_controller();
+        app.update(Action::TogglePause);
+        feed(&mut app, vec![flow("a", "01", 0, 0)]);
+        assert_eq!(table_ids(&app), ["a"]);
+        feed(&mut app, vec![flow("a", "01", 0, 0), flow("b", "02", 0, 0)]);
+        assert_eq!(table_ids(&app), ["a"]);
+    }
+
+    #[tokio::test]
+    async fn new_connections_light_up_for_three_frames_except_in_the_first_frame() {
+        let (mut app, _rx) = app_without_controller();
+        let (a, b) = (flow("a", "01", 0, 0), flow("b", "02", 0, 0));
+        connect(&mut app, Stream::Connections);
+        feed(&mut app, vec![a.clone()]);
+        assert!(!is_fresh(&app, "a"));
+
+        feed(&mut app, vec![a.clone(), b.clone()]);
+        assert!(is_fresh(&app, "b") && !is_fresh(&app, "a"));
+        feed(&mut app, vec![a.clone(), b.clone()]);
+        assert!(is_fresh(&app, "b"));
+        feed(&mut app, vec![a.clone(), b.clone()]);
+        assert!(is_fresh(&app, "b"));
+        feed(&mut app, vec![a.clone(), b.clone()]);
+        assert!(!is_fresh(&app, "b"));
+
+        // After a reconnect the first frame is the whole table again.
+        disconnect(&mut app, Stream::Connections);
+        connect(&mut app, Stream::Connections);
+        feed(&mut app, vec![a, b]);
+        assert!(
+            rows(&app)
+                .iter()
+                .all(|row| !row.fresh && row.rate.is_none())
+        );
+    }
+
+    #[test]
+    fn half_a_page_is_half_the_rows_that_fit_the_terminal() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        let many: Vec<_> = (0..100)
+            .map(|n| flow(&format!("{n:03}"), "01", 0, 0))
+            .collect();
+        feed(&mut app, many);
+        // 20 rows: header, tabs, footer and the panel's borders and column
+        // header leave 12 table rows.
+        app.size = Size::new(100, 20);
+        app.update(Action::Cursor(Move::HalfDown));
+        assert_eq!(app.connections_view.cursor, 6);
+        app.size = Size::new(100, 40);
+        app.update(Action::Cursor(Move::HalfDown));
+        assert_eq!(app.connections_view.cursor, 6 + 16);
     }
 }
