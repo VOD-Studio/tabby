@@ -56,6 +56,34 @@ pub fn error(frame: &mut Frame, area: Rect, app: &App, title: &str, detail: Opti
     );
 }
 
+/// Centered notice for a list with nothing in it: why it is empty, and the
+/// keys that can change that.
+pub fn empty(frame: &mut Frame, area: Rect, app: &App, reason: &str, keys: &[(&str, &str)]) {
+    let theme = app.theme;
+    let mut hint = vec![];
+    for (index, (key, description)) in keys.iter().enumerate() {
+        if index > 0 {
+            hint.push(Span::raw("   "));
+        }
+        hint.push(Span::styled(
+            *key,
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ));
+        hint.push(Span::styled(
+            format!(" {description}"),
+            Style::new().fg(theme.muted),
+        ));
+    }
+    let lines = vec![
+        Line::styled(format!("○ {reason}"), Style::new().fg(theme.fg)),
+        Line::from(hint),
+    ];
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        centered_rows(area, 2),
+    );
+}
+
 /// The `rows` rows in the vertical middle of `area`.
 fn centered_rows(area: Rect, rows: u16) -> Rect {
     let [_, middle, _] = Layout::vertical([

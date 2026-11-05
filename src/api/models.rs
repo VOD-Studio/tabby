@@ -52,7 +52,7 @@ pub struct Tun {
 
 /// The name of the built-in group that lists every proxy and group, in
 /// configuration order.
-const GLOBAL: &str = "GLOBAL";
+pub const GLOBAL: &str = "GLOBAL";
 
 /// One entry of `GET /proxies`: a node, or a group when `all` is present.
 #[derive(Debug, Clone, Default, Deserialize)]

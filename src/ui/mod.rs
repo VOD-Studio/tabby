@@ -11,7 +11,7 @@ use ratatui::{
 };
 
 use crate::{
-    api::error::ApiError,
+    api::{error::ApiError, models::GLOBAL},
     app::{App, Overlay, Page},
 };
 
@@ -73,8 +73,24 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
         Page::Proxies => {
             if let Some(proxies) = ready(frame, area, app, app.proxies.as_ref(), "正在加载代理…")
             {
-                let groups = proxies.groups().count();
-                draw_unbuilt(frame, area, app, Some(format!("{groups} 个代理组")));
+                // GLOBAL only matters in global mode.
+                let global_mode =
+                    matches!(&app.configs, Some(Ok(configs)) if configs.mode == "global");
+                let groups = proxies
+                    .groups()
+                    .filter(|group| global_mode || group.name != GLOBAL)
+                    .count();
+                if groups == 0 {
+                    components::states::empty(
+                        frame,
+                        area,
+                        app,
+                        "配置里没有代理组",
+                        &[("r", "刷新")],
+                    );
+                } else {
+                    draw_unbuilt(frame, area, app, Some(format!("{groups} 个代理组")));
+                }
             }
         }
         _ => draw_unbuilt(frame, area, app, None),
