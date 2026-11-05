@@ -1208,15 +1208,27 @@ mod tests {
     }
 
     #[test]
-    fn failed_request_is_not_a_test_result() {
-        let (mut app, members) = app_with_proxies();
-        let before = delay_of(&app, &members[0]);
-        app.handle_msg(Msg::Delay {
-            name: members[0].clone(),
-            result: Err(http(500)),
-        });
-        assert_eq!(delay_of(&app, &members[0]), before);
-        assert_eq!(app.toasts.len(), 1);
+    fn request_errors_are_not_test_results() {
+        // 香港 01 has a result already: it must survive every one of these.
+        let node = "香港 01";
+        for err in [
+            http(500),
+            ApiError::NotFound,
+            ApiError::Unauthorized,
+            ApiError::Connect("refused".to_owned()),
+        ] {
+            let (mut app, _) = app_with_proxies();
+            let before = delay_of(&app, node);
+            assert!(matches!(before, Some(Delay::Millis(_))));
+            app.testing.insert(node.to_owned());
+            app.handle_msg(Msg::Delay {
+                name: node.to_owned(),
+                result: Err(err),
+            });
+            assert_eq!(delay_of(&app, node), before);
+            assert!(!app.testing.contains(node));
+            assert_eq!(app.toasts.len(), 1);
+        }
     }
 
     #[tokio::test]
@@ -1421,5 +1433,88 @@ mod tests {
         // Gone from the end of the grid: the last card is the nearest.
         app.handle_msg(fetched(2, true, reply(&nodes[..2])));
         assert_eq!(cursor_name(&app), "b");
+    }
+
+    #[test]
+    fn delay_sort_runs_fastest_then_timed_out_failed_untested() {
+        let mut app = app_with(reply(&[
+            ("untested-1", &[]),
+            ("failed-1", &[0]),
+            ("slow-a", &[300]),
+            ("timeout-1", &[]),
+            ("fast", &[20]),
+            ("failed-2", &[0]),
+            ("slow-b", &[300]),
+            ("timeout-2", &[]),
+            ("untested-2", &[]),
+        ]));
+        app.record_delay("timeout-1", Delay::Timeout);
+        app.record_delay("timeout-2", Delay::Timeout);
+        app.proxies_view.sort = Sort::Delay;
+        // Ties inside a class keep the configured order.
+        assert_eq!(
+            app.visible_nodes(),
+            [
+                "fast",
+                "slow-a",
+                "slow-b",
+                "timeout-1",
+                "timeout-2",
+                "failed-1",
+                "failed-2",
+                "untested-1",
+                "untested-2",
+            ]
+        );
+    }
+
+    #[test]
+    fn name_sort_compares_digit_runs_as_numbers() {
+        let mut app = app_with(reply(&[
+            ("香港 10", &[]),
+            ("香港 2", &[]),
+            ("香港 1", &[]),
+            ("香港 100", &[]),
+        ]));
+        app.proxies_view.sort = Sort::Name;
+        assert_eq!(
+            app.visible_nodes(),
+            ["香港 1", "香港 2", "香港 10", "香港 100"]
+        );
+    }
+
+    #[test]
+    fn name_sort_mixes_digits_and_text_by_lowercase_unicode() {
+        let mut app = app_with(reply(&[
+            ("node10", &[]),
+            ("Node2", &[]),
+            ("node", &[]),
+            ("10node", &[]),
+            ("2node", &[]),
+            ("a-1", &[]),
+            ("ab", &[]),
+            ("a1", &[]),
+        ]));
+        app.proxies_view.sort = Sort::Name;
+        // A digit run is only a number against another digit run; against
+        // anything else it is a plain character: `-` < digits < letters.
+        assert_eq!(
+            app.visible_nodes(),
+            [
+                "2node", "10node", "a-1", "a1", "ab", "node", "Node2", "node10"
+            ]
+        );
+    }
+
+    #[test]
+    fn name_sort_keeps_config_order_for_equal_numbers() {
+        let mut app = app_with(reply(&[
+            ("a1", &[]),
+            ("a01", &[]),
+            ("a001", &[]),
+            ("a0", &[]),
+        ]));
+        app.proxies_view.sort = Sort::Name;
+        assert_eq!(app.visible_nodes(), ["a0", "a1", "a01", "a001"]);
     }
 }
