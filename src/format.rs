@@ -78,7 +78,8 @@ fn cmp_numbers(a: &str, b: &str) -> Ordering {
     a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
 
-/// Units of a transfer rate, 1024 apart.
+/// Units of a transfer rate, 1024 apart. The only place unit names live:
+/// plain byte sizes use them without the `/s`.
 const RATE_UNITS: [&str; 4] = ["B/s", "KB/s", "MB/s", "GB/s"];
 
 /// A transfer rate as a number and its unit: `("1.0", "KB/s")`.
@@ -90,6 +91,13 @@ pub fn rate(bytes_per_second: u64) -> (String, &'static str) {
     (number, RATE_UNITS[unit])
 }
 
+/// A byte count as a number and its unit: `("1.8", "GB")`, `("1023", "B")`.
+/// Rounds and carries like [`rate`].
+pub fn bytes(count: u64) -> (String, &'static str) {
+    let (number, unit) = scale(count);
+    (number, unit_name(unit))
+}
+
 /// The largest unit `bytes` reaches, as its size in bytes and its name
 /// (`(1 << 20, "MB")`); anything under 1 KB is in bytes. Unlike [`rate`] this
 /// does not round up into the next unit: the axis labels of a chart count in
@@ -99,8 +107,12 @@ pub fn unit_for(bytes: u64) -> (u64, &'static str) {
         .rev()
         .find(|&index| bytes >> (10 * index) > 0)
         .unwrap_or(0);
-    let name = RATE_UNITS[index].trim_end_matches("/s");
-    (1 << (10 * index), name)
+    (1 << (10 * index), unit_name(index))
+}
+
+/// The name of unit `index` without the rate's `/s`.
+fn unit_name(index: usize) -> &'static str {
+    RATE_UNITS[index].trim_end_matches("/s")
 }
 
 /// Scales `bytes` down to the largest unit that keeps the number below 1024,
@@ -195,5 +207,24 @@ mod tests {
     fn gigabytes_do_not_roll_over_and_the_largest_rate_does_not_overflow() {
         assert_eq!(shown(2048 * 1024 * 1024 * 1024), "2048.0 GB/s");
         assert!(shown(u64::MAX).ends_with("GB/s"));
+    }
+
+    fn size(count: u64) -> String {
+        let (number, unit) = bytes(count);
+        format!("{number} {unit}")
+    }
+
+    #[test]
+    fn sizes_have_the_rates_numbers_without_the_per_second() {
+        assert_eq!(size(1023), "1023 B");
+        assert_eq!(size(1024), "1.0 KB");
+        // Rounding up to 1024 carries into the next unit, as it does for rates.
+        assert_eq!(size(1024 * 1024 - 51), "1.0 MB");
+        assert_eq!(size(1_954_000_000), "1.8 GB");
+        for count in [0, 1023, 1 << 10, 1 << 20, 1 << 30, u64::MAX] {
+            let (_, size_unit) = bytes(count);
+            let (_, rate_unit) = rate(count);
+            assert_eq!(format!("{size_unit}/s"), rate_unit, "{count}");
+        }
     }
 }

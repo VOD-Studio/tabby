@@ -6,6 +6,7 @@ use color_eyre::{
 };
 use futures_util::StreamExt;
 use reqwest::Url;
+use serde::Deserialize;
 use tokio::{
     net::TcpStream,
     sync::{mpsc, watch},
@@ -14,7 +15,10 @@ use tokio::{
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
-use super::{backoff, models::Traffic};
+use super::{
+    backoff,
+    models::{ConnectionSnapshot, Memory, Traffic},
+};
 use crate::app::Msg;
 
 /// How long one connection attempt, TLS and upgrade included, may take.
@@ -62,6 +66,8 @@ pub enum Event {
     /// attempts while down are not reported again.
     Disconnected,
     Traffic(Traffic),
+    Connections(ConnectionSnapshot),
+    Memory(Memory),
 }
 
 /// The WebSocket URL of `stream` on the controller at `base`.
@@ -207,18 +213,24 @@ async fn pump(stream: Stream, socket: &mut Socket, tx: &mpsc::Sender<Msg>) -> bo
 /// Reads a text frame. A frame that does not parse is logged and skipped:
 /// one odd frame is no reason to drop the connection.
 ///
-/// Only traffic is read so far; the other streams count as live for as long
-/// as they deliver, and their frames are not looked at.
+/// Log frames are not read yet; that stream counts as live for as long as it
+/// delivers.
 fn decode(stream: Stream, text: &str) -> Option<Event> {
     match stream {
-        Stream::Traffic => match serde_json::from_str(text) {
-            Ok(traffic) => Some(Event::Traffic(traffic)),
-            Err(err) => {
-                tracing::warn!(?stream, "unreadable frame: {err}");
-                None
-            }
-        },
-        Stream::Memory | Stream::Logs | Stream::Connections => None,
+        Stream::Traffic => parse(stream, text).map(Event::Traffic),
+        Stream::Connections => parse(stream, text).map(Event::Connections),
+        Stream::Memory => parse(stream, text).map(Event::Memory),
+        Stream::Logs => None,
+    }
+}
+
+fn parse<'a, T: Deserialize<'a>>(stream: Stream, text: &'a str) -> Option<T> {
+    match serde_json::from_str(text) {
+        Ok(frame) => Some(frame),
+        Err(err) => {
+            tracing::warn!(?stream, "unreadable frame: {err}");
+            None
+        }
     }
 }
 
@@ -303,6 +315,24 @@ mod tests {
     fn query_and_fragment_of_the_base_are_dropped() {
         let url = build("http://h:9090/?x=1#top", Some("k"), Stream::Traffic);
         assert_eq!(url.as_str(), "ws://h:9090/traffic?token=k");
+    }
+
+    #[test]
+    fn each_stream_decodes_its_own_frames() {
+        let connections = include_str!("../../tests/fixtures/mihomo_connections.json");
+        let memory = include_str!("../../tests/fixtures/mihomo_memory.json");
+        let Some(Event::Connections(snapshot)) = decode(Stream::Connections, connections) else {
+            panic!("connections frame not decoded");
+        };
+        assert_eq!(snapshot.stats().active, 5);
+        assert_eq!(
+            decode(Stream::Memory, memory),
+            Some(Event::Memory(Memory { inuse: 188_715_008 }))
+        );
+        // Logs are not read, and an unreadable frame is skipped, not fatal.
+        assert_eq!(decode(Stream::Logs, memory), None);
+        assert_eq!(decode(Stream::Connections, "not json"), None);
+        assert_eq!(decode(Stream::Memory, r#"{"inuse":"lots"}"#), None);
     }
 
     /// With the clock paused, sleeping costs no real time and `elapsed` is

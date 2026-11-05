@@ -21,6 +21,10 @@ pub struct Theme {
     pub c1: Color,
     /// Download, everywhere it is shown.
     pub c2: Color,
+    /// Open connections, everywhere they are shown.
+    pub c3: Color,
+    /// Memory, everywhere it is shown.
+    pub c4: Color,
     /// Cursor row background. A style rather than a color: the `terminal`
     /// theme has no background of its own to pick and inverts instead.
     pub surface: Style,
@@ -37,6 +41,8 @@ impl Theme {
         error: Color::Red,
         c1: Color::Magenta,
         c2: Color::Cyan,
+        c3: Color::LightRed,
+        c4: Color::LightCyan,
         surface: Style::new().add_modifier(Modifier::REVERSED),
     };
 
@@ -49,6 +55,8 @@ impl Theme {
         error: Color::Rgb(0xf7, 0x76, 0x8e),
         c1: Color::Rgb(0xbb, 0x9a, 0xf7),
         c2: Color::Rgb(0x7d, 0xcf, 0xff),
+        c3: Color::Rgb(0xff, 0x9e, 0x64),
+        c4: Color::Rgb(0x73, 0xda, 0xca),
         surface: Style::new().bg(Color::Rgb(0x29, 0x2e, 0x42)),
     };
 
@@ -61,6 +69,8 @@ impl Theme {
         error: Color::Rgb(0xf3, 0x8b, 0xa8),
         c1: Color::Rgb(0xcb, 0xa6, 0xf7),
         c2: Color::Rgb(0x89, 0xdc, 0xeb),
+        c3: Color::Rgb(0xfa, 0xb3, 0x87),
+        c4: Color::Rgb(0x94, 0xe2, 0xd5),
         surface: Style::new().bg(Color::Rgb(0x31, 0x32, 0x44)),
     };
 

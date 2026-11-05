@@ -2,15 +2,19 @@ use std::collections::VecDeque;
 
 use ratatui::{
     Frame,
-    layout::{Alignment, Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    layout::{Alignment, Constraint, Flex, Layout, Rect},
+    style::{Color, Modifier, Style},
     symbols::Marker,
     text::{Line, Span},
-    widgets::{Axis, Block, BorderType, Chart, Dataset, GraphType, Padding, Paragraph},
+    widgets::{
+        Axis, Block, BorderType, Chart, Dataset, GraphType, Padding, Paragraph, RenderDirection,
+        Sparkline,
+    },
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    api::models::{Configs, Mode, Traffic},
+    api::models::{Configs, ConnectionStats, CoreKind, Mode, Traffic},
     app::{App, TRAFFIC_HISTORY},
     format,
     ui::theme::Theme,
@@ -19,14 +23,35 @@ use crate::{
 /// Rows of the mode panel: two borders and a three-row pill.
 const MODE_PANEL_HEIGHT: u16 = 5;
 
-/// Draws the overview: the traffic chart on the left, the mode switch on the
-/// right.
+/// Rows of a stat card: two borders, then the label, the value, the subtitle
+/// and a two-row sparkline.
+const CARD_HEIGHT: u16 = 7;
+
+/// The terminal height from which the stat cards are drawn (plan §7.3).
+const CARDS_MIN_HEIGHT: u16 = 28;
+
+/// Placeholder for a value that has not arrived.
+const NO_VALUE: &str = "—";
+
+/// Draws the overview: the traffic chart on the left, the mode switch and
+/// the kernel info on the right, the stat cards along the bottom.
 pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
-    let [chart, side] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)]).areas(area);
+    let (main, cards) = if app.size.height >= CARDS_MIN_HEIGHT {
+        let [main, cards] =
+            Layout::vertical([Constraint::Fill(1), Constraint::Length(CARD_HEIGHT)]).areas(area);
+        (main, Some(cards))
+    } else {
+        (area, None)
+    };
+    let [chart, side] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)]).areas(main);
     render_traffic(frame, chart, app);
-    let [mode, _] =
+    let [mode, kernel] =
         Layout::vertical([Constraint::Length(MODE_PANEL_HEIGHT), Constraint::Fill(1)]).areas(side);
     render_mode(frame, mode, app.theme, configs);
+    render_kernel(frame, kernel, app, configs);
+    if let Some(cards) = cards {
+        render_cards(frame, cards, app);
+    }
 }
 
 fn panel(theme: Theme, title: Line<'static>) -> Block<'static> {
@@ -189,10 +214,229 @@ fn render_pill(frame: &mut Frame, area: Rect, theme: Theme, mode: Mode, current:
     );
 }
 
+/// The kernel panel: version and the settings people look up most.
+fn render_kernel(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
+    let theme = app.theme;
+    let block = panel(theme, title(theme, "内核", "")).padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let version = match &app.version {
+        Some(Ok(version)) => {
+            let core = match version.kind() {
+                CoreKind::Mihomo => "mihomo",
+                CoreKind::Clash => "Clash",
+            };
+            (format!("{core} {}", version.version), theme.fg)
+        }
+        _ => (NO_VALUE.to_owned(), theme.muted),
+    };
+    let port = if configs.mixed_port == 0 {
+        ("未启用".to_owned(), theme.muted)
+    } else {
+        (configs.mixed_port.to_string(), theme.fg)
+    };
+    let tun = match &configs.tun {
+        Some(tun) => switch(theme, tun.enable),
+        None => ("需要 mihomo".to_owned(), theme.muted),
+    };
+    let rows = [
+        ("版本", version),
+        ("混合端口", port),
+        ("TUN", tun),
+        ("局域网连接", switch(theme, configs.allow_lan)),
+    ];
+    let width = usize::from(inner.width);
+    let lines: Vec<Line> = rows
+        .into_iter()
+        .map(|(name, (value, color))| kernel_row(theme, width, name, &value, color))
+        .collect();
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn switch(theme: Theme, on: bool) -> (String, Color) {
+    if on {
+        ("● 开启".to_owned(), theme.success)
+    } else {
+        ("○ 关闭".to_owned(), theme.muted)
+    }
+}
+
+/// A name on the left and its value pushed against the right edge. A value
+/// too long for what the name leaves is cut.
+fn kernel_row(theme: Theme, width: usize, name: &str, value: &str, color: Color) -> Line<'static> {
+    let value = format::truncate(value, width.saturating_sub(name.width() + 1));
+    let gap = width.saturating_sub(name.width() + value.width());
+    Line::from(vec![
+        Span::styled(name.to_owned(), Style::new().fg(theme.muted)),
+        Span::raw(" ".repeat(gap)),
+        Span::styled(value, Style::new().fg(color)),
+    ])
+}
+
+/// What the main value of a stat card shows.
+enum Reading {
+    Bytes(u64),
+    Count(u64),
+    /// Nothing to show yet: a muted placeholder, and no sparkline.
+    Missing(&'static str),
+}
+
+struct Card<I> {
+    label: &'static str,
+    color: Color,
+    reading: Reading,
+    subtitle: String,
+    /// The sparkline's samples, oldest first.
+    samples: I,
+}
+
+/// Four equally wide cards: totals up and down, open connections, memory.
+fn render_cards(frame: &mut Frame, area: Rect, app: &App) {
+    let theme = app.theme;
+    let width = area.width.saturating_sub(3) / 4;
+    // Equal widths and one-column gaps; the up to three columns left over
+    // stay empty on the right.
+    let [upload, download, connections, memory] =
+        Layout::horizontal([Constraint::Length(width); 4])
+            .spacing(1)
+            .flex(Flex::Start)
+            .areas(area);
+
+    let stats = app.connections;
+    let total = |pick: fn(&ConnectionStats) -> u64| {
+        stats.map_or(Reading::Missing(NO_VALUE), |stats| {
+            Reading::Bytes(pick(&stats))
+        })
+    };
+    let since_start = "自内核启动";
+    render_card(
+        frame,
+        upload,
+        theme,
+        Card {
+            label: "上传总量",
+            color: theme.c1,
+            reading: total(|stats| stats.upload_total),
+            subtitle: since_start.to_owned(),
+            samples: app.traffic_history.iter().map(|traffic| traffic.up),
+        },
+    );
+    render_card(
+        frame,
+        download,
+        theme,
+        Card {
+            label: "下载总量",
+            color: theme.c2,
+            reading: total(|stats| stats.download_total),
+            subtitle: since_start.to_owned(),
+            samples: app.traffic_history.iter().map(|traffic| traffic.down),
+        },
+    );
+    render_card(
+        frame,
+        connections,
+        theme,
+        Card {
+            label: "活动连接",
+            color: theme.c3,
+            reading: stats.map_or(Reading::Missing(NO_VALUE), |stats| {
+                Reading::Count(stats.active)
+            }),
+            subtitle: stats.map_or_else(String::new, |stats| {
+                format!("TCP {} · UDP {}", stats.tcp, stats.udp)
+            }),
+            samples: app.connection_history.iter().copied(),
+        },
+    );
+    let clash = matches!(&app.version, Some(Ok(version)) if version.kind() == CoreKind::Clash);
+    let reading = if clash {
+        Reading::Missing("需要 mihomo")
+    } else {
+        app.memory
+            .map_or(Reading::Missing(NO_VALUE), Reading::Bytes)
+    };
+    render_card(
+        frame,
+        memory,
+        theme,
+        Card {
+            label: "内存占用",
+            color: theme.c4,
+            reading,
+            subtitle: "mihomo 进程".to_owned(),
+            samples: app.memory_history.iter().copied(),
+        },
+    );
+}
+
+fn render_card<I>(frame: &mut Frame, area: Rect, theme: Theme, card: Card<I>)
+where
+    I: DoubleEndedIterator<Item = u64>,
+{
+    let block = panel(theme, Line::default()).padding(Padding::horizontal(1));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let [label, value, subtitle, spark] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+    ])
+    .areas(inner);
+    let muted = Style::new().fg(theme.muted);
+    let fit = |text: &str| format::truncate(text, usize::from(inner.width));
+
+    frame.render_widget(Paragraph::new(Span::styled(fit(card.label), muted)), label);
+    let bold = Style::new().fg(card.color).add_modifier(Modifier::BOLD);
+    let value_line = match card.reading {
+        Reading::Bytes(count) => {
+            let (number, unit) = format::bytes(count);
+            Line::from(vec![
+                Span::styled(number, bold),
+                Span::raw(" "),
+                Span::styled(unit, muted),
+            ])
+        }
+        Reading::Count(count) => Line::styled(count.to_string(), bold),
+        Reading::Missing(text) => Line::styled(fit(text), muted),
+    };
+    let has_value = !matches!(card.reading, Reading::Missing(_));
+    frame.render_widget(Paragraph::new(value_line), value);
+    frame.render_widget(
+        Paragraph::new(Span::styled(fit(&card.subtitle), muted)),
+        subtitle,
+    );
+    if has_value {
+        render_sparkline(frame, spark, card.color, card.samples);
+    }
+}
+
+/// Newest sample in the last column, older ones to its left; a history
+/// shorter than the width leaves the left side empty, as the traffic chart
+/// does. Only the newest `area.width` samples can be drawn.
+fn render_sparkline(
+    frame: &mut Frame,
+    area: Rect,
+    color: Color,
+    samples: impl DoubleEndedIterator<Item = u64>,
+) {
+    let newest_first = samples.rev().take(usize::from(area.width));
+    let sparkline = Sparkline::default()
+        .direction(RenderDirection::RightToLeft)
+        .style(Style::new().fg(color))
+        .data(newest_first);
+    frame.render_widget(sparkline, area);
+}
+
 #[cfg(test)]
 #[allow(clippy::cast_precision_loss)]
 mod tests {
+    use ratatui::{Terminal, backend::TestBackend};
+
     use super::*;
+    use crate::config::ThemeName;
 
     const MB: u64 = 1 << 20;
 
@@ -279,5 +523,53 @@ mod tests {
         let history: VecDeque<Traffic> = (1..=3).map(|n| Traffic { up: n, down: 0 }).collect();
         let points = series(&history, |traffic| traffic.up);
         assert_eq!(points, [(57.0, 1.0), (58.0, 2.0), (59.0, 3.0)]);
+    }
+
+    /// The text of row 0 of a sparkline drawn into `width` columns.
+    fn spark(samples: Vec<u64>, width: u16) -> Vec<String> {
+        let mut terminal = Terminal::new(TestBackend::new(width, 1)).unwrap();
+        terminal
+            .draw(|frame| {
+                render_sparkline(frame, frame.area(), Color::Reset, samples.into_iter());
+            })
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        (0..width)
+            .map(|x| buffer[(x, 0)].symbol().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn a_short_sparkline_fills_from_the_right() {
+        let cells = spark(vec![4, 8], 5);
+        assert_eq!(&cells[..3], [" ", " ", " "]);
+        assert_ne!(cells[3], " ");
+        assert_eq!(cells[4], "█");
+    }
+
+    #[test]
+    fn a_long_sparkline_keeps_the_newest_samples() {
+        // Oldest first: the tallest sample is the newest.
+        let cells = spark((1..=10).collect(), 3);
+        assert_eq!(cells[2], "█");
+        assert!(cells[..2].iter().all(|cell| cell != " " && cell != "█"));
+    }
+
+    #[test]
+    fn a_kernel_row_never_outgrows_its_width() {
+        let theme = Theme::from(ThemeName::Terminal);
+        for value in [
+            "7890",
+            "● 开启",
+            "需要 mihomo",
+            "mihomo v1.19.33-with-a-long-suffix",
+        ] {
+            for width in 0..40 {
+                let line = kernel_row(theme, width, "局域网连接", value, theme.fg);
+                assert!(line.width() <= width.max(10), "{value:?} in {width}");
+            }
+        }
+        let line = kernel_row(theme, 20, "TUN", "● 开启", theme.fg);
+        assert_eq!(line.width(), 20);
     }
 }

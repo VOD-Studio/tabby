@@ -13,7 +13,10 @@ use crate::{
         backoff,
         client::ApiClient,
         error::ApiError,
-        models::{Configs, CoreKind, Delay, GLOBAL, Mode, Proxies, Proxy, Traffic, Version},
+        models::{
+            Configs, ConnectionStats, CoreKind, Delay, GLOBAL, Mode, Proxies, Proxy, Traffic,
+            Version,
+        },
         stream::{Event as StreamEvent, Stream, Streams},
     },
     config::Settings,
@@ -374,8 +377,16 @@ enum ModeSwitch {
     Refetching(u64),
 }
 
-/// Traffic samples kept for the chart: one per second of the last minute.
+/// Samples kept per chart or sparkline: one per second of the last minute.
 pub const TRAFFIC_HISTORY: usize = 60;
+
+/// Appends `sample`, dropping the oldest once [`TRAFFIC_HISTORY`] are kept.
+fn push_sample<T>(history: &mut VecDeque<T>, sample: T) {
+    if history.len() == TRAFFIC_HISTORY {
+        history.pop_front();
+    }
+    history.push_back(sample);
+}
 
 /// Application state. Only the main loop mutates it.
 #[derive(Debug)]
@@ -414,13 +425,25 @@ pub struct App {
     /// The latest [`TRAFFIC_HISTORY`] `/traffic` frames, oldest first; empty
     /// while that stream is down.
     pub traffic_history: VecDeque<Traffic>,
+    /// Counts of the latest `/connections` frame; `None` while that stream is
+    /// down.
+    pub connections: Option<ConnectionStats>,
+    /// Open connections over the last [`TRAFFIC_HISTORY`] frames, oldest
+    /// first; empty while that stream is down.
+    pub connection_history: VecDeque<u64>,
+    /// Bytes in use by the kernel, from the latest `/memory` frame; `None`
+    /// while that stream is down or has not reported yet. mihomo only.
+    pub memory: Option<u64>,
+    /// The last [`TRAFFIC_HISTORY`] `/memory` frames, oldest first; empty
+    /// while that stream is down.
+    pub memory_history: VecDeque<u64>,
     /// `Some` from the first failed `/version` probe until one succeeds.
     pub reconnect: Option<Reconnect>,
     /// Set by `r` until the next `/version` reply, which then reports success.
     refreshing: bool,
     should_quit: bool,
     /// The terminal size, from the start and every resize event.
-    size: Size,
+    pub size: Size,
     dirty: bool,
 }
 
@@ -456,6 +479,10 @@ impl App {
             links: Links::default(),
             traffic: None,
             traffic_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
+            connections: None,
+            connection_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
+            memory: None,
+            memory_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
             reconnect: None,
             refreshing: false,
             should_quit: false,
@@ -996,9 +1023,20 @@ impl App {
                 // Only a stream that was up can take the last one down; the
                 // first connection attempts at start-up are not an outage.
                 let was_up = self.links.up.remove(&stream);
-                if stream == Stream::Traffic {
-                    self.traffic = None;
-                    self.traffic_history.clear();
+                match stream {
+                    Stream::Traffic => {
+                        self.traffic = None;
+                        self.traffic_history.clear();
+                    }
+                    Stream::Connections => {
+                        self.connections = None;
+                        self.connection_history.clear();
+                    }
+                    Stream::Memory => {
+                        self.memory = None;
+                        self.memory_history.clear();
+                    }
+                    Stream::Logs => {}
                 }
                 if was_up && self.links.up.is_empty() {
                     self.links.outage = true;
@@ -1009,11 +1047,20 @@ impl App {
             }
             StreamEvent::Traffic(traffic) => {
                 self.traffic = Some(*traffic);
-                if self.traffic_history.len() == TRAFFIC_HISTORY {
-                    self.traffic_history.pop_front();
-                }
-                self.traffic_history.push_back(*traffic);
+                push_sample(&mut self.traffic_history, *traffic);
             }
+            StreamEvent::Connections(frame) => {
+                let stats = frame.stats();
+                self.connections = Some(stats);
+                push_sample(&mut self.connection_history, stats.active);
+            }
+            // The first frame after connecting reports 0: no process uses
+            // none, it is the kernel having sampled nothing yet.
+            StreamEvent::Memory(memory) if memory.inuse > 0 => {
+                self.memory = Some(memory.inuse);
+                push_sample(&mut self.memory_history, memory.inuse);
+            }
+            StreamEvent::Memory(_) => {}
         }
     }
 
@@ -1241,6 +1288,7 @@ fn failed_test(err: &ApiError) -> Option<Delay> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api::models::{Connection, ConnectionSnapshot, Memory};
 
     /// 10 cards, 3 per row: the last row holds only card 9.
     const LEN: usize = 10;
@@ -1840,23 +1888,56 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn traffic_history_keeps_the_newest_minute_and_clears_with_its_stream() {
+    async fn stream_histories_keep_the_newest_minute_and_clear_with_their_stream() {
         let (mut app, _rx) = app_without_controller();
-        connect(&mut app, Stream::Traffic);
-        for up in 0..70 {
-            let frame = Traffic { up, down: 0 };
+        for stream in [Stream::Traffic, Stream::Connections, Stream::Memory] {
+            connect(&mut app, stream);
+        }
+        for n in 0..70 {
+            let frame = Traffic { up: n, down: 0 };
             stream_event(&mut app, Stream::Traffic, StreamEvent::Traffic(frame));
+            let open = ConnectionSnapshot {
+                upload_total: 5,
+                download_total: 6,
+                connections: vec![Connection::default(); usize::try_from(n).unwrap()],
+            };
+            stream_event(
+                &mut app,
+                Stream::Connections,
+                StreamEvent::Connections(open),
+            );
+            // The first frame after connecting (n = 0) reports 0 before
+            // anything is sampled; it is not a reading.
+            let memory = Memory { inuse: n * 1000 };
+            stream_event(&mut app, Stream::Memory, StreamEvent::Memory(memory));
         }
         assert_eq!(app.traffic_history.len(), TRAFFIC_HISTORY);
         assert_eq!(app.traffic_history.front().unwrap().up, 10);
         assert_eq!(app.traffic_history.back().unwrap().up, 69);
+        assert_eq!(app.connection_history.len(), TRAFFIC_HISTORY);
+        assert_eq!(app.connection_history.front(), Some(&10));
+        assert_eq!(app.connection_history.back(), Some(&69));
+        assert_eq!(app.connections.unwrap().active, 69);
+        assert_eq!(app.connections.unwrap().upload_total, 5);
+        assert_eq!(app.memory_history.len(), TRAFFIC_HISTORY);
+        assert_eq!(app.memory_history.front(), Some(&10_000));
+        assert_eq!(app.memory, Some(69_000));
 
-        // Another stream going down leaves the chart alone.
+        // Another stream going down leaves the others alone.
         connect(&mut app, Stream::Logs);
         disconnect(&mut app, Stream::Logs);
         assert_eq!(app.traffic_history.len(), TRAFFIC_HISTORY);
+        assert_eq!(app.connection_history.len(), TRAFFIC_HISTORY);
+        assert_eq!(app.memory_history.len(), TRAFFIC_HISTORY);
+
         disconnect(&mut app, Stream::Traffic);
-        assert!(app.traffic_history.is_empty());
+        assert!(app.traffic.is_none() && app.traffic_history.is_empty());
+        assert!(app.connections.is_some() && app.memory.is_some());
+        disconnect(&mut app, Stream::Memory);
+        assert!(app.memory.is_none() && app.memory_history.is_empty());
+        assert!(app.connections.is_some());
+        disconnect(&mut app, Stream::Connections);
+        assert!(app.connections.is_none() && app.connection_history.is_empty());
     }
 
     fn press(key: char, page: Page, typing: bool) -> Option<Action> {

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 
 /// Which kernel is behind the controller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,6 +113,83 @@ pub struct Tun {
 pub struct Traffic {
     pub up: u64,
     pub down: u64,
+}
+
+/// One `/connections` frame, also the reply of `GET /connections`: the
+/// totals since the kernel started and the connections open right now.
+///
+/// Only what the stat cards need is read; the connections page adds the rest.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConnectionSnapshot {
+    pub upload_total: u64,
+    pub download_total: u64,
+    /// mihomo sends `null` rather than `[]` when nothing is open.
+    #[serde(deserialize_with = "null_as_default")]
+    pub connections: Vec<Connection>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Connection {
+    pub metadata: Metadata,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Metadata {
+    /// `tcp` or `udp`.
+    pub network: String,
+}
+
+/// What the stat cards keep of a [`ConnectionSnapshot`] frame: counts, not the
+/// connections themselves.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConnectionStats {
+    pub upload_total: u64,
+    pub download_total: u64,
+    /// Open connections, whatever their network.
+    pub active: u64,
+    pub tcp: u64,
+    pub udp: u64,
+}
+
+impl ConnectionSnapshot {
+    pub fn stats(&self) -> ConnectionStats {
+        let mut stats = ConnectionStats {
+            upload_total: self.upload_total,
+            download_total: self.download_total,
+            ..ConnectionStats::default()
+        };
+        for connection in &self.connections {
+            stats.active += 1;
+            let network = &connection.metadata.network;
+            if network.eq_ignore_ascii_case("tcp") {
+                stats.tcp += 1;
+            } else if network.eq_ignore_ascii_case("udp") {
+                stats.udp += 1;
+            }
+        }
+        stats
+    }
+}
+
+/// One `/memory` frame. mihomo only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Memory {
+    /// Bytes the kernel process uses; the first frame after connecting is 0.
+    pub inuse: u64,
+}
+
+/// `#[serde(default)]` covers a missing field but not an explicit `null`;
+/// this reads `null` as the default too.
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 /// The name of the built-in group that lists every proxy and group, in
@@ -331,6 +408,65 @@ mod tests {
         assert_eq!(frame, Traffic { up: 0, down: 7 });
         let frame: Traffic = serde_json::from_str("{}").unwrap();
         assert_eq!(frame, Traffic::default());
+    }
+
+    #[test]
+    fn counts_the_connections_of_a_mihomo_snapshot_by_network() {
+        let snapshot: ConnectionSnapshot =
+            serde_json::from_str(include_str!("../../tests/fixtures/mihomo_connections.json"))
+                .unwrap();
+        assert_eq!(
+            snapshot.stats(),
+            ConnectionStats {
+                upload_total: 493_862_931,
+                download_total: 1_970_947_638,
+                active: 5,
+                tcp: 4,
+                udp: 1,
+            }
+        );
+    }
+
+    #[test]
+    fn a_snapshot_without_connections_counts_none() {
+        // mihomo sends `null` when nothing is open; `[]` and no field at all
+        // mean the same.
+        for json in [
+            r#"{"uploadTotal":5,"downloadTotal":7,"connections":null}"#,
+            r#"{"uploadTotal":5,"downloadTotal":7,"connections":[]}"#,
+            r#"{"uploadTotal":5,"downloadTotal":7}"#,
+        ] {
+            let stats = serde_json::from_str::<ConnectionSnapshot>(json)
+                .unwrap()
+                .stats();
+            assert_eq!(
+                stats,
+                ConnectionStats {
+                    upload_total: 5,
+                    download_total: 7,
+                    ..ConnectionStats::default()
+                },
+                "{json}"
+            );
+        }
+    }
+
+    #[test]
+    fn connections_without_a_known_network_count_as_active_only() {
+        let json = r#"{"connections":[{"metadata":{"network":"TCP"}},{"metadata":{}},{}]}"#;
+        let stats = serde_json::from_str::<ConnectionSnapshot>(json)
+            .unwrap()
+            .stats();
+        assert_eq!((stats.active, stats.tcp, stats.udp), (3, 1, 0));
+    }
+
+    #[test]
+    fn parses_a_memory_frame() {
+        let frame: Memory =
+            serde_json::from_str(include_str!("../../tests/fixtures/mihomo_memory.json")).unwrap();
+        assert_eq!(frame, Memory { inuse: 188_715_008 });
+        let frame: Memory = serde_json::from_str("{}").unwrap();
+        assert_eq!(frame, Memory::default());
     }
 
     #[test]
