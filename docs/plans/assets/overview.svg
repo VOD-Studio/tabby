@@ -1,0 +1,47 @@
+<svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, monospace" font-size="13" xml:space="preserve" style="white-space:pre">
+<rect x="1" y="1" width="958" height="558" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<text x="20" y="31" font-size="15" font-weight="bold" fill="#7aa2f7">◆ tabby</text>
+<rect x="98" y="17" width="128" height="20" rx="10" fill="none" stroke="#3b4261"/>
+<text x="162" y="31" text-anchor="middle" font-size="12" fill="#737aa2">mihomo v1.19.15</text>
+<rect x="234" y="17" width="52" height="20" rx="10" fill="#7aa2f7"/>
+<text x="260" y="31" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a1b26">RULE</text>
+<text x="940" y="31" text-anchor="end"><tspan fill="#bb9af7">↑ 1.2 MB/s</tspan><tspan fill="#737aa2">  │  </tspan><tspan fill="#7dcfff">↓ 8.4 MB/s</tspan><tspan fill="#737aa2">  │  </tspan><tspan fill="#9ece6a">●</tspan><tspan fill="#c0caf5"> local</tspan></text>
+<text x="24" y="62" font-weight="bold" fill="#7aa2f7">1 概览</text>
+<line x1="20" y1="70" x2="70" y2="70" stroke="#7aa2f7" stroke-width="2"/>
+<text x="96" y="62" fill="#737aa2">2 代理</text>
+<text x="168" y="62" fill="#737aa2">3 Providers</text>
+<text x="272" y="62" fill="#737aa2">4 规则</text>
+<text x="344" y="62" fill="#737aa2">5 连接</text>
+<text x="416" y="62" fill="#737aa2">6 日志</text>
+<text x="488" y="62" fill="#737aa2">7 设置</text>
+<line x1="20" y1="74" x2="940" y2="74" stroke="#3b4261"/>
+<rect x="20" y="88" width="600" height="260" rx="8" fill="none" stroke="#3b4261"/>
+<text x="36" y="112" font-weight="bold" fill="#c0caf5">实时流量<tspan font-weight="normal" fill="#737aa2"> · 最近 60 秒</tspan></text>
+<text x="604" y="112" text-anchor="end"><tspan fill="#bb9af7">● 上传</tspan>  <tspan fill="#7dcfff">● 下载</tspan></text>
+<g stroke="#3b4261" stroke-dasharray="3 4"><line x1="70" y1="130" x2="600" y2="130"/><line x1="70" y1="180" x2="600" y2="180"/><line x1="70" y1="230" x2="600" y2="230"/><line x1="70" y1="280" x2="600" y2="280"/></g>
+<line x1="70" y1="330" x2="600" y2="330" stroke="#3b4261"/>
+<g font-size="11" fill="#737aa2" text-anchor="end"><text x="62" y="134">12M</text><text x="62" y="184">9M</text><text x="62" y="234">6M</text><text x="62" y="284">3M</text><text x="62" y="334">0</text></g>
+<polygon points="70,300 105,284 140,292 175,262 210,236 245,248 280,214 315,188 350,204 385,176 420,194 455,168 490,186 525,206 560,192 595,178 595,330 70,330" fill="#7dcfff" fill-opacity="0.12"/>
+<polyline points="70,300 105,284 140,292 175,262 210,236 245,248 280,214 315,188 350,204 385,176 420,194 455,168 490,186 525,206 560,192 595,178" fill="none" stroke="#7dcfff" stroke-width="2"/>
+<polyline points="70,318 105,314 140,316 175,310 210,306 245,311 280,302 315,298 350,304 385,299 420,305 455,300 490,302 525,308 560,304 595,301" fill="none" stroke="#bb9af7" stroke-width="2"/>
+<circle cx="595" cy="178" r="3.5" fill="#7dcfff"/><circle cx="595" cy="301" r="3.5" fill="#bb9af7"/>
+<rect x="640" y="88" width="300" height="100" rx="8" fill="none" stroke="#3b4261"/>
+<text x="656" y="112" font-weight="bold" fill="#c0caf5">代理模式<tspan font-weight="normal" fill="#737aa2">  m 切换</tspan></text>
+<rect x="656" y="128" width="88" height="36" rx="6" fill="#7aa2f7"/>
+<text x="700" y="151" text-anchor="middle" font-weight="bold" fill="#1a1b26">规则</text>
+<rect x="750" y="128" width="88" height="36" rx="6" fill="none" stroke="#3b4261"/>
+<text x="794" y="151" text-anchor="middle" fill="#737aa2">全局</text>
+<rect x="844" y="128" width="80" height="36" rx="6" fill="none" stroke="#3b4261"/>
+<text x="884" y="151" text-anchor="middle" fill="#737aa2">直连</text>
+<rect x="640" y="200" width="300" height="148" rx="8" fill="none" stroke="#3b4261"/>
+<text x="656" y="226" font-weight="bold" fill="#c0caf5">内核</text>
+<g fill="#737aa2"><text x="656" y="254">版本</text><text x="656" y="278">混合端口</text><text x="656" y="302">TUN</text><text x="656" y="326">局域网连接</text></g>
+<g text-anchor="end"><text x="924" y="254" fill="#c0caf5">mihomo v1.19.15</text><text x="924" y="278" fill="#c0caf5">7890</text><text x="924" y="302" fill="#9ece6a">● 开启</text><text x="924" y="326" fill="#737aa2">○ 关闭</text></g>
+<g fill="none" stroke="#3b4261"><rect x="20" y="362" width="221" height="136" rx="8"/><rect x="253" y="362" width="221" height="136" rx="8"/><rect x="486" y="362" width="221" height="136" rx="8"/><rect x="719" y="362" width="221" height="136" rx="8"/></g>
+<g fill="#737aa2"><text x="36" y="390">上传总量</text><text x="269" y="390">下载总量</text><text x="502" y="390">活动连接</text><text x="735" y="390">内存占用</text></g>
+<g font-size="22" font-weight="bold"><text x="36" y="424" fill="#bb9af7">1.82 <tspan font-size="13" fill="#737aa2">GB</tspan></text><text x="269" y="424" fill="#7dcfff">24.6 <tspan font-size="13" fill="#737aa2">GB</tspan></text><text x="502" y="424" fill="#ff9e64">137</text><text x="735" y="424" fill="#73daca">86.4 <tspan font-size="13" fill="#737aa2">MB</tspan></text></g>
+<g font-size="12" fill="#737aa2"><text x="36" y="448">本次会话</text><text x="269" y="448">本次会话</text><text x="502" y="448">TCP 129 · UDP 8</text><text x="735" y="448">mihomo 进程</text></g>
+<g fill="none" stroke-width="1.5"><polyline stroke="#bb9af7" points="36,480 55,476 74,478 93,472 112,474 131,468 150,471 169,466 188,470 207,467 226,464"/><polyline stroke="#7dcfff" points="269,478 288,480 307,474 326,476 345,470 364,472 383,468 402,471 421,466 440,468 459,464"/><polyline stroke="#ff9e64" points="502,472 521,474 540,470 559,476 578,471 597,473 616,469 635,472 654,468 673,471 692,470"/><polyline stroke="#73daca" points="735,476 754,476 773,475 792,475 811,474 830,474 849,474 868,473 887,473 906,473 925,472"/></g>
+<line x1="20" y1="520" x2="940" y2="520" stroke="#3b4261"/>
+<text x="20" y="543" font-size="12"><tspan font-weight="bold" fill="#7aa2f7">1-7</tspan><tspan fill="#737aa2"> 切换页面   </tspan><tspan font-weight="bold" fill="#7aa2f7">m</tspan><tspan fill="#737aa2"> 切换模式   </tspan><tspan font-weight="bold" fill="#7aa2f7">r</tspan><tspan fill="#737aa2"> 刷新   </tspan><tspan font-weight="bold" fill="#7aa2f7">P</tspan><tspan fill="#737aa2"> 切换配置   </tspan><tspan font-weight="bold" fill="#7aa2f7">?</tspan><tspan fill="#737aa2"> 帮助   </tspan><tspan font-weight="bold" fill="#7aa2f7">q</tspan><tspan fill="#737aa2"> 退出</tspan></text>
+</svg>

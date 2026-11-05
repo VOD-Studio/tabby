@@ -1,0 +1,134 @@
+<svg viewBox="0 0 960 560" xmlns="http://www.w3.org/2000/svg" font-family="JetBrains Mono, monospace" font-size="13" xml:space="preserve" style="white-space:pre">
+<rect x="1" y="1" width="958" height="558" rx="10" fill="#1a1b26" stroke="#3b4261"/>
+<text x="20" y="31" font-size="15" font-weight="bold" fill="#7aa2f7">◆ tabby</text>
+<rect x="98" y="17" width="128" height="20" rx="10" fill="none" stroke="#3b4261"/>
+<text x="162" y="31" text-anchor="middle" font-size="12" fill="#737aa2">mihomo v1.19.15</text>
+<rect x="234" y="17" width="52" height="20" rx="10" fill="#7aa2f7"/>
+<text x="260" y="31" text-anchor="middle" font-size="12" font-weight="bold" fill="#1a1b26">RULE</text>
+<text x="940" y="31" text-anchor="end"><tspan fill="#bb9af7">↑ 1.2 MB/s</tspan><tspan fill="#737aa2">  │  </tspan><tspan fill="#7dcfff">↓ 8.4 MB/s</tspan><tspan fill="#737aa2">  │  </tspan><tspan fill="#9ece6a">●</tspan><tspan fill="#c0caf5"> local</tspan></text>
+<text x="24" y="62" fill="#737aa2">1 概览</text>
+<text x="96" y="62" font-weight="bold" fill="#7aa2f7">2 代理</text>
+<line x1="92" y1="70" x2="142" y2="70" stroke="#7aa2f7" stroke-width="2"/>
+<text x="168" y="62" fill="#737aa2">3 Providers</text>
+<text x="272" y="62" fill="#737aa2">4 规则</text>
+<text x="344" y="62" fill="#737aa2">5 连接</text>
+<text x="416" y="62" fill="#737aa2">6 日志</text>
+<text x="488" y="62" fill="#737aa2">7 设置</text>
+<line x1="20" y1="74" x2="940" y2="74" stroke="#3b4261"/>
+<rect x="20" y="88" width="250" height="422" rx="8" fill="none" stroke="#7aa2f7" stroke-width="1.5"/>
+<text x="36" y="112" font-weight="bold" fill="#7aa2f7">代理组<tspan font-weight="normal" fill="#737aa2">  6</tspan></text>
+<rect x="28" y="128" width="234" height="44" rx="6" fill="#292e42"/>
+<rect x="28" y="128" width="3" height="44" fill="#7aa2f7"/>
+<text x="42" y="147" font-weight="bold" fill="#c0caf5">节点选择</text>
+<text x="42" y="164" font-size="12" fill="#7aa2f7">→ 香港 01</text>
+<text x="254" y="147" font-size="11" text-anchor="end" fill="#737aa2">SEL</text>
+<text x="42" y="199" fill="#c0caf5">自动选择</text>
+<text x="42" y="216" font-size="12" fill="#737aa2">→ 日本 02 · <tspan fill="#9ece6a">64 ms</tspan></text>
+<text x="254" y="199" font-size="11" text-anchor="end" fill="#737aa2">URL</text>
+<text x="42" y="251" fill="#c0caf5">故障转移</text>
+<text x="42" y="268" font-size="12" fill="#737aa2">→ 香港 01</text>
+<text x="254" y="251" font-size="11" text-anchor="end" fill="#737aa2">FB</text>
+<text x="42" y="303" fill="#c0caf5">流媒体</text>
+<text x="42" y="320" font-size="12" fill="#737aa2">→ 新加坡 03</text>
+<text x="254" y="303" font-size="11" text-anchor="end" fill="#737aa2">SEL</text>
+<text x="42" y="355" fill="#c0caf5">AI 服务</text>
+<text x="42" y="372" font-size="12" fill="#737aa2">→ 美国 01</text>
+<text x="254" y="355" font-size="11" text-anchor="end" fill="#737aa2">SEL</text>
+<text x="42" y="407" fill="#c0caf5">漏网之鱼</text>
+<text x="42" y="424" font-size="12" fill="#737aa2">→ 节点选择</text>
+<text x="254" y="407" font-size="11" text-anchor="end" fill="#737aa2">SEL</text>
+<rect x="282" y="88" width="658" height="422" rx="8" fill="none" stroke="#3b4261"/>
+<text x="298" y="112" font-weight="bold" fill="#c0caf5">节点选择<tspan font-weight="normal" fill="#737aa2">  Selector · 24 个节点 · 按延迟 ↑</tspan></text>
+<text x="924" y="112" text-anchor="end" font-size="12" fill="#737aa2">1–18 / 24 ▾</text>
+<rect x="298" y="128" width="202" height="52" rx="6" fill="none" stroke="#7aa2f7" stroke-width="2"/>
+<text x="310" y="149" font-weight="bold" fill="#c0caf5">香港 01</text>
+<text x="488" y="149" text-anchor="end" font-weight="bold" fill="#7aa2f7">✓</text>
+<text x="310" y="168" font-size="12" fill="#737aa2">Trojan · UDP</text>
+<text x="488" y="168" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">48 ms</text>
+<rect x="310" y="173" width="17" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="510" y="128" width="202" height="52" rx="6" fill="#292e42"/>
+<text x="522" y="149" fill="#c0caf5">香港 02</text>
+<text x="522" y="168" font-size="12" fill="#737aa2">VLESS · Reality</text>
+<text x="700" y="168" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">62 ms</text>
+<rect x="522" y="173" width="22" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="722" y="128" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="734" y="149" fill="#c0caf5">日本 01</text>
+<text x="734" y="168" font-size="12" fill="#737aa2">Hysteria2</text>
+<text x="912" y="168" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">75 ms</text>
+<rect x="734" y="173" width="27" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="298" y="190" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="310" y="211" fill="#c0caf5">日本 02</text>
+<text x="310" y="230" font-size="12" fill="#737aa2">VLESS · Reality</text>
+<text x="488" y="230" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">88 ms</text>
+<rect x="310" y="235" width="31" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="510" y="190" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="522" y="211" fill="#c0caf5">香港 03</text>
+<text x="522" y="230" font-size="12" fill="#737aa2">Trojan · UDP</text>
+<text x="700" y="230" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">104 ms</text>
+<rect x="522" y="235" width="37" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="722" y="190" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="734" y="211" fill="#c0caf5">新加坡 01</text>
+<text x="734" y="230" font-size="12" fill="#737aa2">Trojan</text>
+<text x="912" y="230" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">132 ms</text>
+<rect x="734" y="235" width="47" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="298" y="252" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="310" y="273" fill="#c0caf5">新加坡 03</text>
+<text x="310" y="292" font-size="12" fill="#737aa2">TUIC</text>
+<text x="488" y="292" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">156 ms</text>
+<rect x="310" y="297" width="56" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="510" y="252" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="522" y="273" fill="#c0caf5">台湾 01</text>
+<text x="522" y="292" font-size="12" fill="#737aa2">Shadowsocks</text>
+<text x="700" y="292" text-anchor="end" font-size="12" font-weight="bold" fill="#9ece6a">188 ms</text>
+<rect x="522" y="297" width="67" height="2" fill="#9ece6a" opacity="0.8"/>
+<rect x="722" y="252" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="734" y="273" fill="#c0caf5">台湾 02</text>
+<text x="734" y="292" font-size="12" fill="#737aa2">Shadowsocks</text>
+<text x="912" y="292" text-anchor="end" font-size="12" font-weight="bold" fill="#e0af68">214 ms</text>
+<rect x="734" y="297" width="76" height="2" fill="#e0af68" opacity="0.8"/>
+<rect x="298" y="314" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="310" y="335" fill="#c0caf5">美国 01</text>
+<text x="310" y="354" font-size="12" fill="#737aa2">VLESS · Reality</text>
+<text x="488" y="354" text-anchor="end" font-size="12" font-weight="bold" fill="#e0af68">238 ms</text>
+<rect x="310" y="359" width="85" height="2" fill="#e0af68" opacity="0.8"/>
+<rect x="510" y="314" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="522" y="335" fill="#c0caf5">美国 02</text>
+<text x="522" y="354" font-size="12" fill="#737aa2">Hysteria2</text>
+<text x="700" y="354" text-anchor="end" font-size="12" font-weight="bold" fill="#e0af68">312 ms</text>
+<rect x="522" y="359" width="111" height="2" fill="#e0af68" opacity="0.8"/>
+<rect x="722" y="314" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="734" y="335" fill="#c0caf5">韩国 01</text>
+<text x="734" y="354" font-size="12" fill="#737aa2">Trojan</text>
+<text x="912" y="354" text-anchor="end" font-size="12" font-weight="bold" fill="#e0af68">356 ms</text>
+<rect x="734" y="359" width="127" height="2" fill="#e0af68" opacity="0.8"/>
+<rect x="298" y="376" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="310" y="397" fill="#c0caf5">英国 01</text>
+<text x="310" y="416" font-size="12" fill="#737aa2">Shadowsocks</text>
+<text x="488" y="416" text-anchor="end" font-size="12" font-weight="bold" fill="#e0af68">486 ms</text>
+<rect x="310" y="421" width="173" height="2" fill="#e0af68" opacity="0.8"/>
+<rect x="510" y="376" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="522" y="397" fill="#c0caf5">德国 01</text>
+<text x="522" y="416" font-size="12" fill="#737aa2">Trojan</text>
+<text x="700" y="416" text-anchor="end" font-size="12" font-weight="bold" fill="#f7768e">612 ms</text>
+<rect x="522" y="421" width="178" height="2" fill="#f7768e" opacity="0.8"/>
+<rect x="722" y="376" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="734" y="397" fill="#c0caf5">荷兰 01</text>
+<text x="734" y="416" font-size="12" fill="#737aa2">VMess</text>
+<text x="912" y="416" text-anchor="end" font-size="12" fill="#737aa2">⠋ 测试中</text>
+<rect x="298" y="438" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="310" y="459" fill="#c0caf5">法国 01</text>
+<text x="310" y="478" font-size="12" fill="#737aa2">Trojan</text>
+<text x="488" y="478" text-anchor="end" font-size="12" fill="#737aa2">⠙ 测试中</text>
+<rect x="510" y="438" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="522" y="459" fill="#c0caf5">加拿大 01</text>
+<text x="522" y="478" font-size="12" fill="#737aa2">VMess</text>
+<text x="700" y="478" text-anchor="end" font-size="12" font-weight="bold" fill="#f7768e">超时</text>
+<rect x="722" y="438" width="202" height="52" rx="6" fill="none" stroke="#3b4261"/>
+<text x="734" y="459" fill="#c0caf5">澳洲 01</text>
+<text x="734" y="478" font-size="12" fill="#737aa2">Shadowsocks</text>
+<text x="912" y="478" text-anchor="end" font-size="12" font-weight="bold" fill="#f7768e">超时</text>
+<rect x="716" y="42" width="224" height="26" rx="6" fill="#1a1b26" stroke="#9ece6a"/>
+<text x="730" y="60" fill="#9ece6a">✓ 已切换到 香港 01</text>
+<line x1="20" y1="520" x2="940" y2="520" stroke="#3b4261"/>
+<text x="20" y="543" font-size="12"><tspan font-weight="bold" fill="#7aa2f7">Enter</tspan><tspan fill="#737aa2"> 选择   </tspan><tspan font-weight="bold" fill="#7aa2f7">t</tspan><tspan fill="#737aa2"> 测速   </tspan><tspan font-weight="bold" fill="#7aa2f7">T</tspan><tspan fill="#737aa2"> 整组测速   </tspan><tspan font-weight="bold" fill="#7aa2f7">s</tspan><tspan fill="#737aa2"> 排序   </tspan><tspan font-weight="bold" fill="#7aa2f7">/</tspan><tspan fill="#737aa2"> 过滤   </tspan><tspan font-weight="bold" fill="#7aa2f7">h/l</tspan><tspan fill="#737aa2"> 切换面板   </tspan><tspan font-weight="bold" fill="#7aa2f7">?</tspan><tspan fill="#737aa2"> 帮助   </tspan><tspan font-weight="bold" fill="#7aa2f7">q</tspan><tspan fill="#737aa2"> 退出</tspan></text>
+</svg>
