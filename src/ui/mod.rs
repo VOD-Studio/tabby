@@ -13,12 +13,33 @@ pub mod theme;
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
+    style::{Modifier, Style},
+    text::Line,
+    widgets::{Paragraph, Wrap},
 };
 
 use crate::{
     api::error::ApiError,
     app::{App, Overlay, Page},
 };
+
+/// Below this many columns the proxies page folds its group list into a
+/// picker above the grid and the tabs show only their numbers (plan §7.3).
+pub const NARROW_WIDTH: u16 = 100;
+
+/// Below this many columns the connections table drops two columns, the
+/// rules table's number column shrinks and the help is one column (plan
+/// §7.3).
+pub const COMPACT_WIDTH: u16 = 70;
+
+/// The smallest terminal tabby draws into; below it only says so.
+pub const MIN_WIDTH: u16 = 50;
+pub const MIN_HEIGHT: u16 = 15;
+
+/// Whether a terminal of `screen` is below [`MIN_WIDTH`] × [`MIN_HEIGHT`].
+pub fn too_small(screen: Rect) -> bool {
+    screen.width < MIN_WIDTH || screen.height < MIN_HEIGHT
+}
 
 /// The bands the screen is split into. Drawing and cursor paging both read
 /// this, so the app's idea of what fits is what is drawn.
@@ -57,6 +78,10 @@ pub fn regions(screen: Rect, reconnecting: bool) -> Regions {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    if too_small(frame.area()) {
+        draw_too_small(frame, app);
+        return;
+    }
     let regions = regions(frame.area(), app.reconnect.is_some());
     components::header::render(frame, regions.header, app);
     components::tabs::render(frame, regions.tabs, app);
@@ -70,6 +95,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Some(Overlay::Connection) => connections::render_detail(frame, frame.area(), app),
         Some(Overlay::Profiles) => components::profiles::render(frame, frame.area(), app),
         Some(Overlay::Confirm) => components::confirm::render(frame, frame.area(), app),
+        Some(Overlay::Groups) => proxies::render_picker(frame, regions.body, app),
         None => {}
     }
     // Below the header row, over whatever lies underneath.
@@ -80,6 +106,39 @@ pub fn draw(frame: &mut Frame, app: &App) {
         ..screen
     };
     components::toast::render(frame, toasts, app);
+}
+
+/// The whole screen when it is too small to draw into: what it is and what
+/// it needs to be, in the middle.
+fn draw_too_small(frame: &mut Frame, app: &App) {
+    let screen = frame.area();
+    let lines = vec![
+        Line::styled(
+            "终端尺寸过小",
+            Style::new()
+                .fg(app.theme.warning)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Line::styled(
+            format!(
+                "当前 {}×{}，至少需要 {MIN_WIDTH}×{MIN_HEIGHT}",
+                screen.width, screen.height
+            ),
+            Style::new().fg(app.theme.muted),
+        ),
+    ];
+    // Lines wider than the screen wrap; a rough count is enough to center.
+    let width = usize::from(screen.width.max(1));
+    let rows: usize = lines.iter().map(|line| line.width().div_ceil(width)).sum();
+    let height = u16::try_from(rows).unwrap_or(u16::MAX);
+    let paragraph = Paragraph::new(lines).centered().wrap(Wrap { trim: true });
+    let [_, middle, _] = Layout::vertical([
+        Constraint::Fill(1),
+        Constraint::Length(height),
+        Constraint::Fill(1),
+    ])
+    .areas(screen);
+    frame.render_widget(paragraph, middle);
 }
 
 pub fn page_title(page: Page) -> &'static str {

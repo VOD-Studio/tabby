@@ -8,7 +8,15 @@ use ratatui::{
 use tui_input::Input;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Confirm, Gate, Overlay, Page, Pane, Setting};
+use crate::{
+    app::{App, Confirm, Gate, Overlay, Page, Pane, Setting},
+    ui::proxies,
+};
+
+/// Between two hints.
+const SEPARATOR: &str = "   ";
+/// Stands in for the hints left out, before the ones always shown.
+const MORE: &str = "…";
 
 /// One entry of the key bar. A disabled one is shown dimmed: the key exists
 /// but the connected kernel cannot do it.
@@ -26,7 +34,8 @@ const fn hint(key: &'static str, description: &'static str) -> Hint {
     }
 }
 
-/// Keys while the help overlay is open.
+/// Keys while the help overlay is open. When it scrolls it covers this bar
+/// and says so in its title.
 fn help_hints() -> Vec<Hint> {
     vec![hint("Esc/?", "关闭帮助"), hint("q", "退出")]
 }
@@ -55,6 +64,16 @@ fn profile_hints(app: &App) -> Vec<Hint> {
     ]
 }
 
+/// Keys while the group picker of a narrow proxies page is open.
+fn picker_hints() -> Vec<Hint> {
+    vec![
+        hint("Enter", "选择"),
+        hint("j/k", "移动"),
+        hint("Esc", "关闭"),
+        hint("q", "退出"),
+    ]
+}
+
 /// Keys while a port is being typed on the settings page.
 fn port_hints() -> Vec<Hint> {
     vec![hint("Enter", "确定"), hint("Esc", "取消")]
@@ -64,8 +83,17 @@ fn port_hints() -> Vec<Hint> {
 fn page_hints(app: &App) -> Vec<Hint> {
     let mut hints = match app.page {
         Page::Proxies => {
+            let stacked = proxies::stacked(app.size.width);
+            let groups = app.proxies_view.focus == Pane::Groups;
             let mut hints = vec![
-                hint("Enter", "选择"),
+                hint(
+                    "Enter",
+                    if stacked && groups {
+                        "选组"
+                    } else {
+                        "选择"
+                    },
+                ),
                 hint("t", "测速"),
                 Hint {
                     key: "T",
@@ -78,18 +106,12 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 },
                 hint("s", "排序"),
                 hint("/", "过滤"),
-                hint(
-                    if app.proxies_view.focus == Pane::Nodes {
-                        "h/j/k/l"
-                    } else {
-                        "j/k"
-                    },
-                    "移动",
-                ),
             ];
-            hints.push(match app.proxies_view.focus {
-                Pane::Groups => hint("l", "进入节点"),
-                Pane::Nodes => hint("h", "最左列回分组"),
+            hints.extend(match (groups, stacked) {
+                // The picker row has nothing to move through.
+                (true, true) => vec![hint("l/j", "进入节点")],
+                (true, false) => vec![hint("j/k", "移动"), hint("l", "进入节点")],
+                (false, _) => vec![hint("h/j/k/l", "移动"), hint("h", "最左列回分组")],
             });
             hints
         }
@@ -211,6 +233,7 @@ fn hints(app: &App) -> Vec<Hint> {
         Some(Overlay::Connection) => detail_hints(),
         Some(Overlay::Confirm) => confirm_hints(app),
         Some(Overlay::Profiles) => profile_hints(app),
+        Some(Overlay::Groups) => picker_hints(),
         None if app.page == Page::Settings && app.typing() => port_hints(),
         None => {
             let mut hints = page_hints(app);
@@ -218,6 +241,41 @@ fn hints(app: &App) -> Vec<Hint> {
             hints
         }
     }
+}
+
+impl Hint {
+    fn width(&self) -> usize {
+        self.key.width() + 1 + self.description.width()
+    }
+}
+
+/// Columns `widths` take on one line, a separator between each two.
+fn line_width(widths: impl IntoIterator<Item = usize>) -> usize {
+    let (total, count) = widths
+        .into_iter()
+        .fold((0, 0_usize), |(total, count), width| {
+            (total + width, count + 1)
+        });
+    total + SEPARATOR.len() * count.saturating_sub(1)
+}
+
+/// How many leading hints of `widths` (their widths, in order) fit in
+/// `width` columns ahead of the last `pinned`, which always show, and
+/// whether any was left out. The ones left out go from the end, as pages
+/// list their keys most used first; [`MORE`] then stands where they were.
+fn fit(widths: &[usize], pinned: usize, width: usize) -> (usize, bool) {
+    let (head, tail) = widths.split_at(widths.len().saturating_sub(pinned));
+    if line_width(widths.iter().copied()) <= width {
+        return (head.len(), false);
+    }
+    let shown = (0..head.len())
+        .rev()
+        .find(|&kept| {
+            let items = head[..kept].iter().copied().chain([MORE.width()]);
+            line_width(items.chain(tail.iter().copied())) <= width
+        })
+        .unwrap_or(0);
+    (shown, true)
 }
 
 /// Divider plus one row of key hints: keys in accent, descriptions muted.
@@ -235,21 +293,46 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         return;
     }
     let hints = hints(app);
-    let mut spans = Vec::with_capacity(hints.len() * 3);
+    // `?` and `q` stay whatever else goes: they lead to the rest.
+    let pinned = hints
+        .iter()
+        .rev()
+        .take_while(|hint| matches!(hint.key, "?" | "q"))
+        .count();
+    let widths: Vec<usize> = hints.iter().map(Hint::width).collect();
+    let (shown, cut) = fit(&widths, pinned, usize::from(hints_area.width));
+    let tail = hints.len() - pinned;
+    // `None` is where the hints left out were.
+    let mut items: Vec<Option<Hint>> = Vec::with_capacity(hints.len() + 1);
     for (index, hint) in hints.into_iter().enumerate() {
-        if index > 0 {
-            spans.push(Span::raw("   "));
+        if index == tail && cut {
+            items.push(None);
         }
+        if index < shown || index >= tail {
+            items.push(Some(hint));
+        }
+    }
+    if cut && pinned == 0 {
+        items.push(None);
+    }
+
+    let muted = Style::new().fg(theme.muted);
+    let mut spans = Vec::with_capacity(items.len() * 3);
+    for (index, item) in items.into_iter().enumerate() {
+        if index > 0 {
+            spans.push(Span::raw(SEPARATOR));
+        }
+        let Some(hint) = item else {
+            spans.push(Span::styled(MORE, muted));
+            continue;
+        };
         let key_style = if hint.enabled {
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD)
         } else {
-            Style::new().fg(theme.muted)
+            muted
         };
         spans.push(Span::styled(hint.key, key_style));
-        spans.push(Span::styled(
-            format!(" {}", hint.description),
-            Style::new().fg(theme.muted),
-        ));
+        spans.push(Span::styled(format!(" {}", hint.description), muted));
     }
     frame.render_widget(Paragraph::new(Line::from(spans)), hints_area);
 }
@@ -289,4 +372,32 @@ fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
     let cursor_x = area.x
         + u16::try_from(PROMPT.len() + input.visual_cursor().saturating_sub(scroll)).unwrap_or(0);
     frame.set_cursor_position((cursor_x, area.y));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hints_go_from_the_end_and_the_pinned_ones_stay() {
+        // `Enter 详情`, `s 排序`, `? 帮助`, `q 退出`, the last two pinned.
+        let widths = [8, 6, 6, 6];
+        let fit = |width| fit(&widths, 2, width);
+        // 26 columns and three separators.
+        assert_eq!(fit(35), (2, false));
+        assert_eq!(fit(34), (1, true));
+        // `Enter 详情   …   ? 帮助   q 退出`.
+        assert_eq!(fit(30), (1, true));
+        assert_eq!(fit(29), (0, true));
+        // `…   ? 帮助   q 退出`, and below that still only the pinned ones.
+        assert_eq!(fit(19), (0, true));
+        assert_eq!(fit(10), (0, true));
+    }
+
+    #[test]
+    fn widths_count_columns_not_bytes() {
+        assert_eq!(hint("?", "帮助").width(), 6);
+        assert_eq!(line_width([6, 6]), 15);
+        assert_eq!(line_width([]), 0);
+    }
 }

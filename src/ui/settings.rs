@@ -12,7 +12,10 @@ use crate::{
     api::models::Configs,
     app::{App, Gate, Setting},
     format,
-    ui::{components::states, theme::Theme},
+    ui::{
+        components::{states, title},
+        theme::Theme,
+    },
 };
 
 /// The spinner and the space after it, in front of every name.
@@ -67,12 +70,15 @@ fn items() -> Vec<Item> {
 /// and its value against the right edge.
 pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     let theme = app.theme;
-    let block = panel()
-        .border_style(Style::new().fg(theme.accent))
-        .title(Span::styled(
+    let block = title::titled(
+        panel().border_style(Style::new().fg(theme.accent)),
+        area.width,
+        vec![Span::styled(
             " 设置 ",
             Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
-        ));
+        )],
+        vec![],
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

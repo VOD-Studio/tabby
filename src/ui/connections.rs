@@ -12,14 +12,11 @@ use crate::{
     app::{App, ConnectionRow, ConnectionSort, Detail, SortColumn},
     format,
     ui::{
-        components::{popup, states},
+        COMPACT_WIDTH,
+        components::{popup, states, title},
         text::wrap,
     },
 };
-
-/// Below this terminal width the process and total columns are left out
-/// (plan §7.3).
-const NARROW: u16 = 70;
 
 /// Widest rate: `1023.9 KB/s`.
 const RATE_WIDTH: u16 = 11;
@@ -110,7 +107,7 @@ impl Column {
 
 /// The columns a terminal of `size` shows.
 fn shown(size: Size) -> &'static [Column] {
-    if size.width >= NARROW {
+    if size.width >= COMPACT_WIDTH {
         &Column::ALL
     } else {
         &Column::NARROW
@@ -167,15 +164,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme.accent))
-        .title(Line::from(vec![
+        .border_style(Style::new().fg(theme.accent));
+    let block = title::titled(
+        block,
+        area.width,
+        vec![
             Span::styled(
                 " 连接",
                 Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(count, Style::new().fg(theme.muted)),
-        ]))
-        .title(Line::from(status).right_aligned());
+        ],
+        vec![status],
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -10,12 +10,12 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     app::{App, RuleRow},
     format,
-    ui::{components::states, theme::Theme},
+    ui::{
+        COMPACT_WIDTH,
+        components::{states, title},
+        theme::Theme,
+    },
 };
-
-/// Below this terminal width the number column drops its label for `#` and
-/// takes only the width of the numbers.
-const NARROW: u16 = 70;
 
 /// `DOMAIN-KEYWORD`, the widest common type; longer ones are cut.
 const TYPE_WIDTH: u16 = 14;
@@ -230,14 +230,19 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
     };
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme.accent))
-        .title(Line::from(vec![
+        .border_style(Style::new().fg(theme.accent));
+    let block = title::titled(
+        block,
+        area.width,
+        vec![
             Span::styled(
                 " 规则",
                 Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
             ),
             Span::styled(count, Style::new().fg(theme.muted)),
-        ]));
+        ],
+        vec![],
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -256,7 +261,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
         return;
     }
 
-    let narrow = app.size.width < NARROW;
+    // Below this the number column drops its label for `#` and takes only
+    // the width of the numbers.
+    let narrow = app.size.width < COMPACT_WIDTH;
     let widths = columns(inner, narrow, rows.len());
     let cursor = view.cursor.min(visible.len() - 1);
     let window = view.scroll.window(cursor, visible.len(), capacity(area));

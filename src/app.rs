@@ -26,6 +26,7 @@ use crate::{
     config::{Profiles, Settings},
     format::natural_cmp,
     ui::{
+        components::help,
         connections,
         logs::{self, Fit},
         providers, proxies, regions, rules,
@@ -143,7 +144,8 @@ impl Move {
     }
 }
 
-/// The two panels of the proxies page.
+/// The two panels of the proxies page. On a narrow page the group list is
+/// the picker row above the grid.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Pane {
     #[default]
@@ -179,6 +181,10 @@ pub struct ProxiesView {
     /// Index into [`App::visible_groups`].
     pub group: usize,
     pub group_scroll: Scroll,
+    /// Index into [`App::visible_groups`] of the row the picker's
+    /// drop-down has its cursor on; becomes `group` on `Enter`.
+    pub picker: usize,
+    pub picker_scroll: Scroll,
     /// Index into [`App::visible_nodes`]; `None` rests on the group's
     /// current node.
     pub node: Option<usize>,
@@ -1527,6 +1533,8 @@ pub enum Overlay {
     Confirm,
     /// The connections in [`App::profiles`] to switch between.
     Profiles,
+    /// The drop-down of the narrow proxies page's group picker.
+    Groups,
 }
 
 /// Which connections `X` closes.
@@ -2045,6 +2053,8 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// What the confirm dialog asks about, while it is open.
     pub pending: Option<Confirm>,
+    /// The first row of the help the overlay shows, when it does not fit.
+    pub help_scroll: usize,
     /// Frame counter of the loading spinner; advances while one is visible.
     pub spinner: usize,
     streams: Streams,
@@ -2135,6 +2145,7 @@ impl App {
             toasts: VecDeque::new(),
             overlay: None,
             pending: None,
+            help_scroll: 0,
             spinner: 0,
             streams,
             links: Links::default(),
@@ -2266,19 +2277,18 @@ impl App {
     pub fn update(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
-            Action::Resize(size) => {
-                self.size = size;
-                let fit = self.logs_fit();
-                self.logs_view.settle(fit);
-                self.dirty = true;
-            }
+            Action::Resize(size) => self.resize(size),
             _ if self.overlay == Some(Overlay::Confirm) => self.answer(action),
             _ if self.overlay == Some(Overlay::Profiles) => self.pick_profile(action),
+            _ if self.overlay == Some(Overlay::Groups) => self.pick_group(action),
             Action::ToggleHelp => {
                 // The connection popup is not swapped for the help.
                 self.overlay = match self.overlay {
                     Some(Overlay::Help) => None,
-                    None => Some(Overlay::Help),
+                    None => {
+                        self.help_scroll = 0;
+                        Some(Overlay::Help)
+                    }
                     other => other,
                 };
                 self.dirty = true;
@@ -2290,6 +2300,9 @@ impl App {
                     self.clear_filter();
                 }
                 self.dirty = true;
+            }
+            Action::Cursor(movement) if self.overlay == Some(Overlay::Help) => {
+                self.scroll_help(movement);
             }
             // Overlays are modal: everything else waits until they close.
             _ if self.overlay.is_some() => {}
@@ -2491,12 +2504,16 @@ impl App {
             Page::Proxies => {}
             Page::Overview => return,
         }
+        // Narrow, the groups are one picker row: down or right leaves it
+        // for the grid, and nothing else moves on it.
+        let stacked = self.proxies_fit().stacked;
         match self.proxies_view.focus {
-            Pane::Groups if movement == Move::Right => {
+            Pane::Groups if movement == Move::Right || (stacked && movement == Move::Down) => {
                 if self.selected_group().is_some() {
                     self.proxies_view.focus = Pane::Nodes;
                 }
             }
+            Pane::Groups if stacked => {}
             Pane::Groups => {
                 let len = self.visible_groups().count();
                 let half = (self.proxies_fit().groups / 2).max(1);
@@ -2521,6 +2538,57 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    /// Applies a new terminal size: what is laid out by it settles, and the
+    /// group picker's drop-down closes once the page is wide enough for the
+    /// group list. The page's focus and selection stay as they were.
+    fn resize(&mut self, size: Size) {
+        self.size = size;
+        let fit = self.logs_fit();
+        self.logs_view.settle(fit);
+        if self.overlay == Some(Overlay::Groups) && !self.proxies_fit().stacked {
+            self.close_overlay();
+        }
+        let screen = Rect::from(size);
+        self.help_scroll = self.help_scroll.min(help::max_scroll(screen, self.page));
+        self.dirty = true;
+    }
+
+    /// Scrolls the help by `movement`, a row at a time or half of what
+    /// shows, within what it has to show.
+    fn scroll_help(&mut self, movement: Move) {
+        let screen = Rect::from(self.size);
+        let rows = help::max_scroll(screen, self.page) + 1;
+        let half = (help::visible_rows(screen, self.page) / 2).max(1);
+        self.help_scroll = movement.apply(self.help_scroll, rows, half);
+        self.dirty = true;
+    }
+
+    /// The group picker's drop-down answers to the cursor keys, `Enter`
+    /// (which selects the group under its cursor) and `Esc`; quitting and
+    /// resizing are handled before it is asked.
+    fn pick_group(&mut self, action: Action) {
+        let len = self.visible_groups().count();
+        match action {
+            Action::Cursor(movement) => {
+                let half = (self.proxies_fit().groups / 2).max(1);
+                let view = &mut self.proxies_view;
+                view.picker = movement.apply(view.picker, len, half);
+                self.dirty = true;
+            }
+            Action::Confirm => {
+                let view = &mut self.proxies_view;
+                let group = view.picker.min(len.saturating_sub(1));
+                if group != view.group {
+                    view.group = group;
+                    view.node = None;
+                }
+                self.close_overlay();
+            }
+            Action::Dismiss => self.close_overlay(),
+            _ => {}
+        }
     }
 
     /// How much of the proxies page fits in the terminal, laid out by the
@@ -2758,6 +2826,14 @@ impl App {
     fn confirm(&mut self) {
         match self.page {
             Page::Proxies if self.selected_group().is_some() => match self.proxies_view.focus {
+                // Narrow, the picker row opens its drop-down on the
+                // selected group.
+                Pane::Groups if self.proxies_fit().stacked => {
+                    let len = self.visible_groups().count();
+                    self.proxies_view.picker = self.proxies_view.group.min(len - 1);
+                    self.overlay = Some(Overlay::Groups);
+                    self.dirty = true;
+                }
                 Pane::Groups => {
                     self.proxies_view.focus = Pane::Nodes;
                     self.dirty = true;
@@ -2946,7 +3022,7 @@ impl App {
         match self.overlay.take() {
             Some(Overlay::Connection) => self.connections_view.detail = None,
             Some(Overlay::Confirm) => self.pending = None,
-            Some(Overlay::Help | Overlay::Profiles) | None => {}
+            Some(Overlay::Help | Overlay::Profiles | Overlay::Groups) | None => {}
         }
         self.dirty = true;
     }
@@ -7078,5 +7154,195 @@ secret = "b-secret"
         assert_eq!(app.outbox.epoch, epoch);
         assert!(app.proxies.is_some() && app.toasts.is_empty());
         assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    /// What `app` draws on a `width` x `height` terminal, row by row, the
+    /// cell after a wide character left out.
+    fn screen_text(app: &App, width: u16, height: u16) -> String {
+        use unicode_width::UnicodeWidthStr;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..height {
+            let mut x = 0;
+            while x < width {
+                let symbol = buffer[(x, y)].symbol();
+                text.push_str(symbol);
+                x += u16::try_from(symbol.width().max(1)).unwrap();
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[tokio::test]
+    async fn a_screen_too_small_only_says_so_and_keys_still_work() {
+        let (mut app, _rx) = app_without_controller();
+        for (width, height) in [(49, 20), (60, 14)] {
+            app.update(Action::Resize(Size::new(width, height)));
+            let screen = screen_text(&app, width, height);
+            assert!(screen.contains("终端尺寸过小"), "{screen}");
+            assert!(screen.contains(&format!("当前 {width}×{height}，至少需要 50×15")));
+            // No header, tabs, page or footer.
+            for part in ["tabby", "概览", "正在连接控制器", "帮助"] {
+                assert!(!screen.contains(part), "{part} in {screen}");
+            }
+        }
+        key_press(&mut app, KeyCode::Char('4'));
+        key_press(&mut app, KeyCode::Char('/'));
+        key_press(&mut app, KeyCode::Char('x'));
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.page, Page::Rules);
+        assert_eq!(app.rules_view.filter.value(), "x");
+        // Back to a size it draws in, all of it is there.
+        app.update(Action::Resize(Size::new(50, 15)));
+        let screen = screen_text(&app, 50, 15);
+        assert!(!screen.contains("终端尺寸过小"));
+        assert!(screen.contains("正在加载规则"), "{screen}");
+        assert!(
+            screen.contains("帮助") && screen.contains("退出"),
+            "{screen}"
+        );
+        app.update(Action::Resize(Size::new(49, 20)));
+        key_press(&mut app, KeyCode::Char('q'));
+        assert!(app.should_quit);
+    }
+
+    /// The proxies page of [`app_with_proxies`] in a terminal `width`
+    /// columns wide.
+    fn proxies_page(width: u16) -> App {
+        let (mut app, _) = app_with_proxies();
+        app.page = Page::Proxies;
+        app.size = Size::new(width, 30);
+        assert_eq!(app.visible_groups().count(), 4);
+        app
+    }
+
+    #[test]
+    fn a_narrow_proxies_page_picks_its_group_from_a_drop_down() {
+        let mut app = proxies_page(99);
+        assert_eq!(app.proxies_view.focus, Pane::Groups);
+        // `j` and `k` do not move along the picker row.
+        key_press(&mut app, KeyCode::Char('k'));
+        assert_eq!(
+            (app.proxies_view.focus, app.proxies_view.group),
+            (Pane::Groups, 0)
+        );
+
+        // `Enter` opens the drop-down on the selected group; moving in it
+        // selects nothing until `Enter`, `Esc` keeps the group.
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.overlay, Some(Overlay::Groups));
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Char('j'));
+        assert_eq!((app.proxies_view.picker, app.proxies_view.group), (2, 0));
+        key_press(&mut app, KeyCode::Esc);
+        assert_eq!((app.overlay, app.proxies_view.group), (None, 0));
+
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.proxies_view.picker, 0);
+        key_press(&mut app, KeyCode::Char('G'));
+        // The drop-down is modal: the help, pages and the grid wait.
+        for code in [KeyCode::Char('?'), KeyCode::Char('5'), KeyCode::Char('l')] {
+            key_press(&mut app, code);
+        }
+        assert_eq!(app.overlay, Some(Overlay::Groups));
+        assert_eq!(app.page, Page::Proxies);
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.overlay, None);
+        assert_eq!(
+            (app.proxies_view.focus, app.proxies_view.group),
+            (Pane::Groups, 3)
+        );
+
+        // `l`, `j` and `↓` go into the grid; `h` from its leftmost column
+        // comes back to the picker row.
+        for code in [KeyCode::Char('l'), KeyCode::Char('j'), KeyCode::Down] {
+            key_press(&mut app, code);
+            assert_eq!(app.proxies_view.focus, Pane::Nodes);
+            key_press(&mut app, KeyCode::Char('g'));
+            key_press(&mut app, KeyCode::Char('h'));
+            assert_eq!(app.proxies_view.focus, Pane::Groups);
+        }
+        assert_eq!(app.proxies_view.group, 3);
+    }
+
+    #[test]
+    fn crossing_100_columns_keeps_the_focus_and_the_group() {
+        let mut app = proxies_page(100);
+        // Wide, `j` moves along the group list and `Enter` enters the grid.
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(
+            (app.proxies_view.focus, app.proxies_view.group),
+            (Pane::Nodes, 1)
+        );
+        for width in [99, 100, 99] {
+            app.update(Action::Resize(Size::new(width, 30)));
+            assert_eq!(
+                (app.proxies_view.focus, app.proxies_view.group),
+                (Pane::Nodes, 1)
+            );
+        }
+        key_press(&mut app, KeyCode::Char('g'));
+        key_press(&mut app, KeyCode::Char('h'));
+        app.update(Action::Resize(Size::new(100, 30)));
+        assert_eq!(
+            (app.proxies_view.focus, app.proxies_view.group),
+            (Pane::Groups, 1)
+        );
+
+        // Growing past 100 with the drop-down open closes it and keeps the
+        // group selected before.
+        app.update(Action::Resize(Size::new(99, 30)));
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Char('j'));
+        app.update(Action::Resize(Size::new(100, 30)));
+        assert_eq!(app.overlay, None);
+        assert_eq!(
+            (app.proxies_view.focus, app.proxies_view.group),
+            (Pane::Groups, 1)
+        );
+    }
+
+    #[test]
+    fn the_help_scrolls_no_further_than_its_last_row() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        // One column of 23 rows, 22 shown.
+        app.size = Size::new(69, 24);
+        key_press(&mut app, KeyCode::Char('?'));
+        let mut press = |code| {
+            key_press(&mut app, code);
+            app.help_scroll
+        };
+        assert_eq!(press(KeyCode::Char('k')), 0);
+        assert_eq!(press(KeyCode::Char('j')), 1);
+        assert_eq!(press(KeyCode::Char('j')), 1);
+        assert_eq!(press(KeyCode::Char('g')), 0);
+        assert_eq!(press(KeyCode::Char('G')), 1);
+        // 13 of the rows shown: half a page is 6.
+        app.update(Action::Resize(Size::new(50, 15)));
+        app.update(Action::Cursor(Move::Bottom));
+        assert_eq!(app.help_scroll, 10);
+        app.update(Action::Cursor(Move::HalfUp));
+        assert_eq!(app.help_scroll, 4);
+        // The page behind did not move, and growing the screen brings the
+        // rows that now fit back into view.
+        assert_eq!(app.connections_view.cursor, 0);
+        app.update(Action::Resize(Size::new(69, 25)));
+        assert_eq!(app.help_scroll, 0);
+        // Two columns fit at 70 x 24: nothing to scroll.
+        app.update(Action::Resize(Size::new(70, 24)));
+        key_press(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.help_scroll, 0);
+        // Opened again, it starts at the top.
+        app.update(Action::Resize(Size::new(50, 15)));
+        key_press(&mut app, KeyCode::Char('G'));
+        key_press(&mut app, KeyCode::Char('?'));
+        key_press(&mut app, KeyCode::Char('?'));
+        assert_eq!(app.help_scroll, 0);
     }
 }

@@ -11,7 +11,11 @@ use crate::{
     api::models::{LogKind, LogLevel},
     app::{App, LogEntry, LogLink, LogsView},
     format,
-    ui::{components::states, text::wrap, theme::Theme},
+    ui::{
+        components::{states, title},
+        text::wrap,
+        theme::Theme,
+    },
 };
 
 /// `HH:MM:SS`.
@@ -138,8 +142,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let muted = Style::new().fg(theme.muted);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme.accent))
-        .title(Line::from(vec![
+        .border_style(Style::new().fg(theme.accent));
+    let block = title::titled(
+        block,
+        area.width,
+        vec![
             Span::styled(
                 " 日志",
                 Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
@@ -152,8 +159,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(count, muted),
-        ]))
-        .title(Line::from(status(view, &theme)).right_aligned());
+        ],
+        vec![status(view, &theme)],
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

@@ -72,6 +72,43 @@ pub fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> 
     lines
 }
 
+/// Cuts `spans` to at most `width` columns, ending in `…` in the style of
+/// the span it cut into when anything was cut. Wide characters are never
+/// split.
+pub fn truncate_spans(spans: Vec<Span<'_>>, width: usize) -> Vec<Span<'_>> {
+    if spans.iter().map(Span::width).sum::<usize>() <= width {
+        return spans;
+    }
+    if width == 0 {
+        return vec![];
+    }
+    // One column is kept for the ellipsis.
+    let budget = width - 1;
+    let mut used = 0;
+    let mut out = Vec::with_capacity(spans.len());
+    for span in spans {
+        let span_width = span.width();
+        if used + span_width <= budget {
+            used += span_width;
+            out.push(span);
+            continue;
+        }
+        let mut piece = String::new();
+        for ch in span.content.chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            if used + ch_width > budget {
+                break;
+            }
+            used += ch_width;
+            piece.push(ch);
+        }
+        piece.push('…');
+        out.push(Span::styled(piece, span.style));
+        break;
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use ratatui::style::{Color, Style};
@@ -94,5 +131,23 @@ mod tests {
         assert_eq!(lines[1][0].style, muted);
         // A line does not start with the space it broke at.
         assert_eq!(texts(&wrap(vec![Span::raw("ab cd")], 2)), ["ab", "cd"]);
+    }
+
+    #[test]
+    fn truncated_spans_end_in_an_ellipsis_in_the_style_they_cut() {
+        let muted = Style::new().fg(Color::DarkGray);
+        let spans = || vec![Span::raw(" 连接"), Span::styled("  12/30 ", muted)];
+        // 13 columns: they fit as they are.
+        assert_eq!(texts(&[truncate_spans(spans(), 13)]), [" 连接  12/30 "]);
+        let cut = truncate_spans(spans(), 12);
+        assert_eq!(texts(std::slice::from_ref(&cut)), [" 连接  12/3…"]);
+        assert_eq!(cut[1].style, muted);
+        // `接` would straddle the edge: it goes whole, the ellipsis takes
+        // the first span's style.
+        let cut = truncate_spans(spans(), 4);
+        assert_eq!(texts(std::slice::from_ref(&cut)), [" 连…"]);
+        assert_eq!(cut.len(), 1);
+        assert_eq!(texts(&[truncate_spans(spans(), 3)]), [" …"]);
+        assert_eq!(texts(&[truncate_spans(spans(), 0)]), [""]);
     }
 }

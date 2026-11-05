@@ -14,7 +14,7 @@ use crate::{
     app::{App, ProviderKind, ProviderRef, ProviderRow, Work},
     format,
     ui::{
-        components::states,
+        components::{states, title},
         text::{describe, detail},
         theme::Theme,
     },
@@ -101,19 +101,22 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let theme = app.theme;
     let filter = view.filter.value();
-    let mut title = vec![Span::styled(
+    let mut heading = vec![Span::styled(
         " Providers ",
         Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
     )];
     if !filter.is_empty() {
-        title.push(Span::styled(
+        heading.push(Span::styled(
             format!(" · 过滤「{filter}」 "),
             Style::new().fg(theme.muted),
         ));
     }
-    let block = panel()
-        .border_style(Style::new().fg(theme.accent))
-        .title(Line::from(title));
+    let block = title::titled(
+        panel().border_style(Style::new().fg(theme.accent)),
+        area.width,
+        heading,
+        vec![],
+    );
     let inner = block.inner(area);
     frame.render_widget(block, area);
 

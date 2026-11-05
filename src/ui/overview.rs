@@ -17,7 +17,7 @@ use crate::{
     api::models::{Configs, ConnectionStats, CoreKind, Mode, Traffic},
     app::{App, TRAFFIC_HISTORY},
     format,
-    ui::theme::Theme,
+    ui::{components::title::titled, theme::Theme},
 };
 
 /// Rows of the mode panel: two borders and a three-row pill.
@@ -33,6 +33,11 @@ const CARDS_MIN_HEIGHT: u16 = 28;
 /// Placeholder for a value that has not arrived.
 const NO_VALUE: &str = "—";
 
+/// The narrowest the right column gets: three bordered mode pills that
+/// still hold `全局`, and the kernel panel's longest row
+/// (`版本 mihomo v1.19.33`), each with the panel's borders and padding.
+const SIDE_MIN_WIDTH: u16 = 24;
+
 /// Draws the overview: the traffic chart on the left, the mode switch and
 /// the kernel info on the right, the stat cards along the bottom.
 pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
@@ -43,7 +48,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     } else {
         (area, None)
     };
-    let [chart, side] = Layout::horizontal([Constraint::Fill(2), Constraint::Fill(1)]).areas(main);
+    // A third of the width, but no less than the pills and the kernel
+    // rows need: below 72 columns the chart gives up the difference.
+    let columns = if main.width / 3 >= SIDE_MIN_WIDTH {
+        [Constraint::Fill(2), Constraint::Fill(1)]
+    } else {
+        [Constraint::Fill(1), Constraint::Length(SIDE_MIN_WIDTH)]
+    };
+    let [chart, side] = Layout::horizontal(columns).areas(main);
     render_traffic(frame, chart, app);
     let [mode, kernel] =
         Layout::vertical([Constraint::Length(MODE_PANEL_HEIGHT), Constraint::Fill(1)]).areas(side);
@@ -54,33 +66,44 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     }
 }
 
-fn panel(theme: Theme, title: Line<'static>) -> Block<'static> {
-    Block::bordered()
+/// A muted panel `width` columns wide, titled `left` and, on the right,
+/// `right`, as much of them as fits.
+fn panel(
+    theme: Theme,
+    width: u16,
+    left: Vec<Span<'static>>,
+    right: Vec<Span<'static>>,
+) -> Block<'static> {
+    let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme.muted))
-        .title(title)
+        .border_style(Style::new().fg(theme.muted));
+    titled(block, width, left, right)
 }
 
-fn title(theme: Theme, name: &'static str, hint: &'static str) -> Line<'static> {
-    Line::from(vec![
+fn title(theme: Theme, name: &'static str, hint: &'static str) -> Vec<Span<'static>> {
+    vec![
         Span::styled(
             format!(" {name}"),
             Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
         ),
         Span::styled(format!("{hint} "), Style::new().fg(theme.muted)),
-    ])
+    ]
 }
 
 fn render_traffic(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
-    let legend = Line::from(vec![
+    let legend = vec![
         Span::styled("● 上传", Style::new().fg(theme.c1)),
         Span::raw("  "),
         Span::styled("● 下载", Style::new().fg(theme.c2)),
         Span::raw(" "),
-    ])
-    .right_aligned();
-    let block = panel(theme, title(theme, "实时流量", " · 最近 60 秒")).title(legend);
+    ];
+    let block = panel(
+        theme,
+        area.width,
+        title(theme, "实时流量", " · 最近 60 秒"),
+        legend,
+    );
 
     let history = &app.traffic_history;
     if history.is_empty() {
@@ -170,7 +193,13 @@ fn y_axis(peak: u64) -> YAxis {
 }
 
 fn render_mode(frame: &mut Frame, area: Rect, theme: Theme, configs: &Configs) {
-    let block = panel(theme, title(theme, "代理模式", "  m 切换")).padding(Padding::horizontal(1));
+    let block = panel(
+        theme,
+        area.width,
+        title(theme, "代理模式", "  m 切换"),
+        vec![],
+    )
+    .padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -217,7 +246,8 @@ fn render_pill(frame: &mut Frame, area: Rect, theme: Theme, mode: Mode, current:
 /// The kernel panel: version and the settings people look up most.
 fn render_kernel(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     let theme = app.theme;
-    let block = panel(theme, title(theme, "内核", "")).padding(Padding::horizontal(1));
+    let block =
+        panel(theme, area.width, title(theme, "内核", ""), vec![]).padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
@@ -379,7 +409,7 @@ fn render_card<I>(frame: &mut Frame, area: Rect, theme: Theme, card: Card<I>)
 where
     I: DoubleEndedIterator<Item = u64>,
 {
-    let block = panel(theme, Line::default()).padding(Padding::horizontal(1));
+    let block = panel(theme, area.width, vec![], vec![]).padding(Padding::horizontal(1));
     let inner = block.inner(area);
     frame.render_widget(block, area);
     let [label, value, subtitle, spark] = Layout::vertical([
