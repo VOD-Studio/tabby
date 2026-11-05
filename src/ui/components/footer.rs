@@ -7,7 +7,7 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use crate::app::{App, Overlay, Page};
+use crate::app::{App, Overlay, Page, Pane};
 
 /// One entry of the key bar. A disabled one is shown dimmed: the key exists
 /// but the connected kernel cannot do it.
@@ -48,9 +48,19 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 },
                 hint("s", "排序"),
                 hint("/", "过滤"),
-                hint("j/k", "移动"),
-                hint("h/l", "切换面板"),
+                hint(
+                    if app.proxies_view.focus == Pane::Nodes {
+                        "h/j/k/l"
+                    } else {
+                        "j/k"
+                    },
+                    "移动",
+                ),
             ];
+            hints.push(match app.proxies_view.focus {
+                Pane::Groups => hint("l", "进入节点"),
+                Pane::Nodes => hint("h", "最左列回分组"),
+            });
             if !app.proxies_view.filter.value().is_empty() {
                 hints.push(hint("Esc", "清除过滤"));
             }

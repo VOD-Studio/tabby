@@ -218,6 +218,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
     let columns = (inner.width / CARD_MIN_WIDTH).clamp(1, MAX_COLUMNS);
     let card_width = inner.width / columns;
     let columns = usize::from(columns);
+    view.columns.set(columns);
     let total_rows = members.len().div_ceil(columns);
     let cursor = app.node_cursor();
     let rows = view.node_scroll.window(

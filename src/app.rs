@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
@@ -61,6 +62,11 @@ impl Page {
 pub enum Move {
     Up,
     Down,
+    /// One card left in the node grid; from the leftmost column, back to the
+    /// group list. In the group list, nothing.
+    Left,
+    /// One card right in the node grid; in the group list, into the grid.
+    Right,
     Top,
     Bottom,
     HalfUp,
@@ -78,10 +84,30 @@ impl Move {
         match self {
             Self::Up => cursor.saturating_sub(1),
             Self::Down => (cursor + 1).min(last),
+            Self::Left | Self::Right => cursor,
             Self::Top => 0,
             Self::Bottom => last,
             Self::HalfUp => cursor.saturating_sub(HALF_PAGE),
             Self::HalfDown => (cursor + HALF_PAGE).min(last),
+        }
+    }
+
+    /// The cursor position after this move in a grid of `len` cards laid out
+    /// `columns` per row, filled row by row. Moves stay inside the row they
+    /// belong to; `Down` from above a short last row lands on its last card
+    /// when that column is empty.
+    fn apply_grid(self, cursor: usize, len: usize, columns: usize) -> usize {
+        let last = len.saturating_sub(1);
+        let cursor = cursor.min(last);
+        let columns = columns.max(1);
+        match self {
+            Self::Up if cursor >= columns => cursor - columns,
+            Self::Down if cursor + columns <= last => cursor + columns,
+            Self::Down if cursor / columns < last / columns => last,
+            Self::Left if !cursor.is_multiple_of(columns) => cursor - 1,
+            Self::Right if !(cursor + 1).is_multiple_of(columns) && cursor < last => cursor + 1,
+            Self::Up | Self::Down | Self::Left | Self::Right => cursor,
+            Self::Top | Self::Bottom | Self::HalfUp | Self::HalfDown => self.apply(cursor, len),
         }
     }
 }
@@ -131,6 +157,9 @@ pub struct ProxiesView {
     pub filter: Input,
     /// The filter box has the keyboard.
     pub typing: bool,
+    /// Cards per row of the node grid, as last drawn. Navigation needs it
+    /// but only the layout knows it.
+    pub columns: Cell<usize>,
 }
 
 /// A user intent, derived from a terminal event.
@@ -143,7 +172,6 @@ pub enum Action {
     PrevPage,
     Refresh,
     Cursor(Move),
-    Focus(Pane),
     /// `Enter`: acts on the item under the cursor.
     Confirm,
     /// `t`: delay-test the node under the cursor.
@@ -225,10 +253,12 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('?') => Some(Action::ToggleHelp),
                 KeyCode::Down | KeyCode::Char('j') => Some(Action::Cursor(Move::Down)),
                 KeyCode::Up | KeyCode::Char('k') => Some(Action::Cursor(Move::Up)),
+                KeyCode::Left => Some(Action::Cursor(Move::Left)),
+                KeyCode::Right => Some(Action::Cursor(Move::Right)),
                 KeyCode::Char('g') => Some(Action::Cursor(Move::Top)),
                 KeyCode::Char('G') => Some(Action::Cursor(Move::Bottom)),
-                KeyCode::Char('h') if page == Page::Proxies => Some(Action::Focus(Pane::Groups)),
-                KeyCode::Char('l') if page == Page::Proxies => Some(Action::Focus(Pane::Nodes)),
+                KeyCode::Char('h') if page == Page::Proxies => Some(Action::Cursor(Move::Left)),
+                KeyCode::Char('l') if page == Page::Proxies => Some(Action::Cursor(Move::Right)),
                 KeyCode::Char('t') if page == Page::Proxies => Some(Action::TestNode),
                 KeyCode::Char('T') if page == Page::Proxies => Some(Action::TestGroup),
                 KeyCode::Char('s') if page == Page::Proxies => Some(Action::CycleSort),
@@ -401,12 +431,6 @@ impl App {
                 self.dirty = true;
             }
             Action::FilterClear => self.clear_filter(),
-            Action::Focus(pane) => {
-                if self.page == Page::Proxies && self.visible_groups().next().is_some() {
-                    self.proxies_view.focus = pane;
-                    self.dirty = true;
-                }
-            }
             Action::Refresh => {
                 // A failed request shows as loading again while it is retried.
                 if matches!(self.version, Some(Err(_))) {
@@ -450,6 +474,11 @@ impl App {
             return;
         }
         match self.proxies_view.focus {
+            Pane::Groups if movement == Move::Right => {
+                if self.selected_group().is_some() {
+                    self.proxies_view.focus = Pane::Nodes;
+                }
+            }
             Pane::Groups => {
                 let len = self.visible_groups().count();
                 let view = &mut self.proxies_view;
@@ -460,9 +489,14 @@ impl App {
                 }
             }
             Pane::Nodes => {
-                let len = self.visible_nodes().len();
+                let columns = self.proxies_view.columns.get().max(1);
                 let current = self.node_cursor();
-                self.proxies_view.node = Some(movement.apply(current, len));
+                if movement == Move::Left && current.is_multiple_of(columns) {
+                    self.proxies_view.focus = Pane::Groups;
+                } else {
+                    let len = self.visible_nodes().len();
+                    self.proxies_view.node = Some(movement.apply_grid(current, len, columns));
+                }
             }
         }
         self.dirty = true;
@@ -822,4 +856,52 @@ fn is_failed_test(err: &ApiError) -> bool {
                 ..
             }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 10 cards, 3 per row: the last row holds only card 9.
+    const LEN: usize = 10;
+    const COLUMNS: usize = 3;
+
+    fn grid(movement: Move, cursor: usize) -> usize {
+        movement.apply_grid(cursor, LEN, COLUMNS)
+    }
+
+    #[test]
+    fn down_moves_one_row_in_the_same_column() {
+        assert_eq!(grid(Move::Down, 1), 4);
+        assert_eq!(grid(Move::Up, 4), 1);
+    }
+
+    #[test]
+    fn down_into_a_short_last_row_lands_on_the_same_column_or_the_last_card() {
+        assert_eq!(grid(Move::Down, 6), 9);
+        // Column 1 and 2 have no card in the last row.
+        assert_eq!(grid(Move::Down, 7), 9);
+        assert_eq!(grid(Move::Down, 8), 9);
+    }
+
+    #[test]
+    fn vertical_moves_stop_at_the_edges() {
+        assert_eq!(grid(Move::Up, 2), 2);
+        assert_eq!(grid(Move::Down, 9), 9);
+    }
+
+    #[test]
+    fn horizontal_moves_stay_within_the_row() {
+        assert_eq!(grid(Move::Right, 0), 1);
+        assert_eq!(grid(Move::Right, 2), 2);
+        assert_eq!(grid(Move::Left, 4), 3);
+        assert_eq!(grid(Move::Left, 3), 3);
+        // The last row is short: nothing to the right of the last card.
+        assert_eq!(grid(Move::Right, 9), 9);
+    }
+
+    #[test]
+    fn right_stops_at_the_last_card_of_a_partial_row() {
+        assert_eq!(Move::Right.apply_grid(7, 8, COLUMNS), 7);
+    }
 }
