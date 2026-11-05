@@ -3,6 +3,7 @@ use std::time::Duration;
 pub mod client;
 pub mod error;
 pub mod models;
+pub mod stream;
 
 /// Longest wait between reconnect attempts.
 const BACKOFF_CAP: Duration = Duration::from_secs(30);

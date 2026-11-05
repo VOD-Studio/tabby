@@ -13,7 +13,8 @@ use crate::{
         backoff,
         client::ApiClient,
         error::ApiError,
-        models::{Configs, CoreKind, Delay, GLOBAL, Proxies, Proxy, Version},
+        models::{Configs, CoreKind, Delay, GLOBAL, Proxies, Proxy, Traffic, Version},
+        stream::{Event as StreamEvent, Stream, Streams},
     },
     config::Settings,
     format::natural_cmp,
@@ -234,6 +235,11 @@ pub enum Msg {
         members: Vec<String>,
         result: Result<HashMap<String, u32>, ApiError>,
     },
+    /// A WebSocket stream connected, dropped, or delivered a frame.
+    Stream {
+        stream: Stream,
+        event: StreamEvent,
+    },
 }
 
 /// Maps a terminal event to an [`Action`]; `None` means the event is ignored.
@@ -336,6 +342,15 @@ pub enum Connection {
     Disconnected,
 }
 
+/// Which WebSocket streams are connected.
+#[derive(Debug, Default)]
+struct Links {
+    up: HashSet<Stream>,
+    /// Every stream went down after one had been up, and none has come back
+    /// yet.
+    outage: bool,
+}
+
 /// Application state. Only the main loop mutates it.
 #[derive(Debug)]
 pub struct App {
@@ -361,6 +376,10 @@ pub struct App {
     pub overlay: Option<Overlay>,
     /// Frame counter of the loading spinner; advances while one is visible.
     pub spinner: usize,
+    streams: Streams,
+    links: Links,
+    /// The latest `/traffic` frame; `None` while that stream is down.
+    pub traffic: Option<Traffic>,
     /// `Some` from the first failed `/version` probe until one succeeds.
     pub reconnect: Option<Reconnect>,
     /// Set by `r` until the next `/version` reply, which then reports success.
@@ -378,6 +397,7 @@ impl App {
         msg_tx: mpsc::Sender<Msg>,
         size: Size,
     ) -> Self {
+        let streams = Streams::new(&settings.url, settings.secret.as_deref(), msg_tx.clone());
         Self {
             theme: settings.theme.into(),
             settings,
@@ -395,6 +415,9 @@ impl App {
             toasts: VecDeque::new(),
             overlay: None,
             spinner: 0,
+            streams,
+            links: Links::default(),
+            traffic: None,
             reconnect: None,
             refreshing: false,
             should_quit: false,
@@ -403,11 +426,23 @@ impl App {
         }
     }
 
-    /// Spawns the startup requests.
+    /// Spawns the startup requests and the WebSocket streams. Calling it
+    /// again repeats the requests; running streams are left alone.
     pub fn start(&mut self) {
-        self.spawn(|client| async move { Msg::Version(client.version().await) });
-        self.spawn(|client| async move { Msg::Configs(client.configs().await) });
+        self.fetch_version();
+        self.fetch_configs();
         self.fetch_proxies(false);
+        for stream in [Stream::Traffic, Stream::Logs, Stream::Connections] {
+            self.streams.start(stream);
+        }
+    }
+
+    fn fetch_version(&self) {
+        self.spawn(|client| async move { Msg::Version(client.version().await) });
+    }
+
+    fn fetch_configs(&self) {
+        self.spawn(|client| async move { Msg::Configs(client.configs().await) });
     }
 
     /// Fetches `/proxies` in the background.
@@ -500,6 +535,7 @@ impl App {
                     reconnect.retry_at = None;
                 }
                 self.refreshing = true;
+                self.streams.retry_now();
                 self.start();
             }
         }
@@ -697,29 +733,37 @@ impl App {
         });
     }
 
+    /// Applies a `/version` reply: the connection state, the banner and the
+    /// toast that goes with it.
+    fn apply_version(&mut self, result: Result<Version, ApiError>) {
+        let refreshed = std::mem::take(&mut self.refreshing);
+        match &result {
+            Ok(version) => {
+                // Memory is a mihomo endpoint; Clash has no such route.
+                if version.kind() == CoreKind::Mihomo {
+                    self.streams.start(Stream::Memory);
+                }
+                if self.reconnect.take().is_some() {
+                    self.toast(ToastKind::Success, "已重新连接".to_owned());
+                } else if refreshed {
+                    self.toast(ToastKind::Success, "已刷新".to_owned());
+                }
+            }
+            Err(err) => {
+                // Automatic retries stay quiet; the banner covers them.
+                let first_failure = self.reconnect.is_none();
+                self.schedule_reconnect(err);
+                if first_failure || refreshed {
+                    self.toast(ToastKind::Error, describe(err));
+                }
+            }
+        }
+        self.version = Some(result);
+    }
+
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
-            Msg::Version(result) => {
-                let refreshed = std::mem::take(&mut self.refreshing);
-                match &result {
-                    Ok(_) => {
-                        if self.reconnect.take().is_some() {
-                            self.toast(ToastKind::Success, "已重新连接".to_owned());
-                        } else if refreshed {
-                            self.toast(ToastKind::Success, "已刷新".to_owned());
-                        }
-                    }
-                    Err(err) => {
-                        // Automatic retries stay quiet; the banner covers them.
-                        let first_failure = self.reconnect.is_none();
-                        self.schedule_reconnect(err);
-                        if first_failure || refreshed {
-                            self.toast(ToastKind::Error, describe(err));
-                        }
-                    }
-                }
-                self.version = Some(result);
-            }
+            Msg::Version(result) => self.apply_version(result),
             Msg::Configs(result) => {
                 self.note_failure(&result);
                 let was_global = self.is_global_mode();
@@ -799,6 +843,7 @@ impl App {
                     self.fetch_proxies(true);
                 }
             }
+            Msg::Stream { stream, event } => self.on_stream(stream, &event),
         }
         self.dirty = true;
     }
@@ -827,6 +872,40 @@ impl App {
         }
         if retry_due {
             self.start();
+        }
+    }
+
+    /// Applies a stream event. The banner stays driven by the `/version`
+    /// probe alone; the streams only say when to probe or refetch.
+    ///
+    /// - Every stream down at once, with no banner yet: probe now, instead of
+    ///   waiting for the next request to fail.
+    /// - First stream back after that: the kernel may have been replaced, so
+    ///   read its kind and settings again.
+    fn on_stream(&mut self, stream: Stream, event: &StreamEvent) {
+        match event {
+            StreamEvent::Connected => {
+                self.links.up.insert(stream);
+                if std::mem::take(&mut self.links.outage) {
+                    self.fetch_version();
+                    self.fetch_configs();
+                }
+            }
+            StreamEvent::Disconnected => {
+                // Only a stream that was up can take the last one down; the
+                // first connection attempts at start-up are not an outage.
+                let was_up = self.links.up.remove(&stream);
+                if stream == Stream::Traffic {
+                    self.traffic = None;
+                }
+                if was_up && self.links.up.is_empty() {
+                    self.links.outage = true;
+                    if self.reconnect.is_none() {
+                        self.fetch_version();
+                    }
+                }
+            }
+            StreamEvent::Traffic(traffic) => self.traffic = Some(*traffic),
         }
     }
 
@@ -1123,8 +1202,8 @@ mod tests {
 
     /// An app on a controller nobody listens on, so requests it spawns fail
     /// fast instead of reaching a real kernel.
-    fn app_with(proxies: Proxies) -> App {
-        let (tx, _rx) = mpsc::channel(1);
+    fn app_without_controller() -> (App, mpsc::Receiver<Msg>) {
+        let (tx, rx) = mpsc::channel(16);
         let overrides = crate::config::Overrides {
             url: Some("http://127.0.0.1:1".to_owned()),
             ..Default::default()
@@ -1133,7 +1212,11 @@ mod tests {
             .resolve(&overrides)
             .unwrap();
         let client = ApiClient::new(&settings.url, None).unwrap();
-        let mut app = App::new(settings, client, tx, Size::new(120, 40));
+        (App::new(settings, client, tx, Size::new(120, 40)), rx)
+    }
+
+    fn app_with(proxies: Proxies) -> App {
+        let (mut app, _rx) = app_without_controller();
         app.proxies = Some(Ok(proxies));
         app
     }
@@ -1516,5 +1599,118 @@ mod tests {
         ]));
         app.proxies_view.sort = Sort::Name;
         assert_eq!(app.visible_nodes(), ["a0", "a1", "a01", "a001"]);
+    }
+
+    fn stream_event(app: &mut App, stream: Stream, event: StreamEvent) {
+        app.handle_msg(Msg::Stream { stream, event });
+    }
+
+    fn connect(app: &mut App, stream: Stream) {
+        stream_event(app, stream, StreamEvent::Connected);
+    }
+
+    fn disconnect(app: &mut App, stream: Stream) {
+        stream_event(app, stream, StreamEvent::Disconnected);
+    }
+
+    /// How many `/version` and `/configs` requests the app made, counted from
+    /// the replies they leave on the channel. Dropping the app first stops
+    /// its streams, so the channel closes once the requests are answered and
+    /// nothing can still be on its way.
+    async fn requests_made(app: App, mut rx: mpsc::Receiver<Msg>) -> (usize, usize) {
+        drop(app);
+        let (mut versions, mut configs) = (0, 0);
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                Msg::Version(_) => versions += 1,
+                Msg::Configs(_) => configs += 1,
+                _ => {}
+            }
+        }
+        (versions, configs)
+    }
+
+    #[tokio::test]
+    async fn losing_every_stream_probes_the_controller_at_once() {
+        let (mut app, rx) = app_without_controller();
+        connect(&mut app, Stream::Traffic);
+        connect(&mut app, Stream::Logs);
+        // One stream still up: the controller is evidently there, no probe.
+        disconnect(&mut app, Stream::Traffic);
+        disconnect(&mut app, Stream::Logs);
+        assert_eq!(requests_made(app, rx).await, (1, 0));
+    }
+
+    #[tokio::test]
+    async fn streams_that_never_connected_are_no_outage() {
+        let (mut app, rx) = app_without_controller();
+        app.start();
+        // A stream reporting a hang-up it never connected for.
+        disconnect(&mut app, Stream::Traffic);
+        // Only what `start` asked for: no extra probe on top.
+        assert_eq!(requests_made(app, rx).await, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn first_connections_do_not_refetch() {
+        let (mut app, rx) = app_without_controller();
+        for stream in [Stream::Traffic, Stream::Logs, Stream::Connections] {
+            connect(&mut app, stream);
+        }
+        assert_eq!(requests_made(app, rx).await, (0, 0));
+    }
+
+    #[tokio::test]
+    async fn first_stream_back_after_an_outage_refetches_version_and_configs() {
+        let (mut app, rx) = app_without_controller();
+        connect(&mut app, Stream::Traffic);
+        disconnect(&mut app, Stream::Traffic);
+        connect(&mut app, Stream::Logs);
+        // The others following do not repeat it.
+        connect(&mut app, Stream::Traffic);
+        // One probe for the outage, then version and configs for the recovery.
+        assert_eq!(requests_made(app, rx).await, (2, 1));
+    }
+
+    #[tokio::test]
+    async fn an_outage_behind_the_banner_is_not_probed_again() {
+        let (mut app, rx) = app_without_controller();
+        app.handle_msg(Msg::Version(Err(ApiError::Timeout)));
+        assert!(app.reconnect.is_some());
+        connect(&mut app, Stream::Traffic);
+        disconnect(&mut app, Stream::Traffic);
+        // The banner already retries on its own schedule. Recovery still
+        // refetches, which is what clears it.
+        connect(&mut app, Stream::Traffic);
+        assert_eq!(requests_made(app, rx).await, (1, 1));
+    }
+
+    #[tokio::test]
+    async fn traffic_is_dropped_with_its_own_stream_only() {
+        let (mut app, _rx) = app_without_controller();
+        connect(&mut app, Stream::Traffic);
+        connect(&mut app, Stream::Logs);
+        let frame = Traffic { up: 1, down: 2 };
+        stream_event(&mut app, Stream::Traffic, StreamEvent::Traffic(frame));
+        assert_eq!(app.traffic, Some(frame));
+        disconnect(&mut app, Stream::Logs);
+        assert_eq!(app.traffic, Some(frame));
+        disconnect(&mut app, Stream::Traffic);
+        assert_eq!(app.traffic, None);
+    }
+
+    #[tokio::test]
+    async fn memory_stream_starts_for_mihomo_only() {
+        let version = |meta| Version {
+            version: "v1".to_owned(),
+            meta,
+        };
+        let (mut clash, _rx) = app_without_controller();
+        clash.handle_msg(Msg::Version(Ok(version(false))));
+        assert!(!clash.streams.started(Stream::Memory));
+
+        let (mut mihomo, _rx) = app_without_controller();
+        mihomo.handle_msg(Msg::Version(Ok(version(true))));
+        assert!(mihomo.streams.started(Stream::Memory));
     }
 }

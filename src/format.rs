@@ -78,6 +78,39 @@ fn cmp_numbers(a: &str, b: &str) -> Ordering {
     a.len().cmp(&b.len()).then_with(|| a.cmp(b))
 }
 
+/// Units of a transfer rate, 1024 apart.
+const RATE_UNITS: [&str; 4] = ["B/s", "KB/s", "MB/s", "GB/s"];
+
+/// A transfer rate as a number and its unit: `("1.0", "KB/s")`.
+///
+/// Whole bytes show no decimal, everything above has one. Kept apart so the
+/// caller can color them differently.
+pub fn rate(bytes_per_second: u64) -> (String, &'static str) {
+    let (number, unit) = scale(bytes_per_second);
+    (number, RATE_UNITS[unit])
+}
+
+/// Scales `bytes` down to the largest unit that keeps the number below 1024,
+/// returning it and the unit's index (0 = B, 3 = GB).
+///
+/// Works on tenths with integer rounding: rounding 1023.96 KB through a float
+/// would print `1024.0 KB` instead of moving on to `1.0 MB`.
+fn scale(bytes: u64) -> (String, usize) {
+    if bytes < 1024 {
+        return (bytes.to_string(), 0);
+    }
+    let bytes = u128::from(bytes);
+    let mut unit = 1;
+    let mut divisor = 1024;
+    let tenths = |divisor: u128| (bytes * 10 + divisor / 2) / divisor;
+    while unit < RATE_UNITS.len() - 1 && tenths(divisor) >= 10240 {
+        unit += 1;
+        divisor *= 1024;
+    }
+    let tenths = tenths(divisor);
+    (format!("{}.{}", tenths / 10, tenths % 10), unit)
+}
+
 #[cfg(test)]
 mod tests {
     use unicode_width::UnicodeWidthStr;
@@ -115,5 +148,39 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn shown(bytes_per_second: u64) -> String {
+        let (number, unit) = rate(bytes_per_second);
+        format!("{number} {unit}")
+    }
+
+    #[test]
+    fn whole_bytes_stay_bytes_until_1024() {
+        assert_eq!(shown(0), "0 B/s");
+        assert_eq!(shown(1023), "1023 B/s");
+        assert_eq!(shown(1024), "1.0 KB/s");
+        assert_eq!(shown(1536), "1.5 KB/s");
+    }
+
+    #[test]
+    fn each_unit_rolls_over_at_the_next_power_of_1024() {
+        assert_eq!(shown(1024 * 1024), "1.0 MB/s");
+        assert_eq!(shown(1024 * 1024 * 1024), "1.0 GB/s");
+        assert_eq!(shown(5 * 1024 * 1024 + 512 * 1024), "5.5 MB/s");
+    }
+
+    #[test]
+    fn rounding_up_to_1024_carries_into_the_next_unit() {
+        // 1023.949… KB rounds down, 1023.950… KB rounds up past the limit.
+        assert_eq!(shown(1024 * 1024 - 52), "1023.9 KB/s");
+        assert_eq!(shown(1024 * 1024 - 51), "1.0 MB/s");
+        assert_eq!(shown(1024 * 1024 * 1024 - 1), "1.0 GB/s");
+    }
+
+    #[test]
+    fn gigabytes_do_not_roll_over_and_the_largest_rate_does_not_overflow() {
+        assert_eq!(shown(2048 * 1024 * 1024 * 1024), "2048.0 GB/s");
+        assert!(shown(u64::MAX).ends_with("GB/s"));
     }
 }

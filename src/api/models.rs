@@ -50,6 +50,17 @@ pub struct Tun {
     pub enable: bool,
 }
 
+/// One `/traffic` frame: current throughput in bytes per second.
+///
+/// The totals the kernel adds are not read here: the connections stream
+/// carries them too and is the one the stat cards will use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Traffic {
+    pub up: u64,
+    pub down: u64,
+}
+
 /// The name of the built-in group that lists every proxy and group, in
 /// configuration order.
 pub const GLOBAL: &str = "GLOBAL";
@@ -254,6 +265,18 @@ mod tests {
         assert_eq!(configs.mixed_port, 17891);
         assert_eq!(configs.mode, "rule");
         assert!(configs.tun.is_none());
+    }
+
+    #[test]
+    fn parses_traffic_frames_with_extra_or_missing_fields() {
+        // As sent by mihomo v1.19.33.
+        let frame: Traffic =
+            serde_json::from_str(r#"{"up":1536,"down":20,"upTotal":9,"downTotal":10}"#).unwrap();
+        assert_eq!(frame, Traffic { up: 1536, down: 20 });
+        let frame: Traffic = serde_json::from_str(r#"{"down":7}"#).unwrap();
+        assert_eq!(frame, Traffic { up: 0, down: 7 });
+        let frame: Traffic = serde_json::from_str("{}").unwrap();
+        assert_eq!(frame, Traffic::default());
     }
 
     fn group_names(proxies: &Proxies) -> Vec<&str> {
