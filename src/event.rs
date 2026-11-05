@@ -1,48 +1,54 @@
 use std::time::Duration;
 
 use color_eyre::Result;
-use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::EventStream;
 use futures_util::StreamExt;
 use ratatui::{DefaultTerminal, Frame, widgets::Paragraph};
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::{
+    sync::mpsc,
+    time::{MissedTickBehavior, interval},
+};
 
-/// Redraw cadence for deferred (coalesced) repaints.
+use crate::app::{App, Msg, action_for};
+
+/// Render cadence for repaints deferred by background messages.
 const TICK: Duration = Duration::from_millis(100);
 
-/// Main loop: multiplexes terminal events and the render tick.
+/// Capacity of the background-task message channel.
+const MSG_BUFFER: usize = 256;
+
+/// Main loop: turns terminal events into actions, applies background messages,
+/// and repaints.
 ///
-/// Keys repaint nothing yet; resize only marks the screen dirty so bursts of
-/// resize events collapse into one repaint on the next tick.
-pub async fn run(terminal: &mut DefaultTerminal) -> Result<()> {
+/// Terminal events repaint immediately. Background messages only mark the app
+/// dirty; the next tick paints once for the whole batch.
+pub async fn run(terminal: &mut DefaultTerminal, app: &mut App) -> Result<()> {
     let mut events = EventStream::new();
     let mut tick = interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut dirty = false;
+    let (_msg_tx, mut msg_rx) = mpsc::channel::<Msg>(MSG_BUFFER);
 
     terminal.draw(draw)?;
-    loop {
+    while !app.should_quit() {
         tokio::select! {
             _ = tick.tick() => {
-                if dirty {
+                if app.take_dirty() {
                     terminal.draw(draw)?;
-                    dirty = false;
                 }
             }
-            event = events.next() => match event {
-                Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                    let ctrl_c = key.code == KeyCode::Char('c')
-                        && key.modifiers.contains(KeyModifiers::CONTROL);
-                    if ctrl_c || key.code == KeyCode::Char('q') {
-                        return Ok(());
-                    }
+            Some(msg) = msg_rx.recv() => match msg {},
+            event = events.next() => {
+                let Some(event) = event else { break };
+                if let Some(action) = action_for(&event?) {
+                    app.update(action);
                 }
-                Some(Ok(Event::Resize(..))) => dirty = true,
-                Some(Ok(_)) => {}
-                Some(Err(err)) => return Err(err.into()),
-                None => return Ok(()),
-            },
+                if app.take_dirty() {
+                    terminal.draw(draw)?;
+                }
+            }
         }
     }
+    Ok(())
 }
 
 fn draw(frame: &mut Frame) {
