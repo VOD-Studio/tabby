@@ -9,7 +9,7 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, Page};
+use crate::app::{App, Overlay, Page};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let [header, tabs, body, footer] = Layout::vertical([
@@ -23,6 +23,10 @@ pub fn draw(frame: &mut Frame, app: &App) {
     components::tabs::render(frame, tabs, app);
     draw_page(frame, body, app);
     components::footer::render(frame, footer, app);
+    match app.overlay {
+        Some(Overlay::Help) => components::help::render(frame, frame.area(), app),
+        None => {}
+    }
     // Below the header row, over whatever lies underneath.
     let screen = frame.area();
     let toasts = Rect {

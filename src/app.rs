@@ -63,6 +63,9 @@ pub enum Action {
     NextPage,
     PrevPage,
     Refresh,
+    ToggleHelp,
+    /// `Esc`: closes the topmost overlay.
+    Dismiss,
 }
 
 /// A message from a background task.
@@ -82,9 +85,11 @@ pub fn action_for(event: &Event) -> Option<Action> {
                 KeyCode::Char('c') if ctrl => Some(Action::Quit),
                 KeyCode::Tab => Some(Action::NextPage),
                 KeyCode::BackTab => Some(Action::PrevPage),
+                KeyCode::Esc => Some(Action::Dismiss),
                 KeyCode::Char(_) if ctrl || alt => None,
                 KeyCode::Char('q') => Some(Action::Quit),
                 KeyCode::Char('r') => Some(Action::Refresh),
+                KeyCode::Char('?') => Some(Action::ToggleHelp),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -114,6 +119,12 @@ pub struct Toast {
     expires_at: Instant,
 }
 
+/// A modal panel drawn over the page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Overlay {
+    Help,
+}
+
 /// Whether the controller has answered the `/version` probe.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Connection {
@@ -133,6 +144,7 @@ pub struct App {
     pub version: Option<Result<Version, ApiError>>,
     pub configs: Option<Result<Configs, ApiError>>,
     pub toasts: VecDeque<Toast>,
+    pub overlay: Option<Overlay>,
     /// Set by `r` until the next `/version` reply, which then reports success.
     refreshing: bool,
     should_quit: bool,
@@ -150,6 +162,7 @@ impl App {
             version: None,
             configs: None,
             toasts: VecDeque::new(),
+            overlay: None,
             refreshing: false,
             should_quit: false,
             dirty: false,
@@ -174,6 +187,19 @@ impl App {
         match action {
             Action::Quit => self.should_quit = true,
             Action::Resize => self.dirty = true,
+            Action::ToggleHelp => {
+                self.overlay = match self.overlay {
+                    Some(Overlay::Help) => None,
+                    None => Some(Overlay::Help),
+                };
+                self.dirty = true;
+            }
+            Action::Dismiss => {
+                self.overlay = None;
+                self.dirty = true;
+            }
+            // Overlays are modal: everything else waits until they close.
+            _ if self.overlay.is_some() => {}
             Action::SelectPage(page) => self.set_page(page),
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
