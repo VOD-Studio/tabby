@@ -430,7 +430,7 @@ impl App {
     /// again repeats the requests; running streams are left alone.
     pub fn start(&mut self) {
         self.fetch_version();
-        self.fetch_configs();
+        self.spawn(|client| async move { Msg::Configs(client.configs().await) });
         self.fetch_proxies(false);
         for stream in [Stream::Traffic, Stream::Logs, Stream::Connections] {
             self.streams.start(stream);
@@ -439,10 +439,6 @@ impl App {
 
     fn fetch_version(&self) {
         self.spawn(|client| async move { Msg::Version(client.version().await) });
-    }
-
-    fn fetch_configs(&self) {
-        self.spawn(|client| async move { Msg::Configs(client.configs().await) });
     }
 
     /// Fetches `/proxies` in the background.
@@ -876,19 +872,19 @@ impl App {
     }
 
     /// Applies a stream event. The banner stays driven by the `/version`
-    /// probe alone; the streams only say when to probe or refetch.
+    /// probe alone; the streams only say when to probe or restart.
     ///
     /// - Every stream down at once, with no banner yet: probe now, instead of
     ///   waiting for the next request to fail.
     /// - First stream back after that: the kernel may have been replaced, so
-    ///   read its kind and settings again.
+    ///   repeat the startup requests, as a REST retry does. Streams that are
+    ///   already running are left alone.
     fn on_stream(&mut self, stream: Stream, event: &StreamEvent) {
         match event {
             StreamEvent::Connected => {
                 self.links.up.insert(stream);
                 if std::mem::take(&mut self.links.outage) {
-                    self.fetch_version();
-                    self.fetch_configs();
+                    self.start();
                 }
             }
             StreamEvent::Disconnected => {
@@ -1613,21 +1609,22 @@ mod tests {
         stream_event(app, stream, StreamEvent::Disconnected);
     }
 
-    /// How many `/version` and `/configs` requests the app made, counted from
-    /// the replies they leave on the channel. Dropping the app first stops
-    /// its streams, so the channel closes once the requests are answered and
-    /// nothing can still be on its way.
-    async fn requests_made(app: App, mut rx: mpsc::Receiver<Msg>) -> (usize, usize) {
+    /// How many `/version`, `/configs` and `/proxies` requests the app made,
+    /// counted from the replies they leave on the channel. Dropping the app
+    /// first stops its streams, so the channel closes once the requests are
+    /// answered and nothing can still be on its way.
+    async fn requests_made(app: App, mut rx: mpsc::Receiver<Msg>) -> (usize, usize, usize) {
         drop(app);
-        let (mut versions, mut configs) = (0, 0);
+        let (mut versions, mut configs, mut proxies) = (0, 0, 0);
         while let Some(msg) = rx.recv().await {
             match msg {
                 Msg::Version(_) => versions += 1,
                 Msg::Configs(_) => configs += 1,
+                Msg::Proxies { .. } => proxies += 1,
                 _ => {}
             }
         }
-        (versions, configs)
+        (versions, configs, proxies)
     }
 
     #[tokio::test]
@@ -1638,7 +1635,7 @@ mod tests {
         // One stream still up: the controller is evidently there, no probe.
         disconnect(&mut app, Stream::Traffic);
         disconnect(&mut app, Stream::Logs);
-        assert_eq!(requests_made(app, rx).await, (1, 0));
+        assert_eq!(requests_made(app, rx).await, (1, 0, 0));
     }
 
     #[tokio::test]
@@ -1648,7 +1645,7 @@ mod tests {
         // A stream reporting a hang-up it never connected for.
         disconnect(&mut app, Stream::Traffic);
         // Only what `start` asked for: no extra probe on top.
-        assert_eq!(requests_made(app, rx).await, (1, 1));
+        assert_eq!(requests_made(app, rx).await, (1, 1, 1));
     }
 
     #[tokio::test]
@@ -1657,19 +1654,20 @@ mod tests {
         for stream in [Stream::Traffic, Stream::Logs, Stream::Connections] {
             connect(&mut app, stream);
         }
-        assert_eq!(requests_made(app, rx).await, (0, 0));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0));
     }
 
     #[tokio::test]
-    async fn first_stream_back_after_an_outage_refetches_version_and_configs() {
+    async fn first_stream_back_after_an_outage_repeats_the_startup_requests() {
         let (mut app, rx) = app_without_controller();
         connect(&mut app, Stream::Traffic);
         disconnect(&mut app, Stream::Traffic);
         connect(&mut app, Stream::Logs);
         // The others following do not repeat it.
         connect(&mut app, Stream::Traffic);
-        // One probe for the outage, then version and configs for the recovery.
-        assert_eq!(requests_made(app, rx).await, (2, 1));
+        // One probe for the outage, then version, configs and proxies, as a
+        // REST retry would ask for them.
+        assert_eq!(requests_made(app, rx).await, (2, 1, 1));
     }
 
     #[tokio::test]
@@ -1682,7 +1680,7 @@ mod tests {
         // The banner already retries on its own schedule. Recovery still
         // refetches, which is what clears it.
         connect(&mut app, Stream::Traffic);
-        assert_eq!(requests_made(app, rx).await, (1, 1));
+        assert_eq!(requests_made(app, rx).await, (1, 1, 1));
     }
 
     #[tokio::test]
