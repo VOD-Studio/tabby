@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, fs, io};
 
+use clap::{Args, ValueEnum};
 use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
@@ -9,14 +10,24 @@ use serde::Deserialize;
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:9090";
 
-/// Name shown for the connection when no profile is configured.
+/// Name shown for the connection when no profile is selected.
 const FALLBACK_PROFILE: &str = "default";
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, ValueEnum)]
+#[serde(rename_all = "kebab-case")]
+pub enum ThemeName {
+    #[default]
+    Terminal,
+    TokyoNight,
+    CatppuccinMocha,
+}
 
 /// Contents of `config.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     default: Option<String>,
+    theme: Option<ThemeName>,
     profiles: BTreeMap<String, Profile>,
 }
 
@@ -28,12 +39,30 @@ pub struct Profile {
     secret: Option<String>,
 }
 
-/// The connection tabby will use, after applying defaults.
+/// Command-line / environment overrides. They take priority over `config.toml`.
+#[derive(Debug, Default, Args)]
+pub struct Overrides {
+    /// Profile from config.toml to connect with
+    #[arg(long, env = "TABBY_PROFILE")]
+    pub profile: Option<String>,
+    /// External Controller URL
+    #[arg(long, env = "TABBY_URL")]
+    pub url: Option<String>,
+    /// External Controller secret
+    #[arg(long, env = "TABBY_SECRET", hide_env_values = true)]
+    pub secret: Option<String>,
+    /// Color theme
+    #[arg(long, env = "TABBY_THEME", value_enum)]
+    pub theme: Option<ThemeName>,
+}
+
+/// The connection and look tabby will use, after applying all overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
     pub profile: String,
     pub url: String,
     pub secret: Option<String>,
+    pub theme: ThemeName,
 }
 
 impl Config {
@@ -55,24 +84,123 @@ impl Config {
         }
     }
 
-    /// Resolves the connection settings: the `default` profile, or built-in
-    /// defaults when none is set.
-    pub fn resolve(&self) -> Result<Settings> {
-        let Some(name) = &self.default else {
-            return Ok(Settings {
-                profile: FALLBACK_PROFILE.to_owned(),
-                url: DEFAULT_URL.to_owned(),
-                secret: None,
-            });
-        };
-        let profile = self
-            .profiles
-            .get(name)
-            .ok_or_else(|| eyre!("default profile `{name}` is not defined in config.toml"))?;
+    /// Merges `overrides` over the file over the built-in defaults.
+    ///
+    /// The profile is `overrides.profile`, else the file's `default`, else none;
+    /// an explicit `url` / `secret` override beats the profile's own value.
+    /// An empty override (`TABBY_SECRET=`) counts as unset.
+    pub fn resolve(&self, overrides: &Overrides) -> Result<Settings> {
+        let name = non_empty(overrides.profile.as_ref()).or(self.default.as_deref());
+        let profile = name
+            .map(|name| {
+                self.profiles
+                    .get(name)
+                    .ok_or_else(|| eyre!("profile `{name}` is not defined in config.toml"))
+            })
+            .transpose()?;
         Ok(Settings {
-            profile: name.clone(),
-            url: profile.url.clone(),
-            secret: profile.secret.clone(),
+            profile: name.unwrap_or(FALLBACK_PROFILE).to_owned(),
+            url: non_empty(overrides.url.as_ref())
+                .or_else(|| profile.map(|p| p.url.as_str()))
+                .unwrap_or(DEFAULT_URL)
+                .to_owned(),
+            secret: non_empty(overrides.secret.as_ref())
+                .or_else(|| profile.and_then(|p| p.secret.as_deref()))
+                .map(str::to_owned),
+            theme: overrides.theme.or(self.theme).unwrap_or_default(),
         })
+    }
+}
+
+fn non_empty(value: Option<&String>) -> Option<&str> {
+    value.map(String::as_str).filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const FILE: &str = r#"
+default = "local"
+theme = "tokyo-night"
+
+[profiles.local]
+url = "http://local:9090"
+secret = "file-secret"
+
+[profiles.router]
+url = "http://router:9090"
+"#;
+
+    fn file() -> Config {
+        toml::from_str(FILE).unwrap()
+    }
+
+    #[test]
+    fn defaults_apply_without_file_or_overrides() {
+        let settings = Config::default().resolve(&Overrides::default()).unwrap();
+        assert_eq!(
+            settings,
+            Settings {
+                profile: "default".into(),
+                url: DEFAULT_URL.into(),
+                secret: None,
+                theme: ThemeName::Terminal,
+            }
+        );
+    }
+
+    #[test]
+    fn file_beats_defaults() {
+        let settings = file().resolve(&Overrides::default()).unwrap();
+        assert_eq!(
+            settings,
+            Settings {
+                profile: "local".into(),
+                url: "http://local:9090".into(),
+                secret: Some("file-secret".into()),
+                theme: ThemeName::TokyoNight,
+            }
+        );
+    }
+
+    #[test]
+    fn overrides_beat_file() {
+        let overrides = Overrides {
+            profile: Some("router".into()),
+            url: Some("http://cli:1".into()),
+            secret: Some("cli-secret".into()),
+            theme: Some(ThemeName::CatppuccinMocha),
+        };
+        let settings = file().resolve(&overrides).unwrap();
+        assert_eq!(
+            settings,
+            Settings {
+                profile: "router".into(),
+                url: "http://cli:1".into(),
+                secret: Some("cli-secret".into()),
+                theme: ThemeName::CatppuccinMocha,
+            }
+        );
+    }
+
+    #[test]
+    fn profile_override_does_not_inherit_default_profile_secret() {
+        let overrides = Overrides {
+            profile: Some("router".into()),
+            ..Overrides::default()
+        };
+        let settings = file().resolve(&overrides).unwrap();
+        assert_eq!(settings.url, "http://router:9090");
+        assert_eq!(settings.secret, None);
+    }
+
+    #[test]
+    fn unknown_profile_is_an_error() {
+        let overrides = Overrides {
+            profile: Some("nope".into()),
+            ..Overrides::default()
+        };
+        assert!(file().resolve(&overrides).is_err());
     }
 }

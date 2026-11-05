@@ -66,8 +66,8 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let settings = &app.settings;
     let secret = if settings.secret.is_some() { "set" } else { "none" };
     let text = Text::from(format!(
-        "tabby - press q to quit\n\nprofile  {}\nurl      {}\nsecret   {secret}",
-        settings.profile, settings.url,
+        "tabby - press q to quit\n\nprofile  {}\nurl      {}\nsecret   {secret}\ntheme    {:?}",
+        settings.profile, settings.url, settings.theme,
     ));
     frame.render_widget(Paragraph::new(text), frame.area());
 }
