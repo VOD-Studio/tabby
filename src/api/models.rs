@@ -207,6 +207,19 @@ impl Proxies {
             });
         }
     }
+
+    /// Copies the delay history of `name` over from `earlier`, so a result
+    /// measured here outlives a reply that predates it. Returns whether both
+    /// sides know the node.
+    pub fn carry_delay(&mut self, earlier: &Self, name: &str) -> bool {
+        match (self.by_name.get_mut(name), earlier.by_name.get(name)) {
+            (Some(this), Some(earlier)) => {
+                this.history.clone_from(&earlier.history);
+                true
+            }
+            _ => false,
+        }
+    }
 }
 
 #[cfg(test)]

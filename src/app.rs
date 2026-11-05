@@ -210,7 +210,13 @@ pub enum Action {
 pub enum Msg {
     Version(Result<Version, ApiError>),
     Configs(Result<Configs, ApiError>),
-    Proxies(Result<Proxies, ApiError>),
+    /// Reply to a `/proxies` fetch. `refetch` marks one made while data is
+    /// already on screen, whose failure must not take that data away.
+    Proxies {
+        seq: u64,
+        refetch: bool,
+        result: Result<Proxies, ApiError>,
+    },
     /// Reply to switching a selector group.
     Selected {
         group: String,
@@ -343,6 +349,13 @@ pub struct App {
     pub proxies_view: ProxiesView,
     /// Nodes with a delay test in flight.
     pub testing: HashSet<String>,
+    /// `/proxies` fetches issued so far; numbers them.
+    fetches: u64,
+    /// The newest fetch whose reply has been applied; older ones are dropped.
+    applied_fetch: u64,
+    /// Delay results measured here, with the value of `fetches` when each was
+    /// recorded. A reply replaces one only if its fetch came after it.
+    local_delays: HashMap<String, u64>,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
     /// Frame counter of the loading spinner; advances while one is visible.
@@ -375,6 +388,9 @@ impl App {
             proxies: None,
             proxies_view: ProxiesView::default(),
             testing: HashSet::new(),
+            fetches: 0,
+            applied_fetch: 0,
+            local_delays: HashMap::new(),
             toasts: VecDeque::new(),
             overlay: None,
             spinner: 0,
@@ -387,10 +403,23 @@ impl App {
     }
 
     /// Spawns the startup requests.
-    pub fn start(&self) {
+    pub fn start(&mut self) {
         self.spawn(|client| async move { Msg::Version(client.version().await) });
         self.spawn(|client| async move { Msg::Configs(client.configs().await) });
-        self.spawn(|client| async move { Msg::Proxies(client.proxies().await) });
+        self.fetch_proxies(false);
+    }
+
+    /// Fetches `/proxies` in the background.
+    fn fetch_proxies(&mut self, refetch: bool) {
+        self.fetches += 1;
+        let seq = self.fetches;
+        self.spawn(move |client| async move {
+            Msg::Proxies {
+                seq,
+                refetch,
+                result: client.proxies().await,
+            }
+        });
     }
 
     /// Runs one request in the background; its message arrives on the channel.
@@ -688,9 +717,20 @@ impl App {
                 self.configs = Some(result);
                 self.follow_mode_change(was_global, selected);
             }
-            Msg::Proxies(result) => {
+            // A reply older than one already applied would roll the page back.
+            Msg::Proxies { seq, .. } if seq < self.applied_fetch => {}
+            Msg::Proxies {
+                seq,
+                refetch,
+                result,
+            } => {
+                self.applied_fetch = seq;
                 self.note_failure(&result);
-                self.proxies = Some(result);
+                match result {
+                    Ok(fresh) => self.apply_proxies(fresh, seq),
+                    Err(_) if refetch && matches!(self.proxies, Some(Ok(_))) => {}
+                    Err(err) => self.proxies = Some(Err(err)),
+                }
             }
             Msg::Selected {
                 group,
@@ -702,6 +742,7 @@ impl App {
                         proxies.set_now(&group, &node);
                     }
                     self.toast(ToastKind::Success, format!("已切换到 {node}"));
+                    self.fetch_proxies(true);
                 }
                 Err(err) => self.toast(ToastKind::Error, format!("切换失败：{}", describe(&err))),
             },
@@ -721,7 +762,7 @@ impl App {
                 for member in &members {
                     self.testing.remove(member);
                 }
-                match result {
+                let tested = match result {
                     // Members that failed or timed out are absent from the reply.
                     Ok(delays) => {
                         for member in &members {
@@ -730,16 +771,22 @@ impl App {
                                 .map_or(Delay::Failed, |millis| Delay::from_millis(*millis));
                             self.record_delay(member, delay);
                         }
+                        true
                     }
                     // No member answered: the kernel replies 504 instead of `{}`.
                     Err(err) if failed_test(&err).is_some() => {
                         for member in &members {
                             self.record_delay(member, Delay::Failed);
                         }
+                        true
                     }
                     Err(err) => {
                         self.toast(ToastKind::Error, format!("测速失败：{}", describe(&err)));
+                        false
                     }
+                };
+                if tested {
+                    self.fetch_proxies(true);
                 }
             }
         }
@@ -804,7 +851,49 @@ impl App {
     fn record_delay(&mut self, name: &str, delay: Delay) {
         if let Some(Ok(proxies)) = &mut self.proxies {
             proxies.record_delay(name, delay);
+            self.local_delays.insert(name.to_owned(), self.fetches);
         }
+    }
+
+    /// Swaps in a fresh `/proxies` reply from fetch `seq`. Delay results
+    /// measured after that fetch was issued survive it, and the node cursor
+    /// stays on its node.
+    fn apply_proxies(&mut self, mut fresh: Proxies, seq: u64) {
+        let anchor = self.node_anchor();
+        if let Some(Ok(earlier)) = &self.proxies {
+            self.local_delays
+                .retain(|name, recorded| *recorded >= seq && fresh.carry_delay(earlier, name));
+        } else {
+            self.local_delays.clear();
+        }
+        self.proxies = Some(Ok(fresh));
+        self.restore_node_cursor(anchor);
+    }
+
+    /// The group, position and name the node cursor is on.
+    fn node_anchor(&self) -> Option<(String, usize, String)> {
+        let group = self.selected_group()?.name.clone();
+        let index = self.node_cursor();
+        let name = (*self.visible_nodes().get(index)?).to_owned();
+        Some((group, index, name))
+    }
+
+    /// Puts the node cursor back on the node it was on. A node that is gone
+    /// leaves it at the same position, which is the nearest card left.
+    fn restore_node_cursor(&mut self, anchor: Option<(String, usize, String)>) {
+        let Some((group, index, name)) = anchor else {
+            return;
+        };
+        if self.selected_group().map(|g| g.name.as_str()) != Some(group.as_str()) {
+            self.proxies_view.node = None;
+            return;
+        }
+        let position = self
+            .visible_nodes()
+            .iter()
+            .position(|node| *node == name)
+            .unwrap_or(index);
+        self.proxies_view.node = Some(position);
     }
 
     /// `t`: delay-test the node under the cursor, or the group's current node
@@ -916,8 +1005,13 @@ impl App {
     }
 
     fn set_page(&mut self, page: Page) {
+        let entering_proxies = page == Page::Proxies && self.page != Page::Proxies;
         self.page = page;
         self.dirty = true;
+        // Shows what is there and refreshes behind it, without a spinner.
+        if entering_proxies && self.proxies.is_some() {
+            self.fetch_proxies(true);
+        }
     }
 }
 
@@ -1017,18 +1111,62 @@ mod tests {
         assert_eq!(Move::HalfUp.apply(2, 30, 4), 0);
     }
 
-    fn app_with_proxies() -> (App, Vec<String>) {
+    /// An app on a controller nobody listens on, so requests it spawns fail
+    /// fast instead of reaching a real kernel.
+    fn app_with(proxies: Proxies) -> App {
         let (tx, _rx) = mpsc::channel(1);
+        let overrides = crate::config::Overrides {
+            url: Some("http://127.0.0.1:1".to_owned()),
+            ..Default::default()
+        };
         let settings = crate::config::Config::default()
-            .resolve(&crate::config::Overrides::default())
+            .resolve(&overrides)
             .unwrap();
         let client = ApiClient::new(&settings.url, None).unwrap();
         let mut app = App::new(settings, client, tx, Size::new(120, 40));
+        app.proxies = Some(Ok(proxies));
+        app
+    }
+
+    fn app_with_proxies() -> (App, Vec<String>) {
         let proxies: Proxies =
             serde_json::from_str(include_str!("../tests/fixtures/mihomo_proxies.json")).unwrap();
         let members = proxies.groups().next().unwrap().all.clone().unwrap();
-        app.proxies = Some(Ok(proxies));
-        (app, members)
+        (app_with(proxies), members)
+    }
+
+    /// A reply with one selector group `G` over `nodes`, each given with the
+    /// delays of its history.
+    fn reply(nodes: &[(&str, &[u32])]) -> Proxies {
+        let mut proxies = serde_json::Map::new();
+        let names: Vec<&str> = nodes.iter().map(|(name, _)| *name).collect();
+        proxies.insert(
+            "G".to_owned(),
+            serde_json::json!({"name": "G", "type": "Selector", "all": names, "now": names[0]}),
+        );
+        for (name, delays) in nodes {
+            let history: Vec<_> = delays
+                .iter()
+                .map(|delay| serde_json::json!({"delay": delay}))
+                .collect();
+            proxies.insert(
+                (*name).to_owned(),
+                serde_json::json!({"name": name, "type": "Direct", "history": history}),
+            );
+        }
+        serde_json::from_value(serde_json::json!({ "proxies": proxies })).unwrap()
+    }
+
+    fn fetched(seq: u64, refetch: bool, proxies: Proxies) -> Msg {
+        Msg::Proxies {
+            seq,
+            refetch,
+            result: Ok(proxies),
+        }
+    }
+
+    fn cursor_name(app: &App) -> String {
+        app.visible_nodes()[app.node_cursor()].to_owned()
     }
 
     fn delay_of(app: &App, name: &str) -> Option<Delay> {
@@ -1071,8 +1209,8 @@ mod tests {
         assert_eq!(app.toasts.len(), 1);
     }
 
-    #[test]
-    fn group_test_counts_missing_members_as_failed() {
+    #[tokio::test]
+    async fn group_test_counts_missing_members_as_failed() {
         let (mut app, members) = app_with_proxies();
         let members = members[..3].to_vec();
         let answered = HashMap::from([(members[0].clone(), 80)]);
@@ -1085,8 +1223,8 @@ mod tests {
         assert_eq!(delay_of(&app, &members[2]), Some(Delay::Failed));
     }
 
-    #[test]
-    fn group_test_without_any_answer_fails_every_member() {
+    #[tokio::test]
+    async fn group_test_without_any_answer_fails_every_member() {
         let (mut app, members) = app_with_proxies();
         let members = members[..3].to_vec();
         app.handle_msg(Msg::GroupDelay {
@@ -1162,5 +1300,116 @@ mod tests {
         app.proxies_view.group = 3;
         set_mode(&mut app, "global");
         assert_eq!(app.proxies_view.group, 3);
+    }
+
+    #[tokio::test]
+    async fn refetch_follows_a_switch_and_a_finished_group_test() {
+        let (mut app, members) = app_with_proxies();
+        let group = app.selected_group().unwrap().name.clone();
+        let node = members[0].clone();
+        let switched = |result| Msg::Selected {
+            group: group.clone(),
+            node: node.clone(),
+            result,
+        };
+
+        app.handle_msg(switched(Err(http(500))));
+        assert_eq!(app.fetches, 0);
+        app.handle_msg(switched(Ok(())));
+        assert_eq!(app.fetches, 1);
+
+        let group_test = |result| Msg::GroupDelay {
+            members: members[..2].to_vec(),
+            result,
+        };
+        app.handle_msg(group_test(Err(http(500))));
+        assert_eq!(app.fetches, 1);
+        app.handle_msg(group_test(Ok(HashMap::new())));
+        assert_eq!(app.fetches, 2);
+        app.handle_msg(group_test(Err(http(504))));
+        assert_eq!(app.fetches, 3);
+    }
+
+    #[tokio::test]
+    async fn entering_the_proxies_page_refetches_once_data_is_there() {
+        let (mut app, _) = app_with_proxies();
+        app.update(Action::SelectPage(Page::Proxies));
+        assert_eq!(app.fetches, 1);
+        // Already there: nothing to refresh.
+        app.update(Action::SelectPage(Page::Proxies));
+        assert_eq!(app.fetches, 1);
+
+        // The first load is still in flight: it is not asked twice.
+        let (mut app, _) = app_with_proxies();
+        app.proxies = None;
+        app.update(Action::SelectPage(Page::Proxies));
+        assert_eq!(app.fetches, 0);
+    }
+
+    #[tokio::test]
+    async fn refetch_does_not_erase_a_result_measured_after_it_was_issued() {
+        let mut app = app_with(reply(&[("a", &[]), ("b", &[])]));
+        app.fetch_proxies(true);
+        app.testing.insert("b".to_owned());
+        app.record_delay("a", Delay::Millis(50));
+
+        // The reply to a fetch issued before the test knows nothing of it.
+        app.handle_msg(fetched(1, true, reply(&[("a", &[]), ("b", &[])])));
+        assert_eq!(delay_of(&app, "a"), Some(Delay::Millis(50)));
+        assert!(app.testing.contains("b"));
+
+        // A fetch issued afterwards does: the server's data takes over.
+        app.fetch_proxies(true);
+        app.handle_msg(fetched(2, true, reply(&[("a", &[70]), ("b", &[])])));
+        assert_eq!(delay_of(&app, "a"), Some(Delay::Millis(70)));
+    }
+
+    #[tokio::test]
+    async fn reply_older_than_the_applied_one_is_dropped() {
+        let mut app = app_with(reply(&[("a", &[])]));
+        app.handle_msg(fetched(2, true, reply(&[("a", &[70])])));
+        app.handle_msg(fetched(1, true, reply(&[("a", &[90])])));
+        assert_eq!(delay_of(&app, "a"), Some(Delay::Millis(70)));
+    }
+
+    #[tokio::test]
+    async fn failed_refetch_keeps_the_data_but_failed_load_does_not() {
+        let mut app = app_with(reply(&[("a", &[])]));
+        let failed = |seq, refetch| Msg::Proxies {
+            seq,
+            refetch,
+            result: Err(http(500)),
+        };
+        app.handle_msg(failed(1, true));
+        assert!(matches!(app.proxies, Some(Ok(_))));
+        assert_eq!(app.toasts.len(), 1);
+        app.handle_msg(failed(2, false));
+        assert!(matches!(app.proxies, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn refetch_keeps_the_cursor_on_its_node() {
+        let mut app = app_with(reply(&[("a", &[]), ("b", &[]), ("c", &[])]));
+        app.proxies_view.node = Some(1);
+        app.handle_msg(fetched(
+            1,
+            true,
+            reply(&[("x", &[]), ("y", &[]), ("a", &[]), ("b", &[]), ("c", &[])]),
+        ));
+        assert_eq!(cursor_name(&app), "b");
+        assert_eq!(app.node_cursor(), 3);
+    }
+
+    #[tokio::test]
+    async fn refetch_moves_the_cursor_to_the_nearest_card_when_its_node_is_gone() {
+        let nodes = [("a", &[][..]), ("b", &[]), ("c", &[]), ("d", &[])];
+        let mut app = app_with(reply(&nodes));
+        app.proxies_view.node = Some(2);
+        app.handle_msg(fetched(1, true, reply(&[nodes[0], nodes[1], nodes[3]])));
+        assert_eq!(cursor_name(&app), "d");
+
+        // Gone from the end of the grid: the last card is the nearest.
+        app.handle_msg(fetched(2, true, reply(&nodes[..2])));
+        assert_eq!(cursor_name(&app), "b");
     }
 }
