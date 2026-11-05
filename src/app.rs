@@ -13,7 +13,7 @@ use crate::{
         backoff,
         client::ApiClient,
         error::ApiError,
-        models::{Configs, CoreKind, GLOBAL, Proxies, Proxy, Version},
+        models::{Configs, CoreKind, Delay, GLOBAL, Proxies, Proxy, Version},
     },
     config::Settings,
     ui::{proxies, regions, scroll::Scroll, text::describe, theme::Theme},
@@ -568,7 +568,7 @@ impl App {
                     .and_then(|proxies| proxies.get(name))
                     .and_then(Proxy::delay)
                 {
-                    Some(millis) if millis > 0 => (0, millis),
+                    Some(Delay::Millis(millis)) => (0, millis),
                     _ => (1, 0),
                 }
             }),
@@ -675,9 +675,11 @@ impl App {
             },
             Msg::Delay { name, result } => {
                 self.testing.remove(&name);
-                match result {
-                    Ok(millis) => self.record_delay(&name, millis),
-                    Err(err) if is_failed_test(&err) => self.record_delay(&name, 0),
+                let outcome = result
+                    .map(Delay::from_millis)
+                    .or_else(|err| failed_test(&err).ok_or(err));
+                match outcome {
+                    Ok(delay) => self.record_delay(&name, delay),
                     Err(err) => {
                         self.toast(ToastKind::Error, format!("测速失败：{}", describe(&err)));
                     }
@@ -688,10 +690,19 @@ impl App {
                     self.testing.remove(member);
                 }
                 match result {
-                    // Members that failed are simply absent from the reply.
+                    // Members that failed or timed out are absent from the reply.
                     Ok(delays) => {
                         for member in &members {
-                            self.record_delay(member, delays.get(member).copied().unwrap_or(0));
+                            let delay = delays
+                                .get(member)
+                                .map_or(Delay::Failed, |millis| Delay::from_millis(*millis));
+                            self.record_delay(member, delay);
+                        }
+                    }
+                    // No member answered: the kernel replies 504 instead of `{}`.
+                    Err(err) if failed_test(&err).is_some() => {
+                        for member in &members {
+                            self.record_delay(member, Delay::Failed);
                         }
                     }
                     Err(err) => {
@@ -758,9 +769,9 @@ impl App {
         matches!(&self.version, Some(Ok(version)) if version.kind() == CoreKind::Mihomo)
     }
 
-    fn record_delay(&mut self, name: &str, millis: u32) {
+    fn record_delay(&mut self, name: &str, delay: Delay) {
         if let Some(Ok(proxies)) = &mut self.proxies {
-            proxies.record_delay(name, millis);
+            proxies.record_delay(name, delay);
         }
     }
 
@@ -878,17 +889,30 @@ impl App {
     }
 }
 
-/// The kernel answers a failed or timed-out delay test with 503 / 504, which
-/// is a result (the node is unreachable), not a failure of the request.
-fn is_failed_test(err: &ApiError) -> bool {
-    matches!(
-        err,
-        ApiError::Timeout
-            | ApiError::Http {
-                status: 503 | 504,
-                ..
-            }
-    )
+/// Reads a delay test that errored as a result, or `None` when the request
+/// itself failed.
+///
+/// Checked against mihomo v1.19.33 with one node per case:
+///
+/// - `GET /proxies/{name}/delay`: 200 `{"delay": ms}`; **503**
+///   `{"message":"An error occurred in the delay test"}` when the node is
+///   unreachable (connection refused, DNS failure); **504**
+///   `{"message":"Timeout"}` when it did not answer within `timeout`; 404
+///   for an unknown node.
+/// - `GET /group/{name}/delay`: 200 with only the members that answered. A
+///   member that failed and one that timed out are both just missing, so the
+///   two cannot be told apart. When no member answers the reply is **504**
+///   `{"message":"get delay: all proxies timeout"}`, even if every one
+///   failed at once.
+///
+/// A client-side timeout means the kernel never replied within the request
+/// limit, which is longer than any sane delay timeout: the node did not answer.
+fn failed_test(err: &ApiError) -> Option<Delay> {
+    match err {
+        ApiError::Http { status: 503, .. } => Some(Delay::Failed),
+        ApiError::Http { status: 504, .. } | ApiError::Timeout => Some(Delay::Timeout),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -959,5 +983,89 @@ mod tests {
         assert_eq!(Move::HalfDown.apply(2, 30, 4), 6);
         assert_eq!(Move::HalfDown.apply(28, 30, 4), 29);
         assert_eq!(Move::HalfUp.apply(2, 30, 4), 0);
+    }
+
+    fn app_with_proxies() -> (App, Vec<String>) {
+        let (tx, _rx) = mpsc::channel(1);
+        let settings = crate::config::Config::default()
+            .resolve(&crate::config::Overrides::default())
+            .unwrap();
+        let client = ApiClient::new(&settings.url, None).unwrap();
+        let mut app = App::new(settings, client, tx, Size::new(120, 40));
+        let proxies: Proxies =
+            serde_json::from_str(include_str!("../tests/fixtures/mihomo_proxies.json")).unwrap();
+        let members = proxies.groups().next().unwrap().all.clone().unwrap();
+        app.proxies = Some(Ok(proxies));
+        (app, members)
+    }
+
+    fn delay_of(app: &App, name: &str) -> Option<Delay> {
+        app.proxies.as_ref()?.as_ref().ok()?.get(name)?.delay()
+    }
+
+    fn http(status: u16) -> ApiError {
+        ApiError::Http {
+            status,
+            message: String::new(),
+        }
+    }
+
+    #[test]
+    fn node_test_tells_failed_from_timed_out() {
+        let (mut app, members) = app_with_proxies();
+        let test = |app: &mut App, name: &str, result| {
+            app.handle_msg(Msg::Delay {
+                name: name.to_owned(),
+                result,
+            });
+        };
+        test(&mut app, &members[0], Err(http(503)));
+        test(&mut app, &members[1], Err(http(504)));
+        test(&mut app, &members[2], Ok(120));
+        assert_eq!(delay_of(&app, &members[0]), Some(Delay::Failed));
+        assert_eq!(delay_of(&app, &members[1]), Some(Delay::Timeout));
+        assert_eq!(delay_of(&app, &members[2]), Some(Delay::Millis(120)));
+    }
+
+    #[test]
+    fn failed_request_is_not_a_test_result() {
+        let (mut app, members) = app_with_proxies();
+        let before = delay_of(&app, &members[0]);
+        app.handle_msg(Msg::Delay {
+            name: members[0].clone(),
+            result: Err(http(500)),
+        });
+        assert_eq!(delay_of(&app, &members[0]), before);
+        assert_eq!(app.toasts.len(), 1);
+    }
+
+    #[test]
+    fn group_test_counts_missing_members_as_failed() {
+        let (mut app, members) = app_with_proxies();
+        let members = members[..3].to_vec();
+        let answered = HashMap::from([(members[0].clone(), 80)]);
+        app.handle_msg(Msg::GroupDelay {
+            members: members.clone(),
+            result: Ok(answered),
+        });
+        assert_eq!(delay_of(&app, &members[0]), Some(Delay::Millis(80)));
+        assert_eq!(delay_of(&app, &members[1]), Some(Delay::Failed));
+        assert_eq!(delay_of(&app, &members[2]), Some(Delay::Failed));
+    }
+
+    #[test]
+    fn group_test_without_any_answer_fails_every_member() {
+        let (mut app, members) = app_with_proxies();
+        let members = members[..3].to_vec();
+        app.handle_msg(Msg::GroupDelay {
+            members: members.clone(),
+            result: Err(http(504)),
+        });
+        assert!(
+            members
+                .iter()
+                .all(|m| delay_of(&app, m) == Some(Delay::Failed))
+        );
+        assert!(app.toasts.is_empty());
     }
 }

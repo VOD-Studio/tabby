@@ -75,15 +75,45 @@ pub struct Proxy {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct DelayRecord {
-    /// Milliseconds; 0 when the test failed.
+    /// Milliseconds; 0 when the test failed or timed out (the kernel records
+    /// both the same way).
     pub delay: u32,
+    /// The test ran into the timeout. Only known for tests run from here:
+    /// the kernel's history does not say.
+    #[serde(skip)]
+    timed_out: bool,
+}
+
+/// What the latest delay test of a node came to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Delay {
+    Millis(u32),
+    /// The node could not be reached. Also what a test the kernel recorded as
+    /// 0 ms reads as after a reload, since the kernel does not keep why.
+    Failed,
+    /// The node did not answer in time.
+    Timeout,
+}
+
+impl Delay {
+    /// A reply of 0 ms is the kernel's way of saying the test failed.
+    pub fn from_millis(millis: u32) -> Self {
+        if millis == 0 {
+            Self::Failed
+        } else {
+            Self::Millis(millis)
+        }
+    }
 }
 
 impl Proxy {
-    /// Result of the latest delay test: `Some(0)` is a failed test, `None`
-    /// means never tested.
-    pub fn delay(&self) -> Option<u32> {
-        self.history.last().map(|record| record.delay)
+    /// Result of the latest delay test; `None` means never tested.
+    pub fn delay(&self) -> Option<Delay> {
+        self.history.last().map(|record| match record.delay {
+            0 if record.timed_out => Delay::Timeout,
+            0 => Delay::Failed,
+            millis => Delay::Millis(millis),
+        })
     }
 
     /// Whether the user picks this group's member (only `Selector` groups).
@@ -161,10 +191,20 @@ impl Proxies {
         }
     }
 
-    /// Appends a delay test result (0 = failed) to a node's history.
-    pub fn record_delay(&mut self, name: &str, millis: u32) {
+    /// Appends a delay test result to a node's history.
+    pub fn record_delay(&mut self, name: &str, delay: Delay) {
         if let Some(proxy) = self.by_name.get_mut(name) {
-            proxy.history.push(DelayRecord { delay: millis });
+            proxy.history.push(match delay {
+                Delay::Millis(delay) => DelayRecord {
+                    delay,
+                    timed_out: false,
+                },
+                Delay::Failed => DelayRecord::default(),
+                Delay::Timeout => DelayRecord {
+                    delay: 0,
+                    timed_out: true,
+                },
+            });
         }
     }
 }

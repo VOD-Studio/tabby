@@ -8,7 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use crate::{
-    api::models::{Proxies, Proxy},
+    api::models::{Delay, Proxies, Proxy},
     app::{App, Pane, Sort},
     format::truncate,
     ui::components::states,
@@ -178,9 +178,10 @@ fn group_item(
         let delay = (group.kind == "URLTest")
             .then(|| proxies.get(now).and_then(Proxy::delay))
             .flatten()
-            .map(|millis| match millis {
-                0 => (" · 超时".to_owned(), theme.error),
-                ms => (format!(" · {ms} ms"), theme.delay(ms)),
+            .map(|delay| match delay {
+                Delay::Millis(ms) => (format!(" · {ms} ms"), theme.delay(ms)),
+                Delay::Failed => (" · 失败".to_owned(), theme.error),
+                Delay::Timeout => (" · 超时".to_owned(), theme.error),
             });
         let delay_width = delay.as_ref().map_or(0, |(text, _)| text.width());
         second.push(Span::styled(
@@ -357,15 +358,19 @@ fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
             Style::new().fg(theme.muted),
         ),
         None => ("—".to_owned(), Style::new().fg(theme.muted)),
-        Some(0) => (
-            "超时".to_owned(),
-            Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
-        ),
-        Some(ms) => (
+        Some(Delay::Millis(ms)) => (
             format!("{ms} ms"),
             Style::new()
                 .fg(theme.delay(ms))
                 .add_modifier(Modifier::BOLD),
+        ),
+        Some(Delay::Failed) => (
+            "失败".to_owned(),
+            Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
+        ),
+        Some(Delay::Timeout) => (
+            "超时".to_owned(),
+            Style::new().fg(theme.error).add_modifier(Modifier::BOLD),
         ),
     };
     let kind = card.proxy.map_or_else(String::new, |proxy| {
@@ -387,13 +392,16 @@ fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
     // The bottom border becomes the delay bar.
     let bar_width = usize::from(rect.width.saturating_sub(2));
     let filled = match delay {
-        Some(ms) if ms > 0 => {
+        Some(Delay::Millis(ms)) => {
             (usize::try_from(ms).unwrap_or(BAR_FULL_MS).min(BAR_FULL_MS) * bar_width / BAR_FULL_MS)
                 .max(1)
         }
         _ => 0,
     };
-    let bar_color = delay.map_or(theme.muted, |ms| theme.delay(ms));
+    let bar_color = match delay {
+        Some(Delay::Millis(ms)) => theme.delay(ms),
+        _ => theme.muted,
+    };
     let bottom = Line::from(vec![
         Span::styled("╰", border),
         Span::styled("━".repeat(filled), Style::new().fg(bar_color)),
