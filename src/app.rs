@@ -5991,7 +5991,11 @@ mod tests {
     async fn the_title_is_not_live_until_the_resubscribed_log_is_in() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Logs;
-        let status = |app: &App| logs::status(&app.logs_view, &app.theme).content.into_owned();
+        let status = |app: &App| {
+            logs::status(&app.logs_view, &app.theme)
+                .content
+                .into_owned()
+        };
         connect(&mut app, Stream::Logs);
         assert_eq!(status(&app).trim(), "● 实时");
         // The new connection may never get in, and would then never report

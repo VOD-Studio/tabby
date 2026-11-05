@@ -54,10 +54,8 @@ pub fn type_name(kind: &str) -> String {
     for (index, &ch) in chars.iter().enumerate() {
         if index > 0 && ch.is_uppercase() {
             let prev = chars[index - 1];
-            let ends_acronym = prev.is_uppercase()
-                && chars
-                    .get(index + 1)
-                    .is_some_and(|next| next.is_lowercase());
+            let ends_acronym =
+                prev.is_uppercase() && chars.get(index + 1).is_some_and(|next| next.is_lowercase());
             if prev.is_lowercase() || prev.is_ascii_digit() || ends_acronym {
                 name.push('-');
             }
@@ -265,21 +263,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
 
     let heading = Style::new().fg(theme.muted).add_modifier(Modifier::BOLD);
     let labels = [number_label(narrow), "类型", "匹配内容", "目标"];
-    let header = Row::new(labels.iter().zip(widths).enumerate().map(
-        |(index, (label, width))| {
-            let text = format::truncate(label, width);
-            // The numbers are right-aligned; so is their label.
-            let pad = if index == 0 {
-                " ".repeat(width.saturating_sub(text.width()))
-            } else {
-                String::new()
-            };
-            Cell::from(Line::from(vec![
-                Span::raw(pad),
-                Span::styled(text, heading),
-            ]))
-        },
-    ));
+    let header = Row::new(
+        labels
+            .iter()
+            .zip(widths)
+            .enumerate()
+            .map(|(index, (label, width))| {
+                let text = format::truncate(label, width);
+                // The numbers are right-aligned; so is their label.
+                let pad = if index == 0 {
+                    " ".repeat(width.saturating_sub(text.width()))
+                } else {
+                    String::new()
+                };
+                Cell::from(Line::from(vec![
+                    Span::raw(pad),
+                    Span::styled(text, heading),
+                ]))
+            }),
+    );
     // Only the rows in view are built: a kernel can have thousands of rules.
     let body = window.map(|index| {
         let style = if index == cursor {
@@ -310,11 +312,7 @@ fn cells(theme: &Theme, row: &RuleRow, needle: &str, widths: [usize; 4]) -> [Cel
         let spans: Vec<Span<'static>> = highlight(text, needle, width)
             .into_iter()
             .map(|(piece, matched)| {
-                let style = if matched {
-                    hit
-                } else {
-                    Style::new().fg(color)
-                };
+                let style = if matched { hit } else { Style::new().fg(color) };
                 Span::styled(piece, style)
             })
             .collect();
@@ -384,7 +382,12 @@ mod tests {
     fn highlight_marks_every_match_whatever_the_case() {
         assert_eq!(
             pieces("Example.EXAMPLE.org", "exAMple", 40),
-            owned(&[("Example", true), (".", false), ("EXAMPLE", true), (".org", false)])
+            owned(&[
+                ("Example", true),
+                (".", false),
+                ("EXAMPLE", true),
+                (".org", false)
+            ])
         );
         assert_eq!(pieces("abc", "", 40), owned(&[("abc", false)]));
         assert_eq!(pieces("abc", "x", 40), owned(&[("abc", false)]));
@@ -422,7 +425,11 @@ mod tests {
                 .into_iter()
                 .map(|(piece, _)| piece)
                 .collect();
-            assert_eq!(joined, format::truncate("ab直连cd直连", width), "at {width}");
+            assert_eq!(
+                joined,
+                format::truncate("ab直连cd直连", width),
+                "at {width}"
+            );
         }
     }
 }
