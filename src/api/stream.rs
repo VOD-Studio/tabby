@@ -17,7 +17,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungsten
 
 use super::{
     backoff,
-    models::{ConnectionSnapshot, Memory, Traffic},
+    models::{ConnectionSnapshot, Log, LogLevel, Memory, Traffic},
 };
 use crate::app::Msg;
 
@@ -48,10 +48,10 @@ impl Stream {
         }
     }
 
-    /// Fixed query parameter of the endpoint.
-    fn query(self) -> Option<(&'static str, &'static str)> {
+    /// Query parameter of the endpoint: the level `/logs` is subscribed at.
+    fn query(self, level: LogLevel) -> Option<(&'static str, &'static str)> {
         match self {
-            Self::Logs => Some(("level", "info")),
+            Self::Logs => Some(("level", level.name())),
             _ => None,
         }
     }
@@ -68,14 +68,16 @@ pub enum Event {
     Traffic(Traffic),
     Connections(ConnectionSnapshot),
     Memory(Memory),
+    Log(Log),
 }
 
-/// The WebSocket URL of `stream` on the controller at `base`.
+/// The WebSocket URL of `stream` on the controller at `base`, with `/logs`
+/// at `level`.
 ///
 /// WebSocket handshakes from a browser cannot carry an `Authorization`
 /// header, so the controller takes the secret as a `token` query parameter;
 /// it is percent-encoded like any other value (R2).
-fn url(base: &str, secret: Option<&str>, stream: Stream) -> Result<Url> {
+fn url(base: &str, secret: Option<&str>, stream: Stream, level: LogLevel) -> Result<Url> {
     let mut url = Url::parse(base)?;
     let scheme = match url.scheme() {
         "http" => "ws",
@@ -92,7 +94,7 @@ fn url(base: &str, secret: Option<&str>, stream: Stream) -> Result<Url> {
         .pop_if_empty()
         .push(stream.path());
     let pairs: Vec<(&str, &str)> = stream
-        .query()
+        .query(level)
         .into_iter()
         .chain(secret.map(|secret| ("token", secret)))
         .collect();
@@ -108,6 +110,8 @@ fn url(base: &str, secret: Option<&str>, stream: Stream) -> Result<Url> {
 pub struct Streams {
     base: String,
     secret: Option<String>,
+    /// What `/logs` is subscribed at.
+    log_level: LogLevel,
     tx: mpsc::Sender<Msg>,
     /// Ticked to cut short the backoff wait of every stream.
     retry: watch::Sender<()>,
@@ -119,6 +123,7 @@ impl Streams {
         Self {
             base: base.to_owned(),
             secret: secret.map(str::to_owned),
+            log_level: LogLevel::default(),
             tx,
             retry: watch::Sender::new(()),
             tasks: HashMap::new(),
@@ -130,7 +135,7 @@ impl Streams {
         if self.tasks.contains_key(&stream) {
             return;
         }
-        let url = match url(&self.base, self.secret.as_deref(), stream) {
+        let url = match url(&self.base, self.secret.as_deref(), stream, self.log_level) {
             Ok(url) => url,
             Err(err) => {
                 tracing::error!(?stream, "cannot subscribe: {err}");
@@ -139,6 +144,19 @@ impl Streams {
         };
         let task = tokio::spawn(run(stream, url, self.tx.clone(), self.retry.subscribe()));
         self.tasks.insert(stream, task);
+    }
+
+    /// Subscribes `/logs` at `level` from now on. A running task is replaced
+    /// by one asking for the new level: the old connection is dropped without
+    /// an [`Event::Disconnected`], and the new task reports
+    /// [`Event::Connected`] once it is in, so a deliberate restart never
+    /// reads as the stream going down.
+    pub fn set_log_level(&mut self, level: LogLevel) {
+        self.log_level = level;
+        if let Some(task) = self.tasks.remove(&Stream::Logs) {
+            task.abort();
+            self.start(Stream::Logs);
+        }
     }
 
     /// Makes every stream that is waiting out a backoff reconnect now.
@@ -212,15 +230,12 @@ async fn pump(stream: Stream, socket: &mut Socket, tx: &mpsc::Sender<Msg>) -> bo
 
 /// Reads a text frame. A frame that does not parse is logged and skipped:
 /// one odd frame is no reason to drop the connection.
-///
-/// Log frames are not read yet; that stream counts as live for as long as it
-/// delivers.
 fn decode(stream: Stream, text: &str) -> Option<Event> {
     match stream {
         Stream::Traffic => parse(stream, text).map(Event::Traffic),
         Stream::Connections => parse(stream, text).map(Event::Connections),
         Stream::Memory => parse(stream, text).map(Event::Memory),
-        Stream::Logs => None,
+        Stream::Logs => parse(stream, text).map(Event::Log),
     }
 }
 
@@ -262,9 +277,10 @@ mod tests {
     };
 
     use super::*;
+    use crate::api::models::LogKind;
 
     fn build(base: &str, secret: Option<&str>, stream: Stream) -> Url {
-        url(base, secret, stream).unwrap()
+        url(base, secret, stream, LogLevel::Info).unwrap()
     }
 
     #[test]
@@ -273,7 +289,7 @@ mod tests {
         assert_eq!(plain.as_str(), "ws://127.0.0.1:9090/traffic");
         let tls = build("https://router.lan:9090", None, Stream::Traffic);
         assert_eq!(tls.as_str(), "wss://router.lan:9090/traffic");
-        assert!(url("ftp://router.lan", None, Stream::Traffic).is_err());
+        assert!(url("ftp://router.lan", None, Stream::Traffic, LogLevel::Info).is_err());
     }
 
     #[test]
@@ -295,6 +311,15 @@ mod tests {
         assert_eq!(logs.query(), Some("level=info"));
         let secured = build("http://h:9090", Some("s3cret"), Stream::Logs);
         assert_eq!(secured.query(), Some("level=info&token=s3cret"));
+    }
+
+    #[test]
+    fn logs_are_subscribed_at_the_chosen_level() {
+        let logs = url("http://h", Some("k"), Stream::Logs, LogLevel::Warning).unwrap();
+        assert_eq!(logs.query(), Some("level=warning&token=k"));
+        // Only the logs take a level.
+        let traffic = url("http://h", None, Stream::Traffic, LogLevel::Debug).unwrap();
+        assert_eq!(traffic.query(), None);
     }
 
     #[test]
@@ -329,8 +354,14 @@ mod tests {
             decode(Stream::Memory, memory),
             Some(Event::Memory(Memory { inuse: 188_715_008 }))
         );
-        // Logs are not read, and an unreadable frame is skipped, not fatal.
-        assert_eq!(decode(Stream::Logs, memory), None);
+        let log = include_str!("../../tests/fixtures/mihomo_log.json");
+        let Some(Event::Log(log)) = decode(Stream::Logs, log) else {
+            panic!("log frame not decoded");
+        };
+        assert_eq!(log.kind, LogKind::Level(LogLevel::Info));
+        // An unreadable frame is skipped, not fatal.
+        assert_eq!(decode(Stream::Logs, "not json"), None);
+        assert_eq!(decode(Stream::Logs, r#"{"type":"info","payload":7}"#), None);
         assert_eq!(decode(Stream::Connections, "not json"), None);
         assert_eq!(decode(Stream::Memory, r#"{"inuse":"lots"}"#), None);
     }
@@ -471,5 +502,69 @@ mod tests {
             events,
             [Event::Connected, Event::Traffic(Traffic { up: 0, down: 5 })]
         );
+    }
+
+    async fn next_event(rx: &mut mpsc::Receiver<Msg>) -> Event {
+        let msg = timeout(Duration::from_secs(10), rx.recv())
+            .await
+            .expect("stream went quiet")
+            .unwrap();
+        let Msg::Stream { event, .. } = msg else {
+            panic!("unexpected message {msg:?}");
+        };
+        event
+    }
+
+    #[tokio::test]
+    async fn a_new_log_level_resubscribes_without_reporting_a_hang_up() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let (targets_tx, mut targets) = mpsc::unbounded_channel();
+        let (dropped_tx, dropped) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut first = accept_recording(&listener, &targets_tx).await;
+            let mut second = accept_recording(&listener, &targets_tx).await;
+            second
+                .send(Message::text(r#"{"type":"debug","payload":"new"}"#))
+                .await
+                .unwrap();
+            // The client let go of the first connection.
+            while let Some(Ok(_)) = first.next().await {}
+            dropped_tx.send(()).unwrap();
+            while second.next().await.is_some() {}
+        });
+
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut streams = Streams::new(&base, None, tx);
+        streams.start(Stream::Logs);
+        assert_eq!(next_event(&mut rx).await, Event::Connected);
+        streams.set_log_level(LogLevel::Debug);
+        // Straight to the new connection: no hang-up in between.
+        assert_eq!(next_event(&mut rx).await, Event::Connected);
+        assert_eq!(
+            next_event(&mut rx).await,
+            Event::Log(Log {
+                kind: LogKind::Level(LogLevel::Debug),
+                payload: "new".to_owned(),
+            })
+        );
+        timeout(Duration::from_secs(10), dropped)
+            .await
+            .expect("old connection kept open")
+            .unwrap();
+        assert!(streams.started(Stream::Logs));
+
+        let mut levels = vec![];
+        for _ in 0..2 {
+            let target = Url::parse(&format!("ws://h{}", targets.recv().await.unwrap())).unwrap();
+            assert_eq!(target.path(), "/logs");
+            levels.extend(
+                target
+                    .query_pairs()
+                    .filter(|(key, _)| key == "level")
+                    .map(|(_, value)| value.into_owned()),
+            );
+        }
+        assert_eq!(levels, ["info", "debug"]);
     }
 }

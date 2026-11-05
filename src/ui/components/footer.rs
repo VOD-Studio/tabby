@@ -100,6 +100,20 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 },
             ),
         ],
+        Page::Logs => {
+            let view = &app.logs_view;
+            let mut hints = vec![
+                hint("l", "级别"),
+                hint("p", if view.paused { "恢复" } else { "暂停" }),
+                hint("c", "清空"),
+                hint("/", "过滤"),
+            ];
+            // Only while it stays put: following, it is already there.
+            if view.top.is_some() {
+                hints.push(hint("G", "最新"));
+            }
+            hints
+        }
         _ => vec![],
     };
     if app

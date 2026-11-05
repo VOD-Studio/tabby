@@ -6,7 +6,7 @@ use std::{
 
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use futures_util::future::join_all;
-use jiff::Timestamp;
+use jiff::{Timestamp, Zoned, civil};
 use ratatui::layout::{Rect, Size};
 use tokio::sync::mpsc;
 use tui_input::{Input, backend::crossterm::EventHandler};
@@ -18,13 +18,20 @@ use crate::{
         error::ApiError,
         models::{
             self, Baseline, Configs, ConnectionSnapshot, ConnectionStats, CoreKind, Delay, GLOBAL,
-            Mode, Proxies, Proxy, Rate, Traffic, Version,
+            Log, LogKind, LogLevel, Mode, Proxies, Proxy, Rate, Traffic, Version,
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
     config::Settings,
     format::natural_cmp,
-    ui::{connections, proxies, regions, scroll::Scroll, text::describe, theme::Theme},
+    ui::{
+        connections,
+        logs::{self, Fit},
+        proxies, regions,
+        scroll::Scroll,
+        text::describe,
+        theme::Theme,
+    },
 };
 
 /// The seven top-level pages, in tab order.
@@ -541,6 +548,367 @@ impl ConnectionsView {
     }
 }
 
+/// Log lines kept: on screen, and in the queue a pause fills, alike.
+pub const LOG_CAPACITY: usize = 2000;
+
+/// One log line as received.
+#[derive(Debug, Clone)]
+pub struct LogEntry {
+    /// Local time it came in; the kernel's line carries none.
+    pub time: civil::Time,
+    pub kind: LogKind,
+    /// The kernel's text, tabs turned into spaces and other control
+    /// characters but `\n` dropped: they would garble the screen.
+    pub message: String,
+    /// `message` lowercased once, for the filter.
+    lowercase: String,
+}
+
+impl LogEntry {
+    pub fn new(log: Log, time: civil::Time) -> Self {
+        let message: String = log
+            .payload
+            .chars()
+            .filter_map(|ch| match ch {
+                '\t' => Some(' '),
+                '\n' => Some(ch),
+                _ if ch.is_control() => None,
+                _ => Some(ch),
+            })
+            .collect();
+        Self {
+            time,
+            kind: log.kind,
+            lowercase: message.to_lowercase(),
+            message,
+        }
+    }
+}
+
+/// A place in the log: row `row` of the wrapped message of entry `entry`
+/// (an index into [`LogsView::entries`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogSpot {
+    pub entry: usize,
+    pub row: usize,
+}
+
+/// Rows `entry` takes in a message column `width` wide.
+fn log_height(entry: &LogEntry, width: usize) -> usize {
+    logs::wrap_message(&entry.message, width).len()
+}
+
+/// Buffer, level, pause, filter and scroll state of the logs page.
+///
+/// Scrolling counts screen rows, so a long message wrapped over several
+/// rows is read one row at a time. Positions are laid out on demand from
+/// the spot they start at, never for the whole buffer.
+#[derive(Debug, Default)]
+pub struct LogsView {
+    /// What is shown, oldest first; at most [`LOG_CAPACITY`].
+    pub entries: VecDeque<LogEntry>,
+    /// What came in while paused, oldest first; appended on resume. At most
+    /// [`LOG_CAPACITY`].
+    pending: VecDeque<LogEntry>,
+    /// Lines that came in while paused but were pushed out of `pending`.
+    missed: usize,
+    /// What the stream is subscribed at.
+    pub level: LogLevel,
+    /// What is shown stays as it is; new lines queue up.
+    pub paused: bool,
+    /// The stream is connected. Resubscribing at another level keeps it so.
+    pub live: bool,
+    /// Case-insensitive substring the message must contain.
+    pub filter: Input,
+    /// The filter box has the keyboard.
+    pub typing: bool,
+    /// The top row of the view while it stays where the user scrolled to;
+    /// `None` while it follows the newest line.
+    pub top: Option<LogSpot>,
+}
+
+impl LogsView {
+    /// Takes in a line: onto the screen, or into the queue while paused.
+    fn receive(&mut self, entry: LogEntry) {
+        if self.paused {
+            if self.pending.len() == LOG_CAPACITY {
+                self.pending.pop_front();
+                self.missed += 1;
+            }
+            self.pending.push_back(entry);
+        } else {
+            self.append(entry);
+        }
+    }
+
+    /// Adds a line to what is shown, dropping the oldest when full. A view
+    /// that stays put moves its spot along, so it keeps the same lines.
+    fn append(&mut self, entry: LogEntry) {
+        if self.entries.len() == LOG_CAPACITY {
+            self.entries.pop_front();
+            if let Some(top) = &mut self.top {
+                *top = match top.entry.checked_sub(1) {
+                    Some(entry) => LogSpot { entry, ..*top },
+                    // Its line is gone: the oldest one left takes its place.
+                    None => LogSpot { entry: 0, row: 0 },
+                };
+            }
+        }
+        self.entries.push_back(entry);
+    }
+
+    /// `p`. Resuming shows what queued up, in order.
+    fn toggle_pause(&mut self) {
+        self.paused = !self.paused;
+        if !self.paused {
+            for entry in std::mem::take(&mut self.pending) {
+                self.append(entry);
+            }
+            self.missed = 0;
+        }
+    }
+
+    /// `c`: drops what is shown and what is queued; the view follows again.
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.pending.clear();
+        self.missed = 0;
+        self.top = None;
+    }
+
+    /// Lines that came in since pausing, those the queue had to let go of
+    /// included.
+    pub fn arrived(&self) -> usize {
+        self.pending.len() + self.missed
+    }
+
+    /// Nothing to show yet and no stream to bring any.
+    pub fn waiting(&self) -> bool {
+        !self.live && self.entries.is_empty() && self.pending.is_empty()
+    }
+
+    fn needle(&self) -> String {
+        self.filter.value().to_lowercase()
+    }
+
+    /// The entries from index `from` on that pass the filter `needle`.
+    fn shown_from<'a>(
+        &'a self,
+        from: usize,
+        needle: &str,
+    ) -> impl Iterator<Item = (usize, &'a LogEntry)> {
+        let from = from.min(self.entries.len());
+        self.entries
+            .range(from..)
+            .enumerate()
+            .map(move |(offset, entry)| (from + offset, entry))
+            .filter(move |(_, entry)| entry.lowercase.contains(needle))
+    }
+
+    /// The entries before index `end` that pass the filter `needle`, newest
+    /// first.
+    fn shown_before<'a>(
+        &'a self,
+        end: usize,
+        needle: &str,
+    ) -> impl Iterator<Item = (usize, &'a LogEntry)> {
+        self.entries
+            .range(..end.min(self.entries.len()))
+            .enumerate()
+            .rev()
+            .filter(move |(_, entry)| entry.lowercase.contains(needle))
+    }
+
+    /// How many entries pass the filter.
+    pub fn shown_count(&self) -> usize {
+        let needle = self.needle();
+        self.shown_from(0, &needle).count()
+    }
+
+    /// `spot` on an entry that is shown: itself, its row kept within the
+    /// message, or else the next shown entry from its top. `None` when no
+    /// entry from there on is shown.
+    fn shown_spot(&self, spot: LogSpot, needle: &str, width: usize) -> Option<LogSpot> {
+        let (entry, shown) = self.shown_from(spot.entry, needle).next()?;
+        let row = if entry == spot.entry {
+            spot.row.min(log_height(shown, width) - 1)
+        } else {
+            0
+        };
+        Some(LogSpot { entry, row })
+    }
+
+    /// Rows from `spot` (a shown one) to the end, counted up to `limit`.
+    fn rows_from(&self, spot: LogSpot, needle: &str, width: usize, limit: usize) -> usize {
+        let mut rows = 0;
+        for (index, entry) in self.shown_from(spot.entry, needle) {
+            rows += log_height(entry, width);
+            if index == spot.entry {
+                rows -= spot.row;
+            }
+            if rows >= limit {
+                break;
+            }
+        }
+        rows
+    }
+
+    /// The top row of a view that follows: the one `fit.height` rows above
+    /// the end, or the very first when everything fits. `None` when nothing
+    /// is shown.
+    fn bottom_top(&self, needle: &str, fit: Fit) -> Option<LogSpot> {
+        let mut rows = 0;
+        let mut top = None;
+        for (entry, shown) in self.shown_before(self.entries.len(), needle) {
+            rows += log_height(shown, fit.width);
+            top = Some(LogSpot {
+                entry,
+                row: rows.saturating_sub(fit.height),
+            });
+            if rows >= fit.height {
+                break;
+            }
+        }
+        top
+    }
+
+    /// The spot `rows` rows above `spot`, or the very first row.
+    fn up(&self, mut spot: LogSpot, mut rows: usize, needle: &str, width: usize) -> LogSpot {
+        while rows > 0 {
+            if spot.row > 0 {
+                let step = rows.min(spot.row);
+                spot.row -= step;
+                rows -= step;
+                continue;
+            }
+            let Some((entry, shown)) = self.shown_before(spot.entry, needle).next() else {
+                break;
+            };
+            spot = LogSpot {
+                entry,
+                row: log_height(shown, width) - 1,
+            };
+            rows -= 1;
+        }
+        spot
+    }
+
+    /// The spot `rows` rows below `spot`, or the very last row.
+    fn down(&self, mut spot: LogSpot, mut rows: usize, needle: &str, width: usize) -> LogSpot {
+        while rows > 0 {
+            let last = self
+                .entries
+                .get(spot.entry)
+                .map_or(0, |entry| log_height(entry, width) - 1);
+            if spot.row < last {
+                let step = rows.min(last - spot.row);
+                spot.row += step;
+                rows -= step;
+                continue;
+            }
+            let Some((entry, _)) = self.shown_from(spot.entry + 1, needle).next() else {
+                break;
+            };
+            spot = LogSpot { entry, row: 0 };
+            rows -= 1;
+        }
+        spot
+    }
+
+    /// Where the top of a view that stays put is, when it does and still
+    /// has more below than fits; `None` means drawing from the bottom.
+    fn resting_top(&self, needle: &str, fit: Fit) -> Option<LogSpot> {
+        let top = self.shown_spot(self.top?, needle, fit.width)?;
+        (self.rows_from(top, needle, fit.width, fit.height + 1) > fit.height).then_some(top)
+    }
+
+    /// Follows the newest line again once the view reached the bottom: by
+    /// scrolling there, or because the filter or the size left too little
+    /// below it.
+    fn settle(&mut self, fit: Fit) {
+        let needle = self.needle();
+        self.top = self.resting_top(&needle, fit);
+    }
+
+    /// Scrolls by screen rows. Leaving the bottom stops following; reaching
+    /// it, or `G`, follows again.
+    fn scroll(&mut self, movement: Move, fit: Fit) {
+        let needle = self.needle();
+        let Some((first, _)) = self.shown_from(0, &needle).next() else {
+            return;
+        };
+        let first = LogSpot {
+            entry: first,
+            row: 0,
+        };
+        let current = self
+            .resting_top(&needle, fit)
+            .or_else(|| self.bottom_top(&needle, fit))
+            .unwrap_or(first);
+        let half = (fit.height / 2).max(1);
+        let top = match movement {
+            Move::Up => self.up(current, 1, &needle, fit.width),
+            Move::Down => self.down(current, 1, &needle, fit.width),
+            Move::HalfUp => self.up(current, half, &needle, fit.width),
+            Move::HalfDown => self.down(current, half, &needle, fit.width),
+            Move::Top => first,
+            Move::Bottom => {
+                self.top = None;
+                return;
+            }
+            Move::Left | Move::Right => return,
+        };
+        self.top = Some(top);
+        self.settle(fit);
+    }
+
+    /// What a view of `fit` shows, top to bottom: for each screen row the
+    /// entry, which row of its message it is, and that row's text. Only the
+    /// entries in view are laid out; one that follows lays out from the
+    /// bottom up.
+    pub fn page(&self, fit: Fit) -> Vec<(&LogEntry, usize, String)> {
+        let needle = self.needle();
+        let mut page = Vec::with_capacity(fit.height);
+        if let Some(top) = self.resting_top(&needle, fit) {
+            for (index, entry) in self.shown_from(top.entry, &needle) {
+                let skip = if index == top.entry { top.row } else { 0 };
+                let rows = logs::wrap_message(&entry.message, fit.width);
+                for (row, text) in rows.into_iter().enumerate().skip(skip) {
+                    if page.len() == fit.height {
+                        return page;
+                    }
+                    page.push((entry, row, text));
+                }
+            }
+            return page;
+        }
+        let mut above = vec![];
+        let mut rows = 0;
+        for (_, entry) in self.shown_before(self.entries.len(), &needle) {
+            let wrapped = logs::wrap_message(&entry.message, fit.width);
+            rows += wrapped.len();
+            above.push((entry, wrapped));
+            if rows >= fit.height {
+                break;
+            }
+        }
+        let skip = rows.saturating_sub(fit.height);
+        page.extend(
+            above
+                .into_iter()
+                .rev()
+                .flat_map(|(entry, wrapped)| {
+                    wrapped
+                        .into_iter()
+                        .enumerate()
+                        .map(move |(row, text)| (entry, row, text))
+                })
+                .skip(skip),
+        );
+        page
+    }
+}
+
 /// A user intent, derived from a terminal event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Action {
@@ -574,8 +942,12 @@ pub enum Action {
     CycleSort,
     /// `S`: sort the connections the other way round.
     ReverseSort,
-    /// `p`: freeze or resume the connections table.
+    /// `p`: freeze or resume the connections table or the log.
     TogglePause,
+    /// `l`: subscribe the log at the next level.
+    CycleLevel,
+    /// `c`: empty the log.
+    ClearLogs,
     /// `/`: start typing the current page's filter.
     StartFilter,
     /// A key typed into the filter box.
@@ -666,8 +1038,10 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
             let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
             let alt = key.modifiers.contains(KeyModifiers::ALT);
-            // The pages with a sortable, filterable list.
-            let filtered = matches!(page, Page::Proxies | Page::Connections);
+            // The pages with a sortable list.
+            let sorted = matches!(page, Page::Proxies | Page::Connections);
+            let filtered = matches!(page, Page::Proxies | Page::Connections | Page::Logs);
+            let pausable = matches!(page, Page::Connections | Page::Logs);
             match key.code {
                 KeyCode::Char('c') if ctrl => Some(Action::Quit),
                 KeyCode::Char('d') if ctrl => Some(Action::Cursor(Move::HalfDown)),
@@ -690,10 +1064,12 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('l') if page == Page::Proxies => Some(Action::Cursor(Move::Right)),
                 KeyCode::Char('t') if page == Page::Proxies => Some(Action::TestNode),
                 KeyCode::Char('T') if page == Page::Proxies => Some(Action::TestGroup),
-                KeyCode::Char('s') if filtered => Some(Action::CycleSort),
+                KeyCode::Char('s') if sorted => Some(Action::CycleSort),
                 KeyCode::Char('S') if page == Page::Connections => Some(Action::ReverseSort),
                 KeyCode::Char('/') if filtered => Some(Action::StartFilter),
-                KeyCode::Char('p') if page == Page::Connections => Some(Action::TogglePause),
+                KeyCode::Char('p') if pausable => Some(Action::TogglePause),
+                KeyCode::Char('l') if page == Page::Logs => Some(Action::CycleLevel),
+                KeyCode::Char('c') if page == Page::Logs => Some(Action::ClearLogs),
                 KeyCode::Char('x') if page == Page::Connections => Some(Action::CloseConnection),
                 KeyCode::Char('X') if page == Page::Connections => Some(Action::CloseConnections),
                 // Only lowercase: the dialog says `y`, and a dangerous action
@@ -886,6 +1262,9 @@ pub struct App {
     /// The last [`TRAFFIC_HISTORY`] `/memory` frames, oldest first; empty
     /// while that stream is down.
     pub memory_history: VecDeque<u64>,
+    /// The log page, from `/logs`. Unlike the connections table, what was
+    /// received stays when the stream goes down: it is history.
+    pub logs_view: LogsView,
     /// `Some` from the first failed `/version` probe until one succeeds.
     pub reconnect: Option<Reconnect>,
     /// Set by `r` until the next `/version` reply, which then reports success.
@@ -934,6 +1313,7 @@ impl App {
             connection_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
             memory: None,
             memory_history: VecDeque::with_capacity(TRAFFIC_HISTORY),
+            logs_view: LogsView::default(),
             reconnect: None,
             refreshing: false,
             should_quit: false,
@@ -1002,6 +1382,8 @@ impl App {
             Action::Quit => self.should_quit = true,
             Action::Resize(size) => {
                 self.size = size;
+                let fit = self.logs_fit();
+                self.logs_view.settle(fit);
                 self.dirty = true;
             }
             _ if self.overlay == Some(Overlay::Confirm) => self.answer(action),
@@ -1056,25 +1438,14 @@ impl App {
                 view.set_sort(view.sort.reversed());
                 self.dirty = true;
             }
-            Action::TogglePause => {
-                self.connections_view.paused = !self.connections_view.paused;
+            Action::TogglePause => self.toggle_pause(),
+            Action::CycleLevel => self.cycle_level(),
+            Action::ClearLogs => {
+                self.logs_view.clear();
                 self.dirty = true;
             }
             Action::StartFilter => self.set_typing(true),
-            Action::FilterInput(key) => {
-                let event = Event::Key(key);
-                match self.page {
-                    Page::Proxies => {
-                        self.proxies_view.filter.handle_event(&event);
-                        self.proxies_view.node = None;
-                    }
-                    Page::Connections => self.connections_view.edit_filter(|filter| {
-                        filter.handle_event(&event);
-                    }),
-                    _ => {}
-                }
-                self.dirty = true;
-            }
+            Action::FilterInput(key) => self.type_into_filter(key),
             Action::FilterAccept => self.set_typing(false),
             Action::FilterClear => {
                 self.clear_filter();
@@ -1164,12 +1535,19 @@ impl App {
     }
 
     fn move_cursor(&mut self, movement: Move) {
-        if self.page == Page::Connections {
-            self.move_in_connections(movement);
-            return;
-        }
-        if self.page != Page::Proxies {
-            return;
+        match self.page {
+            Page::Connections => {
+                self.move_in_connections(movement);
+                return;
+            }
+            Page::Logs => {
+                let fit = self.logs_fit();
+                self.logs_view.scroll(movement, fit);
+                self.dirty = true;
+                return;
+            }
+            Page::Proxies => {}
+            _ => return,
         }
         match self.proxies_view.focus {
             Pane::Groups if movement == Move::Right => {
@@ -1217,6 +1595,27 @@ impl App {
         connections::capacity(regions(screen, self.reconnect.is_some()).body)
     }
 
+    /// The room for log lines in the terminal, laid out by the function that
+    /// draws them.
+    fn logs_fit(&self) -> Fit {
+        let screen = Rect::from(self.size);
+        logs::fit(regions(screen, self.reconnect.is_some()).body)
+    }
+
+    /// `l`: resubscribes the log at the next level. What is shown stays.
+    ///
+    /// The old connection goes without a word and the new one reports in by
+    /// itself, so this is no outage, no banner and no refetch. Until it is
+    /// in, the stream does not count as up: should every other stream drop
+    /// meanwhile, that is still noticed. The page keeps showing it as live.
+    fn cycle_level(&mut self) {
+        let level = self.logs_view.level.next();
+        self.logs_view.level = level;
+        self.streams.set_log_level(level);
+        self.links.up.remove(&Stream::Logs);
+        self.dirty = true;
+    }
+
     fn move_in_connections(&mut self, movement: Move) {
         let half = (self.connections_capacity() / 2).max(1);
         let view = &mut self.connections_view;
@@ -1230,6 +1629,7 @@ impl App {
         match self.page {
             Page::Proxies => self.proxies_view.typing,
             Page::Connections => self.connections_view.typing,
+            Page::Logs => self.logs_view.typing,
             _ => false,
         }
     }
@@ -1239,8 +1639,42 @@ impl App {
         match self.page {
             Page::Proxies => Some(&self.proxies_view.filter),
             Page::Connections => Some(&self.connections_view.filter),
+            Page::Logs => Some(&self.logs_view.filter),
             _ => None,
         }
+    }
+
+    /// `p`: freezes or resumes the current page's list.
+    fn toggle_pause(&mut self) {
+        match self.page {
+            Page::Connections => {
+                self.connections_view.paused = !self.connections_view.paused;
+            }
+            Page::Logs => self.logs_view.toggle_pause(),
+            _ => {}
+        }
+        self.dirty = true;
+    }
+
+    /// A key typed into the current page's filter box.
+    fn type_into_filter(&mut self, key: KeyEvent) {
+        let event = Event::Key(key);
+        match self.page {
+            Page::Proxies => {
+                self.proxies_view.filter.handle_event(&event);
+                self.proxies_view.node = None;
+            }
+            Page::Connections => self.connections_view.edit_filter(|filter| {
+                filter.handle_event(&event);
+            }),
+            Page::Logs => {
+                self.logs_view.filter.handle_event(&event);
+                let fit = self.logs_fit();
+                self.logs_view.settle(fit);
+            }
+            _ => {}
+        }
+        self.dirty = true;
     }
 
     /// Gives the keyboard to the current page's filter box, or back.
@@ -1248,6 +1682,7 @@ impl App {
         match self.page {
             Page::Proxies => self.proxies_view.typing = typing,
             Page::Connections => self.connections_view.typing = typing,
+            Page::Logs => self.logs_view.typing = typing,
             _ => {}
         }
         self.dirty = true;
@@ -1262,6 +1697,12 @@ impl App {
                 self.proxies_view.node = None;
             }
             Page::Connections => self.connections_view.clear_filter(),
+            Page::Logs => {
+                self.logs_view.filter.reset();
+                self.logs_view.typing = false;
+                let fit = self.logs_fit();
+                self.logs_view.settle(fit);
+            }
             _ => {}
         }
     }
@@ -1721,6 +2162,9 @@ impl App {
         match event {
             StreamEvent::Connected => {
                 self.links.up.insert(stream);
+                if stream == Stream::Logs {
+                    self.logs_view.live = true;
+                }
                 if std::mem::take(&mut self.links.outage) {
                     self.start();
                 }
@@ -1750,7 +2194,8 @@ impl App {
                         self.memory = None;
                         self.memory_history.clear();
                     }
-                    Stream::Logs => {}
+                    // What came in is history and stays.
+                    Stream::Logs => self.logs_view.live = false,
                 }
                 if was_up && self.links.up.is_empty() {
                     self.links.outage = true;
@@ -1776,6 +2221,10 @@ impl App {
                 push_sample(&mut self.memory_history, memory.inuse);
             }
             StreamEvent::Memory(_) => {}
+            StreamEvent::Log(log) => {
+                let entry = LogEntry::new(log, Zoned::now().time());
+                self.logs_view.receive(entry);
+            }
         }
     }
 
@@ -1799,6 +2248,7 @@ impl App {
             Page::Overview => self.configs.is_none(),
             Page::Proxies => self.proxies.is_none(),
             Page::Connections => self.connections_view.rows.is_none(),
+            Page::Logs => self.logs_view.waiting(),
             _ => false,
         }
     }
@@ -2676,11 +3126,12 @@ mod tests {
         }
         // Page keys, the mode key and page numbers all go into the box of
         // the page being filtered, with nothing else happening.
-        for page in [Page::Proxies, Page::Connections] {
+        for page in [Page::Proxies, Page::Connections, Page::Logs] {
             let (mut app, _rx) = app_without_controller();
             app.page = page;
+            app.logs_view.receive(log_entry(LogLevel::Info, "kept"));
             app.update(press('/', page, app.typing()).unwrap());
-            for key in ['p', 's', 'S', 'm', '5'] {
+            for key in ['p', 's', 'S', 'm', '5', 'l', 'c'] {
                 let action = press(key, page, app.typing());
                 assert_eq!(
                     action,
@@ -2692,9 +3143,11 @@ mod tests {
                 );
                 app.update(action.unwrap());
             }
-            assert_eq!(app.filter().unwrap().value(), "psSm5", "{page:?}");
+            assert_eq!(app.filter().unwrap().value(), "psSm5lc", "{page:?}");
             assert_eq!(app.page, page);
             assert!(!app.connections_view.paused);
+            let logs = &app.logs_view;
+            assert!(!logs.paused && logs.level == LogLevel::Info && logs.entries.len() == 1);
             assert_eq!(app.connections_view.sort, ConnectionSort::default());
             assert_eq!(app.proxies_view.sort, Sort::Default);
             // `m` would have complained that there is no mode yet.
@@ -2964,6 +3417,7 @@ mod tests {
     #[test]
     fn a_table_paused_before_its_first_frame_still_gets_that_frame() {
         let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
         app.update(Action::TogglePause);
         feed(&mut app, vec![flow("a", "01", 0, 0)]);
         assert_eq!(table_ids(&app), ["a"]);
@@ -3600,5 +4054,253 @@ mod tests {
                 (ToastKind::Error, "2 条关闭失败：控制器返回错误（HTTP 500）"),
             ]
         );
+    }
+
+    fn log_entry(level: LogLevel, message: &str) -> LogEntry {
+        let log = Log {
+            kind: LogKind::Level(level),
+            payload: message.to_owned(),
+        };
+        LogEntry::new(log, civil::time(12, 0, 0, 0))
+    }
+
+    /// Feeds lines `0`, `1` … up to `count`, each one row long.
+    fn feed_logs(view: &mut LogsView, from: usize, count: usize) {
+        for n in from..from + count {
+            view.receive(log_entry(LogLevel::Info, &n.to_string()));
+        }
+    }
+
+    /// 20 columns of message, 4 rows.
+    const FIT: Fit = Fit {
+        width: 20,
+        height: 4,
+    };
+
+    /// The screen rows of `view`, as text.
+    fn screen(view: &LogsView) -> Vec<String> {
+        view.page(FIT)
+            .into_iter()
+            .map(|(_, _, text)| text)
+            .collect()
+    }
+
+    #[test]
+    fn the_log_keeps_the_newest_2000_lines() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, LOG_CAPACITY + 5);
+        assert_eq!(view.entries.len(), LOG_CAPACITY);
+        assert_eq!(view.entries.front().unwrap().message, "5");
+        assert_eq!(view.entries.back().unwrap().message, "2004");
+    }
+
+    #[test]
+    fn a_following_view_stays_at_the_bottom() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, 10);
+        assert_eq!(screen(&view), ["6", "7", "8", "9"]);
+        feed_logs(&mut view, 10, LOG_CAPACITY);
+        assert_eq!(view.top, None);
+        assert_eq!(screen(&view), ["2006", "2007", "2008", "2009"]);
+    }
+
+    #[test]
+    fn a_view_scrolled_up_keeps_its_lines_while_old_ones_are_dropped() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, LOG_CAPACITY);
+        view.scroll(Move::Up, FIT);
+        assert_eq!(screen(&view), ["1995", "1996", "1997", "1998"]);
+        // Full: each new line pushes out the oldest, and the view moves
+        // its spot along instead of drifting down the log.
+        feed_logs(&mut view, LOG_CAPACITY, 10);
+        assert_eq!(screen(&view), ["1995", "1996", "1997", "1998"]);
+        assert_eq!(view.top.unwrap().entry, 1985);
+
+        // At the very top its line goes, and the oldest left takes over.
+        view.scroll(Move::Top, FIT);
+        assert_eq!(screen(&view), ["10", "11", "12", "13"]);
+        feed_logs(&mut view, 2010, 1);
+        assert_eq!(screen(&view), ["11", "12", "13", "14"]);
+    }
+
+    #[test]
+    fn reaching_the_bottom_or_g_follows_again() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, 10);
+        view.scroll(Move::Up, FIT);
+        view.scroll(Move::Up, FIT);
+        assert_eq!(screen(&view), ["4", "5", "6", "7"]);
+        view.scroll(Move::Down, FIT);
+        assert!(view.top.is_some());
+        view.scroll(Move::Down, FIT);
+        assert_eq!(view.top, None);
+        feed_logs(&mut view, 10, 1);
+        assert_eq!(screen(&view), ["7", "8", "9", "10"]);
+
+        view.scroll(Move::HalfUp, FIT);
+        feed_logs(&mut view, 11, 1);
+        assert_eq!(screen(&view), ["5", "6", "7", "8"]);
+        view.scroll(Move::Bottom, FIT);
+        assert_eq!(view.top, None);
+        assert_eq!(screen(&view), ["8", "9", "10", "11"]);
+    }
+
+    #[test]
+    fn a_log_that_fits_on_screen_does_not_scroll() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, 3);
+        view.scroll(Move::Up, FIT);
+        view.scroll(Move::Top, FIT);
+        assert_eq!(view.top, None);
+        assert_eq!(screen(&view), ["0", "1", "2"]);
+    }
+
+    #[test]
+    fn scrolling_goes_one_screen_row_at_a_time() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, 2);
+        // 45 columns: three rows at 20.
+        view.receive(log_entry(LogLevel::Warning, &"x".repeat(45)));
+        let rows: Vec<(usize, String)> = view
+            .page(FIT)
+            .into_iter()
+            .map(|(_, row, text)| (row, text))
+            .collect();
+        let long = |n| "x".repeat(n);
+        assert_eq!(
+            rows,
+            [
+                (0, "1".to_owned()),
+                (0, long(20)),
+                (1, long(20)),
+                (2, long(5))
+            ]
+        );
+        view.scroll(Move::Up, FIT);
+        assert_eq!(screen(&view), ["0", "1", &long(20), &long(20)]);
+        // A narrower terminal keeps the spot, its row within the message.
+        let narrow = Fit { width: 10, ..FIT };
+        view.scroll(Move::Up, narrow);
+        view.scroll(Move::Down, narrow);
+        view.scroll(Move::Down, narrow);
+        assert_eq!(view.top, Some(LogSpot { entry: 2, row: 0 }));
+    }
+
+    #[test]
+    fn a_pause_freezes_the_screen_and_resuming_adds_what_came_in_order() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, 4);
+        view.toggle_pause();
+        feed_logs(&mut view, 4, 3);
+        assert_eq!(view.entries.len(), 4);
+        assert_eq!(view.arrived(), 3);
+        assert_eq!(screen(&view), ["0", "1", "2", "3"]);
+        view.toggle_pause();
+        assert_eq!(view.arrived(), 0);
+        let messages: Vec<&str> = view.entries.iter().map(|e| e.message.as_str()).collect();
+        assert_eq!(messages, ["0", "1", "2", "3", "4", "5", "6"]);
+    }
+
+    #[test]
+    fn the_pause_queue_keeps_the_newest_2000_and_counts_every_arrival() {
+        let mut view = LogsView::default();
+        view.toggle_pause();
+        feed_logs(&mut view, 0, LOG_CAPACITY + 3);
+        assert_eq!(view.arrived(), LOG_CAPACITY + 3);
+        assert!(view.entries.is_empty());
+        view.toggle_pause();
+        assert_eq!(view.entries.len(), LOG_CAPACITY);
+        assert_eq!(view.entries.front().unwrap().message, "3");
+        assert_eq!(view.entries.back().unwrap().message, "2002");
+    }
+
+    #[test]
+    fn clearing_drops_the_shown_and_the_queued_lines() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        feed_logs(&mut app.logs_view, 0, 10);
+        app.update(Action::Cursor(Move::Up));
+        app.update(press('p', Page::Logs, false).unwrap());
+        feed_logs(&mut app.logs_view, 10, 2);
+        app.update(press('c', Page::Logs, false).unwrap());
+        let view = &app.logs_view;
+        assert!(view.entries.is_empty() && view.arrived() == 0 && view.top.is_none());
+        assert!(view.paused);
+    }
+
+    #[test]
+    fn the_filter_only_hides_lines() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        for message in ["a.example ok", "b.example", "其他 A.EXAMPLE"] {
+            app.logs_view.receive(log_entry(LogLevel::Info, message));
+        }
+        app.update(Action::StartFilter);
+        for key in "a.ex".chars() {
+            app.update(Action::FilterInput(KeyEvent::new(
+                KeyCode::Char(key),
+                KeyModifiers::NONE,
+            )));
+        }
+        // Lines that do not match still come in, and stay for later.
+        app.logs_view
+            .receive(log_entry(LogLevel::Info, "c.example"));
+        assert_eq!(app.logs_view.shown_count(), 2);
+        assert_eq!(app.logs_view.entries.len(), 4);
+        assert_eq!(screen(&app.logs_view), ["a.example ok", "其他 A.EXAMPLE"]);
+        app.update(Action::FilterClear);
+        assert_eq!(app.logs_view.shown_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn a_new_log_level_is_no_outage() {
+        let (mut app, rx) = app_without_controller();
+        app.page = Page::Logs;
+        for stream in [Stream::Traffic, Stream::Logs, Stream::Connections] {
+            connect(&mut app, stream);
+        }
+        stream_event(
+            &mut app,
+            Stream::Traffic,
+            StreamEvent::Traffic(Traffic::default()),
+        );
+        app.logs_view.receive(log_entry(LogLevel::Info, "kept"));
+        app.update(press('l', Page::Logs, false).unwrap());
+        assert_eq!(app.logs_view.level, LogLevel::Warning);
+        // The resubscribed stream reports in by itself.
+        connect(&mut app, Stream::Logs);
+        assert!(app.reconnect.is_none() && !app.links.outage);
+        assert!(app.logs_view.live && app.logs_view.entries.len() == 1);
+        assert!(app.traffic.is_some());
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_new_log_level_is_no_outage_even_as_the_only_stream_up() {
+        let (mut app, rx) = app_without_controller();
+        app.page = Page::Logs;
+        connect(&mut app, Stream::Logs);
+        app.update(press('l', Page::Logs, false).unwrap());
+        assert!(app.logs_view.live);
+        connect(&mut app, Stream::Logs);
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn the_log_outlives_its_stream() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        assert!(app.is_loading());
+        connect(&mut app, Stream::Logs);
+        assert!(!app.is_loading());
+        let log = Log {
+            kind: LogKind::Other("silent".to_owned()),
+            payload: "a\tb\u{1b}[0m".to_owned(),
+        };
+        stream_event(&mut app, Stream::Logs, StreamEvent::Log(log));
+        disconnect(&mut app, Stream::Logs);
+        assert!(!app.logs_view.live && !app.is_loading());
+        // Kept, the tab a space and the escape dropped.
+        assert_eq!(app.logs_view.entries[0].message, "a b[0m");
     }
 }

@@ -1,0 +1,1 @@
+{"type":"info","payload":"[TCP] 127.0.0.1:37440 --\u003e example.com:80 match DomainSuffix(example.com) using 节点选择[直连 A]"}

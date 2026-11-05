@@ -1,5 +1,6 @@
 pub mod components;
 pub mod connections;
+pub mod logs;
 pub mod overview;
 pub mod proxies;
 pub mod scroll;
@@ -108,6 +109,7 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
             }
         }
         Page::Connections => connections::render(frame, area, app),
+        Page::Logs => logs::render(frame, area, app),
         _ => draw_unbuilt(frame, area, app),
     }
 }

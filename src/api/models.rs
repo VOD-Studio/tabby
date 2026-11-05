@@ -273,6 +273,82 @@ pub struct Memory {
     pub inuse: u64,
 }
 
+/// How much the kernel logs: the `level` the `/logs` stream is subscribed at.
+/// A level also lets through every level after it here.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum LogLevel {
+    Debug,
+    #[default]
+    Info,
+    Warning,
+    Error,
+}
+
+impl LogLevel {
+    /// In the order `l` cycles through them.
+    pub const ALL: [Self; 4] = [Self::Debug, Self::Info, Self::Warning, Self::Error];
+
+    /// Reads the kernel's spelling, ignoring case. `silent` and anything
+    /// newer are `None`.
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|level| text.eq_ignore_ascii_case(level.name()))
+    }
+
+    /// The spelling both kernels use, in the `level` parameter and the
+    /// `type` of a line.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Debug => "debug",
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+
+    /// The level `l` switches to from this one.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Debug => Self::Info,
+            Self::Info => Self::Warning,
+            Self::Warning => Self::Error,
+            Self::Error => Self::Debug,
+        }
+    }
+}
+
+/// The `type` of a log line: a level tabby knows, or the kernel's own word
+/// for one it does not, kept so the line is still shown.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(from = "String")]
+pub enum LogKind {
+    Level(LogLevel),
+    Other(String),
+}
+
+impl Default for LogKind {
+    fn default() -> Self {
+        Self::Other(String::new())
+    }
+}
+
+impl From<String> for LogKind {
+    fn from(text: String) -> Self {
+        LogLevel::parse(&text).map_or(Self::Other(text), Self::Level)
+    }
+}
+
+/// One `/logs` frame, in the plain format mihomo and original Clash share:
+/// `{"type":"info","payload":"…"}`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct Log {
+    #[serde(rename = "type")]
+    pub kind: LogKind,
+    pub payload: String,
+}
+
 /// `#[serde(default)]` covers a missing field but not an explicit `null`;
 /// this reads `null` as the default too.
 fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
@@ -721,6 +797,50 @@ mod tests {
         assert_eq!(Mode::Rule.next(), Mode::Global);
         assert_eq!(Mode::Global.next(), Mode::Direct);
         assert_eq!(Mode::Direct.next(), Mode::Rule);
+    }
+
+    #[test]
+    fn parses_a_mihomo_log_line() {
+        let log: Log =
+            serde_json::from_str(include_str!("../../tests/fixtures/mihomo_log.json")).unwrap();
+        assert_eq!(log.kind, LogKind::Level(LogLevel::Info));
+        assert_eq!(
+            log.payload,
+            "[TCP] 127.0.0.1:37440 --> example.com:80 match DomainSuffix(example.com) using \
+             节点选择[直连 A]"
+        );
+    }
+
+    #[test]
+    fn a_log_line_of_an_unknown_level_keeps_its_word() {
+        let log: Log = serde_json::from_str(r#"{"type":"silent","payload":"x"}"#).unwrap();
+        assert_eq!(log.kind, LogKind::Other("silent".to_owned()));
+        let log: Log = serde_json::from_str(r#"{"type":"WARNING","payload":"x"}"#).unwrap();
+        assert_eq!(log.kind, LogKind::Level(LogLevel::Warning));
+        // `warn` is not how either kernel spells it.
+        let log: Log = serde_json::from_str(r#"{"type":"warn"}"#).unwrap();
+        assert_eq!(log.kind, LogKind::Other("warn".to_owned()));
+        assert_eq!(log.payload, "");
+    }
+
+    #[test]
+    fn log_levels_cycle_through_all_four() {
+        let mut level = LogLevel::default();
+        let mut seen = vec![];
+        for _ in 0..5 {
+            seen.push(level);
+            level = level.next();
+        }
+        assert_eq!(
+            seen,
+            [
+                LogLevel::Info,
+                LogLevel::Warning,
+                LogLevel::Error,
+                LogLevel::Debug,
+                LogLevel::Info
+            ]
+        );
     }
 
     fn group_names(proxies: &Proxies) -> Vec<&str> {
