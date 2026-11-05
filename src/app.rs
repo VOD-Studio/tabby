@@ -117,6 +117,8 @@ pub enum Action {
     Refresh,
     Cursor(Move),
     Focus(Pane),
+    /// `Enter`: acts on the item under the cursor.
+    Confirm,
     ToggleHelp,
     /// `Esc`: closes the topmost overlay.
     Dismiss,
@@ -128,6 +130,12 @@ pub enum Msg {
     Version(Result<Version, ApiError>),
     Configs(Result<Configs, ApiError>),
     Proxies(Result<Proxies, ApiError>),
+    /// Reply to switching a selector group.
+    Selected {
+        group: String,
+        node: String,
+        result: Result<(), ApiError>,
+    },
 }
 
 /// Maps a terminal event to an [`Action`]; `None` means the event is ignored.
@@ -143,6 +151,7 @@ pub fn action_for(event: &Event, page: Page) -> Option<Action> {
                 KeyCode::Tab => Some(Action::NextPage),
                 KeyCode::BackTab => Some(Action::PrevPage),
                 KeyCode::Esc => Some(Action::Dismiss),
+                KeyCode::Enter => Some(Action::Confirm),
                 KeyCode::Char(_) if ctrl || alt => None,
                 KeyCode::Char('q') => Some(Action::Quit),
                 KeyCode::Char('r') => Some(Action::Refresh),
@@ -294,6 +303,7 @@ impl App {
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
             Action::Cursor(movement) => self.move_cursor(movement),
+            Action::Confirm => self.confirm(),
             Action::Focus(pane) => {
                 if self.page == Page::Proxies && self.visible_groups().next().is_some() {
                     self.proxies_view.focus = pane;
@@ -365,6 +375,48 @@ impl App {
         self.dirty = true;
     }
 
+    /// `Enter` on the proxies page: from the group list, moves into the nodes;
+    /// on a node, switches the group to it.
+    fn confirm(&mut self) {
+        if self.page != Page::Proxies || self.selected_group().is_none() {
+            return;
+        }
+        match self.proxies_view.focus {
+            Pane::Groups => {
+                self.proxies_view.focus = Pane::Nodes;
+                self.dirty = true;
+            }
+            Pane::Nodes => self.select_node(),
+        }
+    }
+
+    fn select_node(&mut self) {
+        let Some(group) = self.selected_group() else {
+            return;
+        };
+        if !group.is_selector() {
+            self.toast(ToastKind::Error, "该组为自动选择".to_owned());
+            return;
+        }
+        let members = group.all.as_deref().unwrap_or_default();
+        let index = self
+            .proxies_view
+            .node
+            .unwrap_or_else(|| group.current_index());
+        let Some(node) = members.get(index.min(members.len().saturating_sub(1))) else {
+            return;
+        };
+        let (group, node) = (group.name.clone(), node.clone());
+        self.spawn(move |client| async move {
+            let result = client.select_proxy(&group, &node).await;
+            Msg::Selected {
+                group,
+                node,
+                result,
+            }
+        });
+    }
+
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
             Msg::Version(result) => {
@@ -396,6 +448,19 @@ impl App {
                 self.note_failure(&result);
                 self.proxies = Some(result);
             }
+            Msg::Selected {
+                group,
+                node,
+                result,
+            } => match result {
+                Ok(()) => {
+                    if let Some(Ok(proxies)) = &mut self.proxies {
+                        proxies.set_now(&group, &node);
+                    }
+                    self.toast(ToastKind::Success, format!("已切换到 {node}"));
+                }
+                Err(err) => self.toast(ToastKind::Error, format!("切换失败：{}", describe(&err))),
+            },
         }
         self.dirty = true;
     }
@@ -463,6 +528,7 @@ impl App {
     /// Shows a toast. An identical one already on screen is renewed instead of
     /// stacked, so one failure reported by two requests shows once.
     fn toast(&mut self, kind: ToastKind, text: String) {
+        self.dirty = true;
         let expires_at = Instant::now() + TOAST_TTL;
         if let Some(existing) = self
             .toasts

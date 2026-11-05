@@ -15,6 +15,7 @@ use crate::{
 fn page_keys(page: Page) -> &'static [(&'static str, &'static str)] {
     match page {
         Page::Proxies => &[
+            ("Enter", "选择节点"),
             ("j / k / ↓ / ↑", "移动"),
             ("g / G", "顶部 / 底部"),
             ("Ctrl+d / Ctrl+u", "翻半页"),

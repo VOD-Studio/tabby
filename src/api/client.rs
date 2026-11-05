@@ -6,7 +6,7 @@ use color_eyre::{
 };
 use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
-use serde::de::DeserializeOwned;
+use serde::{Serialize, de::DeserializeOwned};
 
 use super::{
     error::ApiError,
@@ -77,15 +77,31 @@ impl ApiClient {
         url
     }
 
+    /// Turns a non-success status into an [`ApiError`].
+    async fn check(response: reqwest::Response) -> Result<reqwest::Response, ApiError> {
+        let status = response.status();
+        if status.is_success() {
+            return Ok(response);
+        }
+        let body = response.text().await.unwrap_or_default();
+        Err(ApiError::from_status(status, &body))
+    }
+
     /// `GET base/seg1/seg2/…`, decoded as JSON.
     async fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T, ApiError> {
-        let response = self.http.get(self.url(segments)).send().await?;
-        let status = response.status();
-        if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            return Err(ApiError::from_status(status, &body));
-        }
+        let response = Self::check(self.http.get(self.url(segments)).send().await?).await?;
         Ok(response.json().await?)
+    }
+
+    /// `PUT base/seg1/seg2/…` with a JSON body, ignoring the reply body.
+    async fn put_json<B: Serialize + ?Sized>(
+        &self,
+        segments: &[&str],
+        body: &B,
+    ) -> Result<(), ApiError> {
+        let request = self.http.put(self.url(segments)).json(body);
+        Self::check(request.send().await?).await?;
+        Ok(())
     }
 
     /// `GET /version`.
@@ -102,6 +118,12 @@ impl ApiClient {
     pub async fn proxies(&self) -> Result<Proxies, ApiError> {
         self.get_json(&["proxies"]).await
     }
+
+    /// `PUT /proxies/{group}`: makes a selector group route through `node`.
+    pub async fn select_proxy(&self, group: &str, node: &str) -> Result<(), ApiError> {
+        self.put_json(&["proxies", group], &serde_json::json!({ "name": node }))
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -111,7 +133,7 @@ mod tests {
     use serde_json::{Value, json};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{header, method, path},
+        matchers::{body_json, header, method, path},
     };
 
     use super::*;
@@ -175,6 +197,26 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(reply["delay"], 42);
+    }
+
+    #[tokio::test]
+    async fn select_proxy_puts_name_in_body_and_encodes_group() {
+        let server = MockServer::start().await;
+        Mock::given(method("PUT"))
+            .and(path(
+                "/proxies/%E8%8A%82%E7%82%B9%2F%E9%80%89%E6%8B%A9%20%231",
+            ))
+            .and(body_json(json!({"name": "🚀 a/b#c"})))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let client = ApiClient::new(&server.uri(), None).unwrap();
+        client
+            .select_proxy("节点/选择 #1", "🚀 a/b#c")
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -22,7 +22,7 @@ const HELP_HINTS: [(&str, &str); 2] = [("Esc/?", "关闭帮助"), ("q", "退出"
 /// Keys that only work on the given page.
 fn page_hints(page: Page) -> &'static [(&'static str, &'static str)] {
     match page {
-        Page::Proxies => &[("j/k", "移动"), ("h/l", "切换面板")],
+        Page::Proxies => &[("Enter", "选择"), ("j/k", "移动"), ("h/l", "切换面板")],
         _ => &[],
     }
 }

@@ -94,6 +94,11 @@ impl Proxy {
             .position(|name| Some(name) == self.now.as_ref())
             .unwrap_or(0)
     }
+
+    /// Whether the user picks this group's member (only `Selector` groups).
+    pub fn is_selector(&self) -> bool {
+        self.kind == "Selector"
+    }
 }
 
 #[derive(Deserialize)]
@@ -155,6 +160,14 @@ impl Proxies {
 
     pub fn get(&self, name: &str) -> Option<&Proxy> {
         self.by_name.get(name)
+    }
+
+    /// Records that `group` now routes through `node`, after the kernel
+    /// confirmed the switch.
+    pub fn set_now(&mut self, group: &str, node: &str) {
+        if let Some(group) = self.by_name.get_mut(group) {
+            group.now = Some(node.to_owned());
+        }
     }
 }
 
