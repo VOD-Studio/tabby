@@ -1,5 +1,10 @@
 use crossterm::event::{Event, KeyCode, KeyEventKind, KeyModifiers};
-use ratatui::{Frame, text::Text, widgets::Paragraph};
+use ratatui::{
+    Frame,
+    style::{Modifier, Style},
+    text::{Line, Span, Text},
+    widgets::Paragraph,
+};
 use tokio::sync::mpsc;
 
 use crate::{
@@ -9,6 +14,7 @@ use crate::{
         models::{Configs, Version},
     },
     config::Settings,
+    ui::theme::Theme,
 };
 
 /// A user intent, derived from a terminal event.
@@ -42,6 +48,7 @@ pub fn action_for(event: &Event) -> Option<Action> {
 #[derive(Debug)]
 pub struct App {
     settings: Settings,
+    theme: Theme,
     client: ApiClient,
     msg_tx: mpsc::Sender<Msg>,
     version: Option<Result<Version, ApiError>>,
@@ -54,6 +61,7 @@ impl App {
     pub fn new(settings: Settings, client: ApiClient, msg_tx: mpsc::Sender<Msg>) -> Self {
         Self {
             settings,
+            theme: Theme::TERMINAL,
             client,
             msg_tx,
             version: None,
@@ -104,33 +112,63 @@ impl App {
 
 /// Placeholder screen until the `ui` module lands.
 pub fn draw(frame: &mut Frame, app: &App) {
+    let theme = app.theme;
     let settings = &app.settings;
-    let secret = if settings.secret.is_some() { "set" } else { "none" };
-    let core = match &app.version {
-        None => "connecting...".to_owned(),
-        Some(Ok(version)) => format!("{:?} {}", version.kind(), version.version),
-        Some(Err(err)) => format!("error: {err}"),
+    let row = |name: &str, value: String, color| {
+        Line::from(vec![
+            Span::styled(format!("{name:<9}"), Style::new().fg(theme.muted)),
+            Span::styled(value, Style::new().fg(color)),
+        ])
     };
-    let configs = match &app.configs {
-        None => "connecting...".to_owned(),
-        Some(Ok(c)) => format!(
-            "mode {} | log {} | ports http {} socks {} mixed {} | lan {} | ipv6 {} | tun {}",
-            c.mode,
-            c.log_level,
-            c.port,
-            c.socks_port,
-            c.mixed_port,
-            c.allow_lan,
-            c.ipv6,
-            c.tun
-                .as_ref()
-                .map_or("needs mihomo", |tun| if tun.enable { "on" } else { "off" }),
+    let (core, core_color) = match &app.version {
+        None => ("connecting...".to_owned(), theme.muted),
+        Some(Ok(version)) => (
+            format!("{:?} {}", version.kind(), version.version),
+            theme.success,
         ),
-        Some(Err(err)) => format!("error: {err}"),
+        Some(Err(err)) => (format!("error: {err}"), theme.error),
     };
-    let text = Text::from(format!(
-        "tabby - press q to quit\n\nprofile  {}\nurl      {}\nsecret   {secret}\ntheme    {:?}\ncore     {core}\nconfigs  {configs}",
-        settings.profile, settings.url, settings.theme,
-    ));
+    let (configs, configs_color) = match &app.configs {
+        None => ("connecting...".to_owned(), theme.muted),
+        Some(Ok(c)) => (
+            format!(
+                "mode {} | log {} | ports http {} socks {} mixed {} | lan {} | ipv6 {} | tun {}",
+                c.mode,
+                c.log_level,
+                c.port,
+                c.socks_port,
+                c.mixed_port,
+                c.allow_lan,
+                c.ipv6,
+                c.tun
+                    .as_ref()
+                    .map_or("needs mihomo", |tun| if tun.enable { "on" } else { "off" }),
+            ),
+            theme.success,
+        ),
+        Some(Err(err)) => (format!("error: {err}"), theme.error),
+    };
+    let text = Text::from(vec![
+        Line::styled(
+            "tabby - press q to quit",
+            Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        ),
+        Line::raw(""),
+        row("profile", settings.profile.clone(), theme.fg),
+        row("url", settings.url.clone(), theme.fg),
+        row(
+            "secret",
+            if settings.secret.is_some() {
+                "set"
+            } else {
+                "none"
+            }
+            .to_owned(),
+            theme.fg,
+        ),
+        row("theme", format!("{:?}", settings.theme), theme.fg),
+        row("core", core, core_color),
+        row("configs", configs, configs_color),
+    ]);
     frame.render_widget(Paragraph::new(text), frame.area());
 }
