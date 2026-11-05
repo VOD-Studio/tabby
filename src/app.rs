@@ -11,7 +11,7 @@ use crate::{
         backoff,
         client::ApiClient,
         error::ApiError,
-        models::{Configs, Version},
+        models::{Configs, Proxies, Version},
     },
     config::Settings,
     ui::{text::describe, theme::Theme},
@@ -74,6 +74,7 @@ pub enum Action {
 pub enum Msg {
     Version(Result<Version, ApiError>),
     Configs(Result<Configs, ApiError>),
+    Proxies(Result<Proxies, ApiError>),
 }
 
 /// Maps a terminal event to an [`Action`]; `None` means the event is ignored.
@@ -155,6 +156,7 @@ pub struct App {
     msg_tx: mpsc::Sender<Msg>,
     pub version: Option<Result<Version, ApiError>>,
     pub configs: Option<Result<Configs, ApiError>>,
+    pub proxies: Option<Result<Proxies, ApiError>>,
     pub toasts: VecDeque<Toast>,
     pub overlay: Option<Overlay>,
     /// Frame counter of the loading spinner; advances while one is visible.
@@ -177,6 +179,7 @@ impl App {
             msg_tx,
             version: None,
             configs: None,
+            proxies: None,
             toasts: VecDeque::new(),
             overlay: None,
             spinner: 0,
@@ -189,15 +192,21 @@ impl App {
 
     /// Spawns the startup requests.
     pub fn start(&self) {
-        let client = self.client.clone();
+        self.spawn(|client| async move { Msg::Version(client.version().await) });
+        self.spawn(|client| async move { Msg::Configs(client.configs().await) });
+        self.spawn(|client| async move { Msg::Proxies(client.proxies().await) });
+    }
+
+    /// Runs one request in the background; its message arrives on the channel.
+    fn spawn<F, Fut>(&self, request: F)
+    where
+        F: FnOnce(ApiClient) -> Fut,
+        Fut: Future<Output = Msg> + Send + 'static,
+    {
         let tx = self.msg_tx.clone();
+        let msg = request(self.client.clone());
         tokio::spawn(async move {
-            let _ = tx.send(Msg::Version(client.version().await)).await;
-        });
-        let client = self.client.clone();
-        let tx = self.msg_tx.clone();
-        tokio::spawn(async move {
-            let _ = tx.send(Msg::Configs(client.configs().await)).await;
+            let _ = tx.send(msg.await).await;
         });
     }
 
@@ -228,6 +237,9 @@ impl App {
                 }
                 if matches!(self.configs, Some(Err(_))) {
                     self.configs = None;
+                }
+                if matches!(self.proxies, Some(Err(_))) {
+                    self.proxies = None;
                 }
                 // Retry now instead of waiting out the backoff.
                 if let Some(reconnect) = &mut self.reconnect {
@@ -263,12 +275,12 @@ impl App {
                 self.version = Some(result);
             }
             Msg::Configs(result) => {
-                if let Err(err) = &result
-                    && !matches!(self.version, Some(Err(_)))
-                {
-                    self.toast(ToastKind::Error, describe(err));
-                }
+                self.note_failure(&result);
                 self.configs = Some(result);
+            }
+            Msg::Proxies(result) => {
+                self.note_failure(&result);
+                self.proxies = Some(result);
             }
         }
         self.dirty = true;
@@ -316,9 +328,22 @@ impl App {
     }
 
     /// Whether the current page is waiting for data (and so shows a spinner).
-    /// The overview is the only page with data to wait for so far.
     pub fn is_loading(&self) -> bool {
-        self.page == Page::Overview && self.configs.is_none()
+        match self.page {
+            Page::Overview => self.configs.is_none(),
+            Page::Proxies => self.proxies.is_none(),
+            _ => false,
+        }
+    }
+
+    /// Toasts a failed data request, unless the connection is already known
+    /// to be down (the banner covers that).
+    fn note_failure<T>(&mut self, result: &Result<T, ApiError>) {
+        if let Err(err) = result
+            && !matches!(self.version, Some(Err(_)))
+        {
+            self.toast(ToastKind::Error, describe(err));
+        }
     }
 
     /// Shows a toast. An identical one already on screen is renewed instead of

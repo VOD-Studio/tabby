@@ -10,7 +10,7 @@ use serde::de::DeserializeOwned;
 
 use super::{
     error::ApiError,
-    models::{Configs, Version},
+    models::{Configs, Proxies, Version},
 };
 
 /// Everything except RFC 3986 unreserved characters is escaped, so a name can
@@ -96,6 +96,11 @@ impl ApiClient {
     /// `GET /configs`.
     pub async fn configs(&self) -> Result<Configs, ApiError> {
         self.get_json(&["configs"]).await
+    }
+
+    /// `GET /proxies`.
+    pub async fn proxies(&self) -> Result<Proxies, ApiError> {
+        self.get_json(&["proxies"]).await
     }
 }
 

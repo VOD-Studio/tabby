@@ -10,7 +10,10 @@ use ratatui::{
     widgets::Paragraph,
 };
 
-use crate::app::{App, Overlay, Page};
+use crate::{
+    api::error::ApiError,
+    app::{App, Overlay, Page},
+};
 
 pub fn draw(frame: &mut Frame, app: &App) {
     let [header, tabs, body, footer] = Layout::vertical([
@@ -61,34 +64,59 @@ pub fn page_title(page: Page) -> &'static str {
 
 /// Page bodies are still to come; routing and the data states are real.
 fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
-    let theme = app.theme;
-    if app.page == Page::Overview {
-        match &app.configs {
-            None => return components::states::loading(frame, area, app, "正在连接控制器…"),
-            Some(Err(err)) => {
-                return components::states::error(
-                    frame,
-                    area,
-                    app,
-                    &text::describe(err),
-                    text::detail(err),
-                );
+    match app.page {
+        Page::Overview => {
+            if ready(frame, area, app, app.configs.as_ref(), "正在连接控制器…").is_some() {
+                draw_unbuilt(frame, area, app, None);
             }
-            Some(Ok(_)) => {}
         }
+        Page::Proxies => {
+            if let Some(proxies) = ready(frame, area, app, app.proxies.as_ref(), "正在加载代理…")
+            {
+                let groups = proxies.groups().count();
+                draw_unbuilt(frame, area, app, Some(format!("{groups} 个代理组")));
+            }
+        }
+        _ => draw_unbuilt(frame, area, app, None),
     }
+}
+
+/// Returns the page's data once loaded; until then draws the loading or error
+/// state into `area` and returns `None`.
+fn ready<'a, T>(
+    frame: &mut Frame,
+    area: Rect,
+    app: &App,
+    data: Option<&'a Result<T, ApiError>>,
+    loading: &str,
+) -> Option<&'a T> {
+    match data {
+        None => {
+            components::states::loading(frame, area, app, loading);
+            None
+        }
+        Some(Err(err)) => {
+            components::states::error(frame, area, app, &text::describe(err), text::detail(err));
+            None
+        }
+        Some(Ok(data)) => Some(data),
+    }
+}
+
+fn draw_unbuilt(frame: &mut Frame, area: Rect, app: &App, summary: Option<String>) {
+    let theme = app.theme;
+    let mut lines = vec![Line::styled(
+        page_title(app.page),
+        Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
+    )];
+    lines.extend(summary.map(|summary| Line::styled(summary, Style::new().fg(theme.fg))));
+    lines.push(Line::styled("此页面尚未实现", Style::new().fg(theme.muted)));
+    let rows = u16::try_from(lines.len()).unwrap_or(u16::MAX);
     let [_, middle, _] = Layout::vertical([
         Constraint::Fill(1),
-        Constraint::Length(2),
+        Constraint::Length(rows),
         Constraint::Fill(1),
     ])
     .areas(area);
-    let lines = vec![
-        Line::styled(
-            page_title(app.page),
-            Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
-        ),
-        Line::styled("此页面尚未实现", Style::new().fg(theme.muted)),
-    ];
     frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), middle);
 }
