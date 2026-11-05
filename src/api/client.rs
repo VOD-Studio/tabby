@@ -8,7 +8,10 @@ use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use serde::de::DeserializeOwned;
 
-use super::error::ApiError;
+use super::{
+    error::ApiError,
+    models::{Configs, Version},
+};
 
 /// Everything except RFC 3986 unreserved characters is escaped, so a name can
 /// never inject `/`, `?`, `#` or `%` into the request path.
@@ -75,7 +78,7 @@ impl ApiClient {
     }
 
     /// `GET base/seg1/seg2/…`, decoded as JSON.
-    pub async fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T, ApiError> {
+    async fn get_json<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T, ApiError> {
         let response = self.http.get(self.url(segments)).send().await?;
         let status = response.status();
         if !status.is_success() {
@@ -83,5 +86,15 @@ impl ApiClient {
             return Err(ApiError::from_status(status, &body));
         }
         Ok(response.json().await?)
+    }
+
+    /// `GET /version`.
+    pub async fn version(&self) -> Result<Version, ApiError> {
+        self.get_json(&["version"]).await
+    }
+
+    /// `GET /configs`.
+    pub async fn configs(&self) -> Result<Configs, ApiError> {
+        self.get_json(&["configs"]).await
     }
 }

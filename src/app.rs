@@ -3,7 +3,11 @@ use ratatui::{Frame, text::Text, widgets::Paragraph};
 use tokio::sync::mpsc;
 
 use crate::{
-    api::{client::ApiClient, error::ApiError},
+    api::{
+        client::ApiClient,
+        error::ApiError,
+        models::{Configs, Version},
+    },
     config::Settings,
 };
 
@@ -17,8 +21,8 @@ pub enum Action {
 /// A message from a background task.
 #[derive(Debug)]
 pub enum Msg {
-    /// Raw `GET /version` reply from the startup probe.
-    Version(Result<serde_json::Value, ApiError>),
+    Version(Result<Version, ApiError>),
+    Configs(Result<Configs, ApiError>),
 }
 
 /// Maps a terminal event to an [`Action`]; `None` means the event is ignored.
@@ -40,7 +44,8 @@ pub struct App {
     settings: Settings,
     client: ApiClient,
     msg_tx: mpsc::Sender<Msg>,
-    core: Option<String>,
+    version: Option<Result<Version, ApiError>>,
+    configs: Option<Result<Configs, ApiError>>,
     should_quit: bool,
     dirty: bool,
 }
@@ -51,7 +56,8 @@ impl App {
             settings,
             client,
             msg_tx,
-            core: None,
+            version: None,
+            configs: None,
             should_quit: false,
             dirty: false,
         }
@@ -62,8 +68,12 @@ impl App {
         let client = self.client.clone();
         let tx = self.msg_tx.clone();
         tokio::spawn(async move {
-            let version = client.get_json(&["version"]).await;
-            let _ = tx.send(Msg::Version(version)).await;
+            let _ = tx.send(Msg::Version(client.version().await)).await;
+        });
+        let client = self.client.clone();
+        let tx = self.msg_tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(Msg::Configs(client.configs().await)).await;
         });
     }
 
@@ -76,14 +86,10 @@ impl App {
 
     pub fn handle_msg(&mut self, msg: Msg) {
         match msg {
-            Msg::Version(result) => {
-                self.core = Some(match result {
-                    Ok(version) => version.to_string(),
-                    Err(err) => format!("error: {err}"),
-                });
-                self.dirty = true;
-            }
+            Msg::Version(result) => self.version = Some(result),
+            Msg::Configs(result) => self.configs = Some(result),
         }
+        self.dirty = true;
     }
 
     pub fn should_quit(&self) -> bool {
@@ -100,12 +106,31 @@ impl App {
 pub fn draw(frame: &mut Frame, app: &App) {
     let settings = &app.settings;
     let secret = if settings.secret.is_some() { "set" } else { "none" };
+    let core = match &app.version {
+        None => "connecting...".to_owned(),
+        Some(Ok(version)) => format!("{:?} {}", version.kind(), version.version),
+        Some(Err(err)) => format!("error: {err}"),
+    };
+    let configs = match &app.configs {
+        None => "connecting...".to_owned(),
+        Some(Ok(c)) => format!(
+            "mode {} | log {} | ports http {} socks {} mixed {} | lan {} | ipv6 {} | tun {}",
+            c.mode,
+            c.log_level,
+            c.port,
+            c.socks_port,
+            c.mixed_port,
+            c.allow_lan,
+            c.ipv6,
+            c.tun
+                .as_ref()
+                .map_or("needs mihomo", |tun| if tun.enable { "on" } else { "off" }),
+        ),
+        Some(Err(err)) => format!("error: {err}"),
+    };
     let text = Text::from(format!(
-        "tabby - press q to quit\n\nprofile  {}\nurl      {}\nsecret   {secret}\ntheme    {:?}\ncore     {}",
-        settings.profile,
-        settings.url,
-        settings.theme,
-        app.core.as_deref().unwrap_or("connecting..."),
+        "tabby - press q to quit\n\nprofile  {}\nurl      {}\nsecret   {secret}\ntheme    {:?}\ncore     {core}\nconfigs  {configs}",
+        settings.profile, settings.url, settings.theme,
     ));
     frame.render_widget(Paragraph::new(text), frame.area());
 }
