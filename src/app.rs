@@ -1666,6 +1666,9 @@ pub enum Confirm {
     Change(Change),
     /// `停止内核` on the settings page.
     StopCore,
+    /// `重载配置` on a managed core: the config is made again from the
+    /// subscription in use, then read.
+    RegenerateConfig,
     /// The kernel to download, on first start (`upgrade` false) or as an
     /// upgrade of the installed one.
     InstallCore {
@@ -1682,6 +1685,7 @@ impl Confirm {
             Self::UpdateSubscriptions { .. } => "更新订阅",
             Self::DeleteSubscription { .. } => "删除订阅",
             Self::StopCore => "停止内核",
+            Self::RegenerateConfig => "重载配置",
             Self::InstallCore { upgrade: true, .. } => "升级内核",
             Self::InstallCore { .. } => "下载内核",
             Self::Change(change) => change.title(),
@@ -1701,6 +1705,7 @@ impl Confirm {
                 format!("更新匹配「{filter}」的 {} 个 provider？", targets.len())
             }
             Self::StopCore => "停止托管内核？经由它的连接都会断开。".to_owned(),
+            Self::RegenerateConfig => "用当前订阅重新生成配置？".to_owned(),
             Self::UpdateSubscriptions { filter, ids } if filter.is_empty() => {
                 format!("更新全部 {} 个订阅？", ids.len())
             }
@@ -1725,6 +1730,7 @@ impl Confirm {
             Self::CloseConnections(_) => "确认",
             Self::UpdateProviders { .. } | Self::UpdateSubscriptions { .. } => "更新",
             Self::StopCore => "停止",
+            Self::RegenerateConfig => "重载",
             Self::DeleteSubscription { .. } => "删除",
             Self::InstallCore { upgrade: true, .. } => "升级",
             Self::InstallCore { .. } => "下载",
@@ -1903,6 +1909,8 @@ pub enum Gate {
     NeedsMihomo,
     /// The kernel is the user's own binary: tabby does not replace it.
     SelfManaged,
+    /// A managed core listens on its Mixed port alone.
+    MixedOnly,
 }
 
 /// A change to the running configuration, sent as `PATCH /configs`.
@@ -3379,6 +3387,10 @@ impl App {
         {
             return Gate::SelfManaged;
         }
+        // One port is enough for a kernel the user does not run by hand.
+        if self.is_managed() && matches!(setting, Setting::Port(port) if port != Port::Mixed) {
+            return Gate::MixedOnly;
+        }
         let reported = match setting {
             Setting::AllowLan => configs.allow_lan.is_some(),
             Setting::LogLevel => !configs.log_level.is_empty(),
@@ -3454,6 +3466,10 @@ impl App {
                 );
                 return;
             }
+            Gate::MixedOnly => {
+                self.toast(ToastKind::Error, "托管内核只用 Mixed 端口".to_owned());
+                return;
+            }
             Gate::NeedsMihomo => {
                 self.toast(ToastKind::Error, "需要 mihomo".to_owned());
                 return;
@@ -3465,6 +3481,12 @@ impl App {
         }
         match (setting, change) {
             (Setting::StopCore, _) => self.ask_stop_core(),
+            // The config is made again from the subscription first.
+            (Setting::Reload, _) if self.is_managed() => {
+                self.pending = Some(Confirm::RegenerateConfig);
+                self.overlay = Some(Overlay::Confirm);
+                self.dirty = true;
+            }
             (Setting::CoreBinary, _) => {}
             (Setting::UpgradeCore, _) => self.check_upgrade(),
             (Setting::Mode, _) => self.cycle_mode(),
@@ -3742,6 +3764,7 @@ impl App {
             Confirm::UpdateProviders { targets, .. } => self.update_providers(targets),
             Confirm::Change(change) => self.send_change(change),
             Confirm::StopCore => self.stop_core(),
+            Confirm::RegenerateConfig => self.regenerate_config(),
             Confirm::UpdateSubscriptions { ids, .. } => self.update_subscriptions(ids),
             Confirm::DeleteSubscription { id, .. } => self.delete_subscription(id),
             Confirm::InstallCore { release, upgrade } => {
@@ -3970,6 +3993,11 @@ impl App {
         }
         if let Some(text) = change.done() {
             self.toast(ToastKind::Success, text);
+        }
+        // What a managed kernel is changed to is what it is started with
+        // next time.
+        if let Change::Patch(patch) = change {
+            self.persist_patch(patch);
         }
         match change {
             Change::Patch(_) | Change::Reload => {
@@ -9759,5 +9787,139 @@ secret = "b-secret"
                 KeyModifiers::NONE
             )))
         );
+    }
+
+    /// Waits until `reached` holds of the stand-in controller's requests.
+    async fn requested(
+        app: &mut App,
+        rx: &mut mpsc::Receiver<Envelope>,
+        port: u16,
+        reached: impl Fn(&[String]) -> bool,
+    ) {
+        pump_until(app, rx, |_| reached(&testing::requests_to(port))).await;
+    }
+
+    fn settings_toml(dir: &std::path::Path) -> String {
+        std::fs::read_to_string(dir.join("core/settings.toml")).unwrap_or_default()
+    }
+
+    #[tokio::test]
+    async fn what_is_changed_on_a_managed_kernel_is_kept_for_its_next_start() {
+        let dir = testing::scratch("app-persist");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_settings_on(Arc::clone(&core), Setting::AllowLan).await;
+
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::AllowLan)).await;
+        // `m`: the next mode, as the header and the overview have it.
+        app.update(Action::SelectPage(Page::Overview));
+        key_press(&mut app, KeyCode::Char('m'));
+        pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::Mode)).await;
+        // The Mixed port, typed.
+        app.update(Action::SelectPage(Page::Settings));
+        app.settings_view.cursor = app
+            .settings()
+            .iter()
+            .position(|setting| *setting == Setting::Port(Port::Mixed))
+            .unwrap();
+        key_press(&mut app, KeyCode::Enter);
+        for _ in 0..5 {
+            key_press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "18080");
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| {
+            !app.is_changing(Setting::Port(Port::Mixed))
+        })
+        .await;
+
+        let saved = core.settings();
+        assert!(saved.allow_lan);
+        assert_eq!(saved.mixed_port, 18080);
+        assert_eq!(saved.mode, "global");
+        let text = settings_toml(&dir);
+        assert!(
+            text.contains("mixed-port = 18080") && text.contains("allow-lan = true"),
+            "{text}"
+        );
+
+        // A kernel started afresh over the same files runs with them.
+        drop(core);
+        let again = crate::core::testing::core_at(&dir, testing::free_port(), &recorder, true);
+        assert_eq!(
+            (again.settings().mixed_port, again.settings().mode.as_str()),
+            (18080, "global")
+        );
+        again.regenerate().await.unwrap();
+        let config_now = std::fs::read_to_string(dir.join("core/home/config.yaml")).unwrap();
+        assert!(
+            config_now.contains("\"mixed-port\": 18080")
+                && config_now.contains("\"allow-lan\": true"),
+            "{config_now}"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_managed_kernel_has_its_mixed_port_alone_and_the_others_say_so() {
+        let dir = testing::scratch("app-ports");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, _rx) = managed_settings_on(core, Setting::Port(Port::Http)).await;
+
+        assert!(draw(&app).contains("托管内核只用 Mixed 端口"));
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.settings_view.editing.is_none());
+        assert!(toasted(&app, "托管内核只用 Mixed 端口"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_on_a_managed_kernel_writes_the_config_again_before_the_kernel_reads_it() {
+        let dir = testing::scratch("app-regenerate");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let file = dir.join("a.yaml");
+        std::fs::write(&file, SUB_YAML).unwrap();
+        core.import_file(&file).await.unwrap();
+        let (mut app, mut rx) = managed_settings_on(Arc::clone(&core), Setting::Reload).await;
+        let config = dir.join("core/home/config.yaml");
+        std::fs::write(&config, "stale").unwrap();
+        let before = testing::requests_to(port).len();
+
+        key_press(&mut app, KeyCode::Enter);
+        assert!(draw(&app).contains("用当前订阅重新生成配置？"));
+        key_press(&mut app, KeyCode::Char('y'));
+        requested(&mut app, &mut rx, port, |requests| {
+            requests[before..]
+                .iter()
+                .any(|request| request.starts_with("PUT /configs"))
+        })
+        .await;
+
+        assert!(
+            std::fs::read_to_string(&config)
+                .unwrap()
+                .starts_with(SUB_YAML)
+        );
+        pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::Reload)).await;
+        assert!(toasted(&app, "已重载配置"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_external_controller_keeps_asking_the_kernel_to_reload_and_has_every_port() {
+        let (mut app, _rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        select(&mut app, Setting::Reload);
+        key_press(&mut app, KeyCode::Enter);
+        assert!(draw(&app).contains("重新加载配置文件？"));
+        key_press(&mut app, KeyCode::Char('n'));
+        select(&mut app, Setting::Port(Port::Http));
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.settings_view.editing.is_some());
     }
 }

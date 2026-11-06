@@ -13,6 +13,9 @@ use super::{runner::Cmd, *};
 pub(crate) const SECRET: &str = "test-secret";
 pub(crate) const UNIT: &str = "tabby-mihomo-test";
 pub(crate) const MIHOMO: &str = r#"{"version":"v1.19.33","meta":true}"#;
+/// What the stand-in controller says to `GET /configs`: a mihomo's, with
+/// its mixed port at 17890.
+const CONFIGS: &str = include_str!("../../tests/fixtures/mihomo_configs.json");
 
 pub(crate) fn scratch(name: &str) -> PathBuf {
     let dir = env::temp_dir().join(format!("tabby-{}-core-{name}", std::process::id()));
@@ -187,20 +190,24 @@ pub(crate) fn respond(stream: TcpStream, reply: Reply, port: u16) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut authorized = false;
     let mut first = true;
+    let mut request = String::new();
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
             break;
         }
         if std::mem::take(&mut first) {
-            let request: Vec<&str> = line.split_whitespace().take(2).collect();
-            REQUESTS.lock().unwrap().push((port, request.join(" ")));
+            let parts: Vec<&str> = line.split_whitespace().take(2).collect();
+            request = parts.join(" ");
+            REQUESTS.lock().unwrap().push((port, request.clone()));
         }
         authorized |= line
             .to_lowercase()
             .starts_with(&format!("authorization: bearer {SECRET}"));
     }
+    let configs = request.starts_with("GET /configs");
     let (status, body) = match reply {
+        Reply::Mihomo if authorized && configs => ("200 OK", CONFIGS),
         Reply::Mihomo if authorized => ("200 OK", MIHOMO),
         Reply::Mihomo | Reply::Rejects => ("401 Unauthorized", r#"{"message":"Unauthorized"}"#),
         Reply::Other => ("200 OK", "<html>hello</html>"),

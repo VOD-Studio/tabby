@@ -4,9 +4,11 @@
 
 use std::sync::Arc;
 
-use super::{App, Confirm, Msg, Outbox, Overlay, Reconnect, Setting, Stage, ToastKind};
+use super::{
+    App, Change, Confirm, Msg, Outbox, Overlay, Patch, Port, Reconnect, Setting, Stage, ToastKind,
+};
 use crate::{
-    core::{CoreError, ManagedCore, Release, Step, Upgrade},
+    core::{CoreError, ManagedCore, Persist, Release, Step, Upgrade},
     ui::text::core_reason,
 };
 
@@ -47,6 +49,8 @@ pub enum CoreEvent {
     UpgradeChecked(Result<Upgrade, CoreError>),
     /// `升级内核` ended: the version now installed.
     Upgraded(Result<String, CoreError>),
+    /// The config file was made again, for `重载配置`.
+    Regenerated(Result<(), CoreError>),
 }
 
 /// A toast about what failed: `what`, then what the managed core said.
@@ -174,6 +178,15 @@ impl App {
                     }
                 }
             }
+            CoreEvent::Regenerated(Ok(())) => {
+                // The reload itself is the one every other kernel has.
+                self.changing.remove(&Setting::Reload);
+                self.send_change(Change::Reload);
+            }
+            CoreEvent::Regenerated(Err(err)) => {
+                self.changing.remove(&Setting::Reload);
+                self.toast(ToastKind::Error, failure("重载配置失败", &err));
+            }
             CoreEvent::Upgraded(result) => {
                 self.changing.remove(&Setting::UpgradeCore);
                 match result {
@@ -243,6 +256,39 @@ impl App {
         }
         self.spawn_core(|core, _| async move { CoreEvent::Restarted(core.restart().await) });
         true
+    }
+
+    /// What a managed kernel is changed to, written down for its next
+    /// start. The change has taken effect either way: failing to keep it
+    /// is a thing to say, not to undo.
+    pub(super) fn persist_patch(&mut self, patch: Patch) {
+        let Some(core) = self.managed_core() else {
+            return;
+        };
+        let change = match patch {
+            Patch::Mode(mode) => Persist::Mode(mode.name().to_owned()),
+            Patch::AllowLan(on) => Persist::AllowLan(on),
+            Patch::LogLevel(level) => Persist::LogLevel(level.to_owned()),
+            Patch::Ipv6(on) => Persist::Ipv6(on),
+            Patch::Port(Port::Mixed, number) => Persist::MixedPort(number),
+            // A managed kernel has no other ports.
+            Patch::Port(..) => return,
+            Patch::Tun(on) => Persist::Tun(on),
+        };
+        if let Err(err) = core.persist(change) {
+            self.toast(ToastKind::Error, failure("已生效，但没能保存", &err));
+        }
+    }
+
+    /// `y` to `重载配置` on a managed core: the config is written again
+    /// from the subscription in use, and then the kernel reads it.
+    pub(super) fn regenerate_config(&mut self) {
+        if self.changing.contains_key(&Setting::Reload) {
+            return;
+        }
+        self.changing.insert(Setting::Reload, Stage::Sending);
+        self.dirty = true;
+        self.spawn_core(|core, _| async move { CoreEvent::Regenerated(core.regenerate().await) });
     }
 
     /// The question `停止内核` asks.

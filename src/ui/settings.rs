@@ -220,6 +220,7 @@ fn value(
         Gate::Missing => return vec![Span::styled(NO_VALUE, muted)],
         Gate::NeedsMihomo => return vec![Span::styled("需要 mihomo", muted)],
         Gate::SelfManaged => return vec![Span::styled("由你自己管理", muted)],
+        Gate::MixedOnly => return vec![Span::styled("托管内核只用 Mixed 端口", muted)],
     }
     let fg = Style::new().fg(theme.fg);
     match setting {

@@ -17,7 +17,7 @@ mod supervisor;
 use std::{
     env, io,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex, PoisonError},
     time::{Duration, Instant},
 };
 
@@ -31,6 +31,7 @@ pub use profiles::Outcome;
 use runner::Runner;
 pub use runner::System;
 use settings::CoreSettings;
+pub use settings::Persist;
 use state::State;
 pub use subscription::{Kind, Store, Subscription};
 use supervisor::Mode;
@@ -70,6 +71,11 @@ impl Paths {
 
     fn state(&self) -> PathBuf {
         self.root.join("state.toml")
+    }
+
+    /// What the kernel is set up with, written by tabby.
+    fn settings(&self) -> PathBuf {
+        self.root.join("settings.toml")
     }
 
     /// The kernel tabby downloads.
@@ -206,7 +212,8 @@ pub struct ManagedCore {
     /// `[core].binary`.
     binary: Option<PathBuf>,
     state: State,
-    settings: CoreSettings,
+    /// What `settings.toml` says, and what is changed since.
+    settings: Mutex<CoreSettings>,
     client: ApiClient,
     runner: Arc<dyn Runner>,
     /// `$XDG_RUNTIME_DIR`, where a running user manager has its socket.
@@ -246,6 +253,8 @@ impl ManagedCore {
         let paths = Paths::new(data_dir);
         let state = State::load_or_create(&paths.state())
             .wrap_err_with(|| format!("cannot use {}", paths.state().display()))?;
+        let settings = CoreSettings::load(&paths.settings())
+            .wrap_err_with(|| format!("cannot use {}", paths.settings().display()))?;
         let client = ApiClient::new(
             &format!("http://127.0.0.1:{}", state.port),
             Some(&state.secret),
@@ -254,7 +263,7 @@ impl ManagedCore {
             paths,
             binary,
             state,
-            settings: CoreSettings::default(),
+            settings: Mutex::new(settings),
             client,
             runner,
             runtime_dir,
@@ -289,6 +298,31 @@ impl ManagedCore {
 
     pub fn secret(&self) -> &str {
         &self.state.secret
+    }
+
+    /// What the managed kernel is set up with.
+    pub fn settings(&self) -> CoreSettings {
+        self.settings
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Writes a setting down, to be what the kernel is started with next
+    /// time.
+    pub fn persist(&self, change: Persist) -> Result<(), CoreError> {
+        let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+        settings.set(change);
+        settings
+            .save(&self.paths.settings())
+            .map_err(|err| CoreError::io("cannot write settings.toml", err))
+    }
+
+    /// Writes the kernel's config file again from the subscription in use
+    /// and the settings, for a kernel that is asked to read it again.
+    pub async fn regenerate(&self) -> Result<(), CoreError> {
+        let _guard = self.lock.lock().await;
+        self.write_config()
     }
 
     /// Where the kernel to run is, whether or not it is there yet:

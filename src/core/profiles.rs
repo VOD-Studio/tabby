@@ -83,7 +83,7 @@ impl ManagedCore {
     /// Writes the kernel's config file from the subscription `store` says is
     /// in use.
     pub(super) fn write_config_for(&self, store: &Store) -> Result<(), CoreError> {
-        let text = runtime::render(&self.base_profile(store)?, &self.settings, &self.state)
+        let text = runtime::render(&self.base_profile(store)?, &self.settings(), &self.state)
             .map_err(|_| CoreError::UnsupportedProfile)?;
         write_private(&self.paths.config(), &text)
             .map_err(|err| CoreError::io("cannot write the kernel's config", err))
@@ -188,7 +188,7 @@ impl ManagedCore {
 
     /// The profile, if the config file can be made from it.
     fn accept(&self, profile: String, links: Option<String>) -> Result<Prepared, CoreError> {
-        runtime::render(&profile, &self.settings, &self.state)
+        runtime::render(&profile, &self.settings(), &self.state)
             .map_err(|_| CoreError::UnsupportedProfile)?;
         Ok(Prepared { profile, links })
     }

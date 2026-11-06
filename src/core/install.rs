@@ -236,7 +236,7 @@ impl ManagedCore {
         let mut routes = Vec::new();
         if self.probe().await == Probe::Ready
             && let Ok(proxy) =
-                reqwest::Proxy::all(format!("http://127.0.0.1:{}", self.settings.mixed_port))
+                reqwest::Proxy::all(format!("http://127.0.0.1:{}", self.settings().mixed_port))
             && let Ok(client) = http(Some(proxy))
         {
             routes.push(client);

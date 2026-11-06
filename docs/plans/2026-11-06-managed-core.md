@@ -344,6 +344,14 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 4. `feat(settings): persist managed core settings`
    - 范围：§7.3；§7.2 里来自 `settings.toml` 的覆盖键和 DNS 覆盖；端口项在托管模式下的提示；`重载配置` 在托管模式下的含义。
    - 验收：改 mixed-port、allow-lan、模式后停掉再启动内核，设置仍然生效；外部控制器模式下的行为不变（现有测试全部通过）。
+   - 实现记录（2026-11-06）：
+     - `src/core/settings.rs`：`CoreSettings`（`settings.toml`，`deny_unknown_fields`，缺省值照 §7.3）、`Persist`（设置页一次修改要写下的内容）。文件有错（未知键、`mode` / `log-level` / `tun.stack` 不在可取值里、`[dns]` 的值类型不对）会在启动前报错，写明哪个键、哪个文件，不会悄悄改回默认值。`ManagedCore` 持有 `Mutex<CoreSettings>`，`persist` 改内存并原子写回文件；`restart`、`regenerate`、启动时写 `config.yaml` 都读当前值。
+     - 设置页（以及 `m`）在托管模式下改完、内核确认成功之后写入 `settings.toml`：模式、局域网连接、IPv6、内核日志级别、Mixed 端口、TUN 开关。内核已经生效而写文件失败时只 toast `已生效，但没能保存：…`，不回滚。外部控制器模式不写任何东西。
+     - 端口：托管模式下 HTTP / SOCKS / Redir / TProxy 行显示 `托管内核只用 Mixed 端口`，`Enter` 只弹这句提示（`Gate::MixedOnly`）；生成配置时订阅里的这几个键本来就被删掉。
+     - `重载配置` 在托管模式下问 `用当前订阅重新生成配置？`，确认后先 `regenerate`（重写 `config.yaml`）再走原来的 `PUT /configs` 与刷新，toast 仍是 `已重载配置`。外部控制器模式的问题与行为不变（有测试）。
+     - **`[dns]`**：键限于 FlClash `normalProfileKeys` 那 11 个（`listen`、`ipv6`、`prefer-h3`、`enhanced-mode`、`fake-ip-filter`、`fake-ip-filter-mode`、`default-nameserver`、`nameserver`、`fallback`、`proxy-server-nameserver`、`direct-nameserver`）。FlClash 是逐键覆盖，所以不是整段替换：`runtime::edit` 在订阅自己的块状 `dns:` 里删掉被覆盖的子键（连同其多行值），在该段末尾按原缩进补上新值，其余子键、注释、缩进都不动（CRLF 的文件补出的行也用 CRLF）。订阅没有 `dns`、或它是 `{…}` / 空值时，整段由 tabby 另写一个 `"dns": {"enable": true, …}`（此时订阅里的 flow 写法的 `dns` 会被丢掉，因为没法在字节层面合并）。
+     - 本项没有 UI 去编辑 `[dns]`，手改 `settings.toml`，下次启动内核生效。
+     - 手动验证（临时 `XDG_*`，v1.19.33）：`settings.toml` 里写 `[dns] nameserver = ["1.1.1.1"]`，在设置页把 Mixed 端口改成 17891、打开局域网连接、`m` 切到 GLOBAL，文件随之变成 `mixed-port = 17891`、`allow-lan = true`、`mode = "global"`；停止内核再按 `r` 启动，设置页仍是 GLOBAL / 开 / 17891，`config.yaml` 末尾有 `"dns": {"enable":true,"nameserver":["1.1.1.1"]}`。本机 7890 被别的内核占着时托管内核的默认 Mixed 端口显示 `未启用`，改成 17891 后正常。
 5. `feat(core): authorize tun with setcap`
    - 范围：§8。
    - 验收（实测前征得用户同意）：没有 polkit agent 时走到 sudo，输入密码后 TUN 开启，`ip link` 能看到 TUN 设备，经它访问正常；取消（126）时 TUN 保持关闭；替换二进制后自动关掉 TUN 并提示；nosuid 分区上提前报错。同时确认 R9。
