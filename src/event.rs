@@ -11,7 +11,7 @@ use tokio::{
 
 use crate::{
     app::{App, Envelope, action_for},
-    ui,
+    ui::{self, shadow::Shadow},
 };
 
 /// Render cadence for repaints deferred by background messages.
@@ -34,13 +34,14 @@ pub async fn run(
     let mut tick = interval(TICK);
     tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
-    terminal.draw(|frame| ui::draw(frame, app))?;
+    let mut shadow = Shadow::default();
+    paint(terminal, app, &mut shadow)?;
     while !app.should_quit() {
         tokio::select! {
             _ = tick.tick() => {
                 app.on_tick(Instant::now());
                 if app.take_dirty() {
-                    terminal.draw(|frame| ui::draw(frame, app))?;
+                    paint(terminal, app, &mut shadow)?;
                 }
             }
             Some(envelope) = msg_rx.recv() => app.receive(envelope),
@@ -50,10 +51,20 @@ pub async fn run(
                     app.update(action);
                 }
                 if app.take_dirty() {
-                    terminal.draw(|frame| ui::draw(frame, app))?;
+                    paint(terminal, app, &mut shadow)?;
                 }
             }
         }
     }
+    Ok(())
+}
+
+/// Draws `app`, repainting the cells [`Shadow`] finds cut by the last frame.
+fn paint(terminal: &mut DefaultTerminal, app: &App, shadow: &mut Shadow) -> Result<()> {
+    let frame = terminal.draw(|frame| {
+        ui::draw(frame, app);
+        shadow.mark(frame.buffer_mut());
+    })?;
+    shadow.remember(frame.buffer);
     Ok(())
 }
