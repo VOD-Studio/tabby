@@ -42,17 +42,17 @@ pub fn capacity(body: Rect) -> usize {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Item {
     Heading(&'static str),
-    /// Index into [`Setting::ALL`].
+    /// Index into the rows [`App::settings`] lists.
     Row(usize),
     Gap,
 }
 
 /// Every line of the panel: each group's heading, its settings, and a blank
 /// line before the next group.
-fn items() -> Vec<Item> {
-    let mut items = Vec::with_capacity(Setting::ALL.len() + 8);
+fn items(rows: &[Setting]) -> Vec<Item> {
+    let mut items = Vec::with_capacity(rows.len() + 8);
     let mut section = None;
-    for (index, setting) in Setting::ALL.iter().enumerate() {
+    for (index, setting) in rows.iter().enumerate() {
         let current = setting.section();
         if section != Some(current) {
             if section.is_some() {
@@ -84,8 +84,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     app.hits.add(inner, Target::List);
 
     let view = &app.settings_view;
-    let items = items();
-    let cursor = view.cursor.min(Setting::ALL.len() - 1);
+    let rows = app.settings();
+    let items = items(&rows);
+    let cursor = view.cursor.min(rows.len() - 1);
     let row_item = items
         .iter()
         .position(|item| *item == Item::Row(cursor))
@@ -116,7 +117,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
             ),
             Item::Gap => Line::raw(""),
             Item::Row(row) => {
-                let setting = Setting::ALL[row];
+                let setting = rows[row];
                 let editing = view
                     .editing
                     .as_ref()
@@ -132,7 +133,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
         };
         frame.render_widget(line, rect);
         if let Item::Row(row) = items[index] {
-            app.hits.add(rect, Target::Setting(Setting::ALL[row]));
+            app.hits.add(rect, Target::Setting(rows[row]));
         }
         if items[index] == Item::Row(cursor) {
             theme.paint_cursor(frame.buffer_mut(), rect);
@@ -253,7 +254,8 @@ fn value(
         | Setting::FlushFakeIp
         | Setting::UpdateGeo
         | Setting::Restart
-        | Setting::Upgrade => {
+        | Setting::Upgrade
+        | Setting::StopCore => {
             if busy {
                 vec![Span::styled("进行中…", muted)]
             } else {
@@ -307,23 +309,33 @@ mod tests {
 
     #[test]
     fn every_setting_is_listed_once_under_its_heading() {
-        let items = items();
-        let rows: Vec<usize> = items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Row(index) => Some(*index),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(rows, (0..Setting::ALL.len()).collect::<Vec<_>>());
-        let headings: Vec<&str> = items
-            .iter()
-            .filter_map(|item| match item {
-                Item::Heading(title) => Some(*title),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(headings, ["基础", "端口", "TUN", "维护"]);
+        let headings = |rows: &[Setting]| -> (Vec<usize>, Vec<&'static str>) {
+            let items = items(rows);
+            let indices = items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Row(index) => Some(*index),
+                    _ => None,
+                })
+                .collect();
+            let headings = items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Heading(title) => Some(*title),
+                    _ => None,
+                })
+                .collect();
+            (indices, headings)
+        };
+        // The managed core's own group is last, and only a managed
+        // connection lists it.
+        let (indices, titles) = headings(&Setting::ALL);
+        assert_eq!(indices, (0..Setting::ALL.len()).collect::<Vec<_>>());
+        assert_eq!(titles, ["基础", "端口", "TUN", "维护", "托管内核"]);
+        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 1].to_vec();
+        let (indices, titles) = headings(&external);
+        assert_eq!(indices, (0..external.len()).collect::<Vec<_>>());
+        assert_eq!(titles, ["基础", "端口", "TUN", "维护"]);
     }
 
     #[test]

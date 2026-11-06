@@ -25,7 +25,7 @@ use crate::{
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
-    config::{self, Profiles, Settings},
+    config::{self, Origin, Profiles, Settings},
     format::natural_cmp,
     themes::{self, Entry, Picker},
     ui::{
@@ -41,6 +41,10 @@ use crate::{
         theme::Theme,
     },
 };
+
+mod managed;
+
+pub use managed::{CoreEvent, CorePhase};
 
 /// The seven top-level pages, in tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1392,6 +1396,8 @@ pub enum Msg {
         stream: Stream,
         event: StreamEvent,
     },
+    /// Something about the managed kernel.
+    Core(CoreEvent),
 }
 
 /// A [`Msg`] stamped with the connection it was sent for.
@@ -1429,6 +1435,16 @@ impl Outbox {
             msg,
         };
         self.tx.send(envelope).await.is_ok()
+    }
+
+    /// Like [`Outbox::send`], without waiting: `msg` is dropped when the
+    /// channel is full. For hints that the next message makes stale.
+    pub fn try_send(&self, msg: Msg) {
+        let envelope = Envelope {
+            epoch: self.epoch,
+            msg,
+        };
+        let _ = self.tx.try_send(envelope);
     }
 }
 
@@ -1603,6 +1619,8 @@ pub enum Confirm {
     /// A setting that changes routing, reloads, downloads or replaces the
     /// kernel.
     Change(Change),
+    /// `停止内核` on the settings page.
+    StopCore,
 }
 
 impl Confirm {
@@ -1610,6 +1628,7 @@ impl Confirm {
         match self {
             Self::CloseConnections(_) => "关闭连接",
             Self::UpdateProviders { .. } => "更新 Provider",
+            Self::StopCore => "停止内核",
             Self::Change(change) => change.title(),
         }
     }
@@ -1626,6 +1645,7 @@ impl Confirm {
             Self::UpdateProviders { filter, targets } => {
                 format!("更新匹配「{filter}」的 {} 个 provider？", targets.len())
             }
+            Self::StopCore => "停止托管内核？经由它的连接都会断开。".to_owned(),
             Self::Change(change) => change.question().to_owned(),
         }
     }
@@ -1635,6 +1655,7 @@ impl Confirm {
         match self {
             Self::CloseConnections(_) => "确认",
             Self::UpdateProviders { .. } => "更新",
+            Self::StopCore => "停止",
             Self::Change(change) => change.verb(),
         }
     }
@@ -1701,11 +1722,13 @@ pub enum Setting {
     UpdateGeo,
     Restart,
     Upgrade,
+    /// Stops the managed core.
+    StopCore,
 }
 
 impl Setting {
     /// Top to bottom, as the page lists them.
-    pub const ALL: [Self; 15] = [
+    pub const ALL: [Self; 16] = [
         Self::Mode,
         Self::AllowLan,
         Self::LogLevel,
@@ -1721,6 +1744,7 @@ impl Setting {
         Self::UpdateGeo,
         Self::Restart,
         Self::Upgrade,
+        Self::StopCore,
     ];
 
     /// The group heading it is listed under.
@@ -1732,6 +1756,7 @@ impl Setting {
             Self::Reload | Self::FlushFakeIp | Self::UpdateGeo | Self::Restart | Self::Upgrade => {
                 "维护"
             }
+            Self::StopCore => "托管内核",
         }
     }
 
@@ -1748,6 +1773,7 @@ impl Setting {
             Self::UpdateGeo => "更新 GeoData",
             Self::Restart => "重启内核",
             Self::Upgrade => "升级内核",
+            Self::StopCore => "停止内核",
         }
     }
 
@@ -1757,7 +1783,12 @@ impl Setting {
     pub fn asks(self) -> bool {
         matches!(
             self,
-            Self::Tun | Self::Reload | Self::UpdateGeo | Self::Restart | Self::Upgrade
+            Self::Tun
+                | Self::Reload
+                | Self::UpdateGeo
+                | Self::Restart
+                | Self::Upgrade
+                | Self::StopCore
         )
     }
 
@@ -1768,6 +1799,11 @@ impl Setting {
             self,
             Self::Tun | Self::FlushFakeIp | Self::UpdateGeo | Self::Restart | Self::Upgrade
         )
+    }
+
+    /// Only a managed core has it.
+    fn managed_only(self) -> bool {
+        matches!(self, Self::StopCore)
     }
 }
 
@@ -1971,11 +2007,6 @@ pub struct SettingsView {
 }
 
 impl SettingsView {
-    /// The setting under the cursor.
-    pub fn selected(&self) -> Setting {
-        Setting::ALL[self.cursor.min(Setting::ALL.len() - 1)]
-    }
-
     /// A key typed into the port box: digits, and the keys that edit or
     /// move; other characters are not taken.
     fn type_key(&mut self, key: KeyEvent) {
@@ -2004,6 +2035,9 @@ pub struct Reconnect {
     pub retry_at: Option<Instant>,
     /// The secret was rejected: retrying cannot help.
     pub unauthorized: bool,
+    /// The managed kernel's process is gone: waiting cannot help, `r`
+    /// starts it again.
+    pub exited: bool,
 }
 
 /// Whether the controller has answered the `/version` probe.
@@ -2044,6 +2078,8 @@ pub struct App {
     client: ApiClient,
     /// Where background work reports, stamped with the current connection.
     outbox: Outbox,
+    /// Where the managed kernel is; `None` on an external controller.
+    pub core_phase: Option<CorePhase>,
     /// The connections `P` offers, and which one is in use.
     pub profiles: Profiles,
     /// Index into [`Profiles::choices`] of the row the profile popup's
@@ -2168,6 +2204,10 @@ impl App {
         themes: Picker,
     ) -> Self {
         let streams = Streams::new(&settings.url, settings.secret.as_deref(), outbox.clone());
+        let core_phase = profiles
+            .current_choice()
+            .filter(|choice| choice.origin == Origin::Managed)
+            .map(|_| CorePhase::Idle);
         Self {
             theme,
             icons: settings.icons.into(),
@@ -2175,6 +2215,7 @@ impl App {
             page: Page::Overview,
             client,
             outbox,
+            core_phase,
             profile_cursor: profiles.current,
             profiles,
             profile_scroll: Scroll::default(),
@@ -2228,6 +2269,17 @@ impl App {
     /// Spawns the startup requests and the WebSocket streams. Calling it
     /// again repeats the requests; running streams are left alone.
     pub fn start(&mut self) {
+        match self.core_phase {
+            None | Some(CorePhase::Running) => self.start_requests(),
+            // The kernel comes first; its controller is what the requests
+            // are for.
+            Some(CorePhase::Idle) => self.begin_core(),
+            Some(CorePhase::Starting(_) | CorePhase::Failed(_) | CorePhase::Stopped) => {}
+        }
+    }
+
+    /// The startup requests and the streams of a controller that answers.
+    fn start_requests(&mut self) {
         self.fetch_version();
         self.fetch_configs(false);
         self.fetch_proxies(false);
@@ -2435,6 +2487,9 @@ impl App {
     /// `r`: retries what failed and repeats the startup requests at once,
     /// plus the current page's own data where it has some.
     fn refresh(&mut self) {
+        if self.retry_core() {
+            return;
+        }
         // A failed request shows as loading again while it is retried.
         if matches!(self.version, Some(Err(_))) {
             self.version = None;
@@ -2590,8 +2645,9 @@ impl App {
                 let screen = Rect::from(self.size);
                 let capacity = settings::capacity(regions(screen, self.reconnect.is_some()).body);
                 let half = (capacity / 2).max(1);
+                let rows = self.settings().len();
                 let view = &mut self.settings_view;
-                view.cursor = movement.apply(view.cursor, Setting::ALL.len(), half);
+                view.cursor = movement.apply(view.cursor, rows, half);
                 self.dirty = true;
                 return;
             }
@@ -2899,7 +2955,7 @@ impl App {
                 true
             }
             Target::Setting(setting) => {
-                let Some(index) = Setting::ALL.iter().position(|each| each == setting) else {
+                let Some(index) = self.settings().iter().position(|each| each == setting) else {
                     return false;
                 };
                 self.settings_view.cursor = index;
@@ -3179,7 +3235,8 @@ impl App {
             | Setting::FlushFakeIp
             | Setting::UpdateGeo
             | Setting::Restart
-            | Setting::Upgrade => true,
+            | Setting::Upgrade
+            | Setting::StopCore => true,
         };
         match (reported, clash) {
             (true, _) => Gate::Open,
@@ -3201,14 +3258,14 @@ impl App {
         let Some(Ok(configs)) = &self.configs else {
             return;
         };
-        let setting = self.settings_view.selected();
+        let setting = self.selected_setting();
         if self.is_changing(setting) {
             return;
         }
         let gate = self.gate(setting, configs);
         let flip = |on: Option<bool>| !on.unwrap_or_default();
         let change = match setting {
-            Setting::Mode | Setting::Port(_) => None,
+            Setting::Mode | Setting::Port(_) | Setting::StopCore => None,
             Setting::AllowLan => Some(Change::Patch(Patch::AllowLan(flip(configs.allow_lan)))),
             Setting::LogLevel => Some(Change::Patch(Patch::LogLevel(next_kernel_log_level(
                 &configs.log_level,
@@ -3239,6 +3296,7 @@ impl App {
             }
         }
         match (setting, change) {
+            (Setting::StopCore, _) => self.ask_stop_core(),
             (Setting::Mode, _) => self.cycle_mode(),
             (Setting::Port(port), _) => {
                 // Off is typed as nothing rather than as a 0 to delete first.
@@ -3455,14 +3513,26 @@ impl App {
             return;
         };
         let label = choice.label().to_owned();
-        let client = match ApiClient::new(&choice.url, choice.secret.as_deref()) {
-            Ok(client) => client,
-            Err(err) => {
-                self.toast(ToastKind::Error, format!("无法切换到 {label}：{err}"));
-                return;
-            }
-        };
         tracing::info!(profile = %choice.name, url = %choice.url, "switching profile");
+        match self.rebuild(index) {
+            Ok(page) => {
+                self.start();
+                // The page loads what it loads on a first visit.
+                self.set_page(page);
+                self.toast(ToastKind::Success, format!("已切换到 {label}"));
+            }
+            Err(err) => self.toast(ToastKind::Error, format!("无法切换到 {label}：{err}")),
+        }
+    }
+
+    /// Starts over on choice `index`: everything learnt from the old
+    /// controller goes, the way it came, and the app is where it is at
+    /// launch, on the first page. Returns the page the user was on.
+    fn rebuild(&mut self, index: usize) -> Result<Page, color_eyre::Report> {
+        let Some(choice) = self.profiles.choices.get(index) else {
+            return Ok(self.page);
+        };
+        let client = ApiClient::new(&choice.url, choice.secret.as_deref())?;
         let settings = Settings {
             profile: choice.name.clone(),
             url: choice.url.clone(),
@@ -3487,10 +3557,7 @@ impl App {
         app.streams.set_log_level(self.logs_view.level);
         let page = self.page;
         *self = app;
-        self.start();
-        // The page loads what it loads on a first visit.
-        self.set_page(page);
-        self.toast(ToastKind::Success, format!("已切换到 {label}"));
+        Ok(page)
     }
 
     /// `y`: closes the confirm dialog and does what it asked about.
@@ -3504,6 +3571,7 @@ impl App {
             Confirm::CloseConnections(closing) => self.close_connections(closing),
             Confirm::UpdateProviders { targets, .. } => self.update_providers(targets),
             Confirm::Change(change) => self.send_change(change),
+            Confirm::StopCore => self.stop_core(),
         }
     }
 
@@ -3641,6 +3709,11 @@ impl App {
                 if first_failure || refreshed {
                     self.toast(ToastKind::Error, describe(err));
                 }
+                // A managed kernel that is gone will not answer however
+                // often it is asked.
+                if first_failure && self.is_managed() {
+                    self.check_core_alive();
+                }
             }
         }
         self.version = Some(result);
@@ -3691,6 +3764,10 @@ impl App {
         }
         self.changing.insert(setting, Stage::Sending);
         self.dirty = true;
+        // The managed core is restarted through its supervisor.
+        if change == Change::Restart && self.restart_core() {
+            return;
+        }
         self.spawn(move |client| async move {
             let result = change.send(&client).await;
             Msg::Changed { change, result }
@@ -4085,6 +4162,7 @@ impl App {
                 ),
             },
             Msg::Providers(msg) => self.on_providers(msg),
+            Msg::Core(event) => self.on_core(event),
             Msg::Stream { stream, event } => self.on_stream(stream, event),
         }
         self.dirty = true;
@@ -4214,11 +4292,18 @@ impl App {
             attempt,
             retry_at: (!unauthorized).then(|| Instant::now() + backoff(attempt - 1)),
             unauthorized,
+            exited: false,
         });
     }
 
     /// Whether the current page is waiting for data (and so shows a spinner).
     pub fn is_loading(&self) -> bool {
+        if matches!(
+            self.core_phase,
+            Some(CorePhase::Idle | CorePhase::Starting(_))
+        ) {
+            return true;
+        }
         match self.page {
             Page::Overview | Page::Settings => self.configs.is_none(),
             Page::Proxies => self.proxies.is_none(),
@@ -4424,10 +4509,13 @@ impl App {
     }
 
     pub fn connection(&self) -> Connection {
-        match &self.version {
-            None => Connection::Connecting,
-            Some(Ok(_)) => Connection::Connected,
-            Some(Err(_)) => Connection::Disconnected,
+        match (&self.core_phase, &self.version) {
+            (Some(CorePhase::Failed(_) | CorePhase::Stopped), _) => Connection::Disconnected,
+            (Some(CorePhase::Idle | CorePhase::Starting(_)), _) | (_, None) => {
+                Connection::Connecting
+            }
+            (_, Some(Ok(_))) => Connection::Connected,
+            (_, Some(Err(_))) => Connection::Disconnected,
         }
     }
 
@@ -4444,9 +4532,14 @@ impl App {
         let entering = page != self.page;
         self.page = page;
         self.dirty = true;
-        if !entering {
-            return;
+        // A page waiting for the managed kernel loads once it is up.
+        if entering && self.controller_up() {
+            self.load_page(page);
         }
+    }
+
+    /// Loads what `page` loads when it is shown.
+    fn load_page(&mut self, page: Page) {
         match page {
             // Shows what is there and refreshes behind it, without a spinner.
             Page::Proxies if self.proxies.is_some() => self.fetch_proxies(true),
@@ -4520,6 +4613,8 @@ fn healthcheck_timeout(delay_timeout_ms: u32) -> Duration {
 mod tests {
     use super::*;
     use crate::api::models::{Connection, ConnectionSnapshot, Memory};
+    use crate::core::{ManagedCore, testing};
+    use std::sync::Arc;
 
     /// 10 cards, 3 per row: the last row holds only card 9.
     const LEN: usize = 10;
@@ -8430,7 +8525,7 @@ secret = "b-secret"
             app.size = size;
             let (x, y) = locate(&draw(&app), "IPv6", 0..size.width);
             click(&mut app, x, y);
-            assert_eq!(app.settings_view.selected(), Setting::Ipv6);
+            assert_eq!(app.selected_setting(), Setting::Ipv6);
             assert!(!app.is_changing(Setting::Ipv6));
             double_click(&mut app, x, y);
             assert!(app.is_changing(Setting::Ipv6), "{size:?}");
@@ -8466,7 +8561,7 @@ secret = "b-secret"
         // In time, on the same row.
         press_at(&mut app, x, y, at(900));
         assert!(app.is_changing(Setting::Ipv6));
-        assert_eq!(app.settings_view.selected(), Setting::Ipv6);
+        assert_eq!(app.selected_setting(), Setting::Ipv6);
         // The third press of a streak is a first one: no second change (it
         // would be refused while the first is in progress, so look at what
         // is sent).
@@ -8616,5 +8711,278 @@ secret = "b-secret"
         click(&mut app, x, y);
         assert!(app.is_changing(Setting::Mode));
         assert_eq!(requests_made(app, rx).await, (0, 0, 0, 1));
+    }
+
+    fn managed_choice(core: &ManagedCore) -> crate::config::Choice {
+        crate::config::Choice {
+            origin: Origin::Managed,
+            name: "core".to_owned(),
+            url: core.url(),
+            secret: Some(core.secret().to_owned()),
+        }
+    }
+
+    /// An app on the managed `core`, as `main` starts one with
+    /// `default = "core"`.
+    fn managed_app(core: Arc<ManagedCore>) -> (App, mpsc::Receiver<Envelope>) {
+        let (tx, rx) = mpsc::channel(64);
+        let overrides = crate::config::Overrides {
+            url: Some(core.url()),
+            secret: Some(core.secret().to_owned()),
+            ..Default::default()
+        };
+        let settings = crate::config::Config::default()
+            .resolve(&overrides)
+            .unwrap();
+        let profiles = Profiles {
+            choices: vec![managed_choice(&core)],
+            current: 0,
+            path: None,
+            core: Some(core),
+        };
+        (launch(settings, tx, profiles, Picker::default()), rx)
+    }
+
+    /// Applies what the background work reports until `done`.
+    async fn pump_until(
+        app: &mut App,
+        rx: &mut mpsc::Receiver<Envelope>,
+        done: impl Fn(&App) -> bool,
+    ) {
+        while !done(app) {
+            let envelope = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .expect("news in time")
+                .expect("the app is alive");
+            app.receive(envelope);
+        }
+    }
+
+    fn core_up(app: &App) -> bool {
+        matches!(app.core_phase, Some(CorePhase::Running))
+    }
+
+    #[tokio::test]
+    async fn the_pages_wait_for_the_managed_kernel_and_load_once_it_is_up() {
+        let dir = testing::scratch("app-start");
+        let port = testing::free_port();
+        let recorder = testing::systemd(port, Duration::from_millis(100));
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_app(core);
+
+        app.start();
+
+        // Nothing is asked of a controller that is not there yet, whatever
+        // page is shown, and the screen says what is going on.
+        assert!(matches!(app.core_phase, Some(CorePhase::Starting(_))));
+        for page in [Page::Overview, Page::Proxies, Page::Settings, Page::Rules] {
+            app.update(Action::SelectPage(page));
+            assert!(draw(&app).contains("正在启动内核"), "{page:?}");
+        }
+        assert_eq!(app.rule_fetches, 0);
+
+        pump_until(&mut app, &mut rx, core_up).await;
+        // The page that was waiting loads now.
+        assert_eq!(app.rule_fetches, 1);
+        pump_until(&mut app, &mut rx, |app| app.version.is_some()).await;
+        assert!(draw(&app).contains("mihomo v1.19.33 · 托管"));
+        assert_eq!(recorder.runs("systemd-run").len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_kernel_that_does_not_start_says_why_and_r_tries_again() {
+        let dir = testing::scratch("app-fail");
+        let port = testing::free_port();
+        // Not there, failed (twice: the wait and the stop that follows), then
+        // not there again for the second try, then running.
+        let states =
+            std::sync::Mutex::new(vec!["active", "inactive", "failed", "failed", "inactive"]);
+        let recorder = testing::Recorder::new(move |cmd| {
+            match (cmd.program.as_str(), cmd.args.get(1).map(String::as_str)) {
+                ("systemctl", Some("is-active")) => {
+                    let state = states.lock().unwrap().pop().unwrap_or("active");
+                    testing::answer(if state == "active" { 0 } else { 3 }, state)
+                }
+                ("systemd-run", _) => {
+                    // The first start leaves nothing listening; the second works.
+                    if states.lock().unwrap().len() <= 1 {
+                        testing::serve(port, testing::Reply::Mihomo, Duration::ZERO);
+                    }
+                    testing::answer(0, "")
+                }
+                ("journalctl", _) => testing::answer(0, "Parse config error: boom\n"),
+                _ => testing::answer(0, ""),
+            }
+        });
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_app(core);
+
+        app.start();
+        pump_until(&mut app, &mut rx, |app| {
+            matches!(app.core_phase, Some(CorePhase::Failed(_)))
+        })
+        .await;
+        let screen = draw(&app);
+        assert!(screen.contains("内核启动失败"), "{screen}");
+        assert!(screen.contains("Parse config error: boom"), "{screen}");
+        assert_eq!(app.connection(), super::Connection::Disconnected);
+
+        // `P` still works while the kernel is down, and `r` tries again.
+        key_press(&mut app, KeyCode::Char('r'));
+        assert!(matches!(app.core_phase, Some(CorePhase::Starting(_))));
+        pump_until(&mut app, &mut rx, core_up).await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_the_kernel_leaves_a_page_that_says_so_and_r_attaches_again() {
+        let dir = testing::scratch("app-stop");
+        let port = testing::free_port();
+        let recorder = testing::systemd(port, Duration::ZERO);
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_app(core);
+        app.start();
+        pump_until(&mut app, &mut rx, core_up).await;
+        pump_until(&mut app, &mut rx, |app| app.configs.is_some()).await;
+
+        app.update(Action::SelectPage(Page::Settings));
+        let row = app
+            .settings()
+            .iter()
+            .position(|setting| *setting == Setting::StopCore)
+            .unwrap();
+        app.settings_view.cursor = row;
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.pending, Some(Confirm::StopCore));
+        key_press(&mut app, KeyCode::Char('y'));
+        assert!(app.is_changing(Setting::StopCore));
+
+        pump_until(&mut app, &mut rx, |app| {
+            matches!(app.core_phase, Some(CorePhase::Stopped))
+        })
+        .await;
+        let screen = draw(&app);
+        assert!(
+            screen.contains("内核未运行") && screen.contains("r 启动"),
+            "{screen}"
+        );
+        assert_eq!(app.connection(), super::Connection::Disconnected);
+        assert_eq!(
+            recorder.runs("systemctl").last().unwrap(),
+            &format!("--user stop {}", testing::UNIT)
+        );
+
+        // The kernel in the test answers again: `r` attaches to it.
+        key_press(&mut app, KeyCode::Char('r'));
+        pump_until(&mut app, &mut rx, core_up).await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_managed_kernel_that_went_away_is_said_so_and_r_starts_it() {
+        let dir = testing::scratch("app-exited");
+        let port = testing::free_port();
+        let recorder = testing::systemd(port, Duration::ZERO);
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_app(core);
+        app.core_phase = Some(CorePhase::Running);
+
+        app.apply_version(Err(ApiError::Connect("refused".to_owned())));
+        pump_until(&mut app, &mut rx, |app| {
+            app.reconnect.is_some_and(|reconnect| reconnect.exited)
+        })
+        .await;
+        // Retrying on a timer cannot help.
+        assert_eq!(app.reconnect.unwrap().retry_at, None);
+        assert!(draw(&app).contains("内核已退出"));
+
+        key_press(&mut app, KeyCode::Char('r'));
+        assert!(matches!(app.core_phase, Some(CorePhase::Starting(_))));
+        pump_until(&mut app, &mut rx, core_up).await;
+        assert_eq!(recorder.runs("systemd-run").len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_external_controller_that_goes_quiet_is_not_asked_about_a_kernel() {
+        let (mut app, mut rx) = app_without_controller();
+        app.apply_version(Err(ApiError::Connect("refused".to_owned())));
+        assert!(app.reconnect.is_some_and(|reconnect| !reconnect.exited));
+        drop(app);
+        // Only the startup requests were ever sent: no news from a core.
+        while let Some(Envelope { msg, .. }) = rx.recv().await {
+            assert!(!matches!(msg, Msg::Core(_)), "{msg:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn only_a_managed_connection_lists_the_managed_cores_settings() {
+        let (external, _rx) = app_without_controller();
+        assert_eq!(external.settings(), &Setting::ALL[..Setting::ALL.len() - 1]);
+
+        let dir = testing::scratch("app-rows");
+        let recorder = testing::systemd(testing::free_port(), Duration::ZERO);
+        let core = Arc::new(testing::core_at(
+            &dir,
+            testing::free_port(),
+            &recorder,
+            true,
+        ));
+        let (managed, _rx) = managed_app(core);
+        assert_eq!(managed.settings(), Setting::ALL);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_managed_core_is_a_row_of_the_profile_popup_and_leaving_it_stops_nothing() {
+        let dir = testing::scratch("app-switch");
+        let port = testing::free_port();
+        let recorder = testing::systemd(port, Duration::ZERO);
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (tx, mut rx) = mpsc::channel(64);
+        let overrides = crate::config::Overrides {
+            url: Some("http://127.0.0.1:1".to_owned()),
+            ..Default::default()
+        };
+        let settings = crate::config::Config::default()
+            .resolve(&overrides)
+            .unwrap();
+        let profiles = Profiles {
+            choices: vec![
+                crate::config::Choice {
+                    origin: Origin::Overrides,
+                    name: "default".to_owned(),
+                    url: "http://127.0.0.1:1".to_owned(),
+                    secret: None,
+                },
+                managed_choice(&core),
+            ],
+            current: 0,
+            path: None,
+            core: Some(core),
+        };
+        let mut app = launch(settings, tx, profiles, Picker::default());
+        app.start();
+        assert!(app.core_phase.is_none());
+
+        key_press(&mut app, KeyCode::Char('P'));
+        assert!(draw(&app).contains("托管内核"));
+        key_press(&mut app, KeyCode::Esc);
+        switch_to(&mut app, 1);
+        assert!(matches!(app.core_phase, Some(CorePhase::Starting(_))));
+        pump_until(&mut app, &mut rx, core_up).await;
+
+        switch_to(&mut app, 0);
+        assert!(app.core_phase.is_none());
+        assert_eq!(
+            recorder
+                .runs("systemctl")
+                .iter()
+                .filter(|run| run.contains("stop"))
+                .count(),
+            0
+        );
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

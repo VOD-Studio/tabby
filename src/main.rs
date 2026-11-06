@@ -1,6 +1,7 @@
 mod api;
 mod app;
 mod config;
+mod core;
 mod event;
 mod format;
 mod themes;
@@ -40,7 +41,8 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     init_logging()?;
     let path = config::path();
-    let file = Config::load(path.as_deref())?;
+    let mut file = Config::load(path.as_deref())?;
+    file.open_core(config::data_dir().as_deref())?;
     let settings = file.resolve(&cli.overrides)?;
     let picker = themes::Picker {
         dir: config::themes_dir(),

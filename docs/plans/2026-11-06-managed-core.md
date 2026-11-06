@@ -305,6 +305,17 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 1. `feat(core): run a managed mihomo in the background`
    - 范围：`[core]` 段与 `core` profile（保留名）、`P` 弹窗的 `托管内核` 行、`state.toml` 初始化、§5 的进程管理（systemd 临时单元 + 后备模式）、§5.2 的接上逻辑、`停止内核`、启动与失败画面。二进制取 `[core].binary`，没设置就在 `PATH` 里找 `mihomo`（第 2 项再加下载）。还没有订阅时，用内置的最小配置（只有 DIRECT，`mixed-port` 取 `settings.toml` 的默认值）。
    - 验收：选中托管内核后自动启动，七个页面都可用；`q` 后 `systemctl --user is-active <unit>` 仍为 `active`；再启动 tabby 不会起第二个进程（pid 不变）；`停止内核` 后单元不存在，页面显示 `内核未运行` 和 `r 启动`；故意写坏配置时错误页显示 journal 里的 mihomo 报错。
+   - 实现记录（2026-11-06）：
+     - 模块：`src/core/{mod,runner,supervisor,state,runtime,settings,files}.rs`；界面侧在 `src/app/managed.rs`（`CorePhase`、`CoreEvent`、`App::begin_core` 等）。`Runner` 是同步接口，`ManagedCore` 用 `spawn_blocking` 调用；`ensure_running` 的进度回调是同步闭包（`AsyncFn` 的 future 不满足 `Send`，spawn 不了），经 `Outbox::try_send` 发出，满了只丢一条提示。
+     - `Config::open_core(data_dir)` 在有 `[core]` 段时创建 `ManagedCore`（创建 `state.toml`），`Config::profiles` 把它放进 `Profiles.core`。`P` 弹窗的顺序是：启动参数/默认地址、`托管内核`、各 profile。`--url` 与 `core` 同时给出时 `--url` 优先，且不带上托管内核的 secret。
+     - `[profiles.core]` 在 `Config::load` 里报错并写出行号（按 `[profiles.core]` / `[profiles."core"]` 表头查找）；没有 `[core]` 时 `default = "core"` 报 `needs a [core] table`。
+     - `App.core_phase: Option<CorePhase>`：`None` 是外部控制器；`Idle → Starting(step) → Running | Failed(err)`，设置页停止后是 `Stopped`。`start()` 在 `Idle` 时先启动内核，`Running` 后才发起 `/version` 等请求；`set_page` 在内核未就绪时不发请求，就绪后用 `load_page` 补上。`r` 在 `Failed` / `Stopped` / 内核已退出时重新拉起。
+     - 内核在 tabby 之外退出：第一次 `/version` 失败后问一次 `ManagedCore::alive`，否定则 `Reconnect.exited = true`，横幅写 `内核已退出`，不再按退避重试。
+     - 设置页的行改为 `App::settings()`（托管模式多一个“托管内核”组）；`Setting::ALL` 末尾是只属于托管模式的行。托管模式下 `重启内核` 走 `ManagedCore::restart`（`systemctl --user restart`，重新写配置），不再用 `POST /restart`。`升级内核`（`POST /upgrade`）暂时保留，第 2 项替换。
+     - 后备模式的 `kill` 经 `Runner` 调用外部的 `kill` 程序（`unsafe_code = "forbid"`，不能直接发信号），所以 `PATH` 里要有它。判定“这个 pid 就是内核”时，`/proc/<pid>/cmdline` 的前两项里有内核路径即可（前两项是为了兼容解释器脚本包装的内核）。
+     - 失败的启动会在收集完 journal 后停掉单元（`Restart=on-failure` 会一直重启，错误页看着的时候它还在后台反复失败）。
+     - 手动验证（临时 `XDG_*`，内核是 MetaCubeX/mihomo v1.19.33，`[core].binary` 指向它）：systemd 模式下选中后自动启动，七个页面可用，顶栏 `mihomo v1.19.33 · 托管`；`q` 后单元仍 `active`，再启动 tabby 的 MainPID 不变；`停止内核` 后 `systemctl --user list-units 'tabby-mihomo-*' --all` 为空，页面显示 `内核未运行` / `r 启动`，`r` 重新拉起；把内核换成用坏配置启动 mihomo 的脚本，错误页显示 journal 里的 `Parse config error`。后备模式（去掉 `XDG_RUNTIME_DIR` 并让 `PATH` 里没有 `systemctl`）：进程独立成组，`q` 后仍在运行，`core.log` 有输出，设置页停止后进程消失、`state.toml` 里的 pid 清掉。
+     - 本机 7890 已被别的内核占用：托管内核的默认 mixed-port 也是 7890，mihomo 只记录监听失败，控制器照常工作，页面里 Mixed 端口显示 `未启用`。端口可配置要等第 4 项。
 2. `feat(core): download and update mihomo releases`
    - 范围：§6 的全部内容；设置页“托管内核”组里的路径、版本和 `升级内核`。
    - 验收：干净的数据目录里确认下载后能启动；篡改 `digest` 时拒绝并保留旧文件；已是最新时提示 `已是最新`；`[core].binary` 已设置时 `升级内核` 置灰。

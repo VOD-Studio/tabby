@@ -2,6 +2,7 @@ use std::{
     collections::BTreeMap,
     fs, io,
     path::{self, Path, PathBuf},
+    sync::Arc,
 };
 
 use clap::Args;
@@ -13,6 +14,8 @@ use directories::ProjectDirs;
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, de};
 
+use crate::core::ManagedCore;
+
 pub const DEFAULT_URL: &str = "http://127.0.0.1:9090";
 
 /// Page fetched through a node to measure its delay.
@@ -23,6 +26,10 @@ pub const DEFAULT_DELAY_TIMEOUT_MS: u32 = 5000;
 
 /// Name shown for the connection when no profile is selected.
 const FALLBACK_PROFILE: &str = "default";
+
+/// The name of the managed core among the profiles: `default = "core"` and
+/// `--profile core` choose it, and no `[profiles.*]` table may take it.
+pub const CORE_PROFILE: &str = "core";
 
 /// A theme built into tabby. User themes are files; see `crate::themes`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -236,10 +243,15 @@ pub struct Config {
     mouse: Option<bool>,
     delay: DelayConfig,
     profiles: BTreeMap<String, Profile>,
+    /// `[core]`: tabby manages a kernel of its own.
+    core: Option<CoreConfig>,
     /// The directory the file was read from: a relative theme path in it
     /// is relative to there.
     #[serde(skip)]
     dir: Option<PathBuf>,
+    /// The managed core, once [`Config::open_core`] has made it.
+    #[serde(skip)]
+    managed: Option<Arc<ManagedCore>>,
 }
 
 /// Reads `[theme_overrides]`, naming the key in every error: the position
@@ -256,6 +268,14 @@ struct DelayConfig {
     url: Option<String>,
     /// Milliseconds.
     timeout_ms: Option<u32>,
+}
+
+/// The `[core]` table. Having it is what turns the managed core on.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct CoreConfig {
+    /// The kernel to run; unset, tabby uses the one it keeps itself.
+    binary: Option<PathBuf>,
 }
 
 /// One External Controller endpoint.
@@ -310,6 +330,8 @@ pub struct Settings {
 pub enum Origin {
     /// A `[profiles.<name>]` table of `config.toml`.
     Profile,
+    /// The kernel tabby manages (`[core]`).
+    Managed,
     /// The `--url` / `--secret` overrides (or their variables) tabby was
     /// started with.
     Overrides,
@@ -332,6 +354,7 @@ impl Choice {
     pub fn label(&self) -> &str {
         match self.origin {
             Origin::Profile => &self.name,
+            Origin::Managed => "托管内核",
             Origin::Overrides => "启动参数指定",
             Origin::Default => "默认地址",
         }
@@ -339,30 +362,44 @@ impl Choice {
 }
 
 /// The connections tabby can switch between at runtime.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct Profiles {
     /// The connection tabby started with first, when no profile describes
-    /// it as written; then every profile, by name.
+    /// it as written; then the managed core, if there is one; then every
+    /// profile, by name.
     pub choices: Vec<Choice>,
     /// Index into `choices` of the connection in use.
     pub current: usize,
     /// `config.toml`, for the popup to point at when it defines no profile.
     pub path: Option<PathBuf>,
+    /// The managed core the `Managed` choice stands for.
+    pub core: Option<Arc<ManagedCore>>,
 }
 
 impl Profiles {
-    /// Whether `config.toml` defines no profile to switch to.
+    /// Whether there is no profile and no managed core to switch to.
     pub fn is_empty(&self) -> bool {
         !self
             .choices
             .iter()
-            .any(|choice| choice.origin == Origin::Profile)
+            .any(|choice| matches!(choice.origin, Origin::Profile | Origin::Managed))
+    }
+
+    /// The connection in use.
+    pub fn current_choice(&self) -> Option<&Choice> {
+        self.choices.get(self.current)
     }
 }
 
 /// Where `config.toml` lives; `None` when the home directory is unknown.
 pub fn path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "tabby").map(|dirs| dirs.config_dir().join("config.toml"))
+}
+
+/// Where the managed core keeps its files; `None` when the home directory
+/// is unknown.
+pub fn data_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "tabby").map(|dirs| dirs.data_local_dir().to_owned())
 }
 
 /// Where user themes live, next to `config.toml`; `None` when the home
@@ -428,6 +465,24 @@ pub fn save_theme(path: &Path, id: &str) -> Result<()> {
         .wrap_err_with(|| format!("cannot write {}", path.display()))
 }
 
+/// What a profile name picks.
+#[derive(Debug, Clone, Copy)]
+enum Chosen<'a> {
+    /// A `[profiles.<name>]` table.
+    Profile(&'a str, &'a Profile),
+    /// The managed core.
+    Core,
+}
+
+impl<'a> Chosen<'a> {
+    fn name(self) -> &'a str {
+        match self {
+            Self::Profile(name, _) => name,
+            Self::Core => CORE_PROFILE,
+        }
+    }
+}
+
 impl Config {
     /// Loads `config.toml` from `path`.
     ///
@@ -438,12 +493,23 @@ impl Config {
             return Ok(Self::default());
         };
         match fs::read_to_string(path) {
-            Ok(text) => toml::from_str(&text)
-                .map(|config| Self {
+            Ok(text) => {
+                let config: Self = toml::from_str(&text)
+                    .wrap_err_with(|| format!("invalid config file {}", path.display()))?;
+                if config.profiles.contains_key(CORE_PROFILE) {
+                    let line = reserved_profile_line(&text)
+                        .map_or_else(String::new, |line| format!(" (line {line})"));
+                    return Err(eyre!(
+                        "invalid config file {}: the profile name `{CORE_PROFILE}`{line} is \
+                         reserved for the managed core",
+                        path.display()
+                    ));
+                }
+                Ok(Self {
                     dir: path.parent().map(Path::to_owned),
                     ..config
                 })
-                .wrap_err_with(|| format!("invalid config file {}", path.display())),
+            }
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => {
                 Err(err).wrap_err_with(|| format!("cannot read config file {}", path.display()))
@@ -451,14 +517,30 @@ impl Config {
         }
     }
 
+    /// Makes the managed core when the file has a `[core]` table, with its
+    /// files in `data_dir`.
+    pub fn open_core(&mut self, data_dir: Option<&Path>) -> Result<()> {
+        let Some(core) = &self.core else {
+            return Ok(());
+        };
+        let dir = data_dir.ok_or_else(|| eyre!("cannot find a data directory for [core]"))?;
+        self.managed = Some(Arc::new(ManagedCore::open(core.binary.clone(), dir)?));
+        Ok(())
+    }
+
     /// The profile `overrides` pick: `overrides.profile`, else the file's
     /// `default`, else none.
-    fn chosen(&self, overrides: &Overrides) -> Result<Option<(&str, &Profile)>> {
+    fn chosen(&self, overrides: &Overrides) -> Result<Option<Chosen<'_>>> {
         let name = non_empty(overrides.profile.as_ref()).or(self.default.as_deref());
         name.map(|name| {
+            if name == CORE_PROFILE {
+                return self.managed.as_ref().map(|_| Chosen::Core).ok_or_else(|| {
+                    eyre!("profile `{CORE_PROFILE}` needs a [core] table in config.toml")
+                });
+            }
             self.profiles
                 .get_key_value(name)
-                .map(|(name, profile)| (name.as_str(), profile))
+                .map(|(name, profile)| Chosen::Profile(name.as_str(), profile))
                 .ok_or_else(|| eyre!("profile `{name}` is not defined in config.toml"))
         })
         .transpose()
@@ -473,7 +555,22 @@ impl Config {
     /// override, against the file's directory when the file names it.
     pub fn resolve(&self, overrides: &Overrides) -> Result<Settings> {
         let chosen = self.chosen(overrides)?;
-        let profile = chosen.map(|(_, profile)| profile);
+        let (chosen_url, chosen_secret) = match chosen {
+            None => (None, None),
+            Some(Chosen::Profile(_, profile)) => {
+                (Some(profile.url.clone()), profile.secret.clone())
+            }
+            Some(Chosen::Core) => {
+                let core = self.managed.as_deref();
+                // The secret of the managed core is for its own controller
+                // only, not for the address an override put in its place.
+                let own = non_empty(overrides.url.as_ref()).is_none();
+                (
+                    core.map(ManagedCore::url),
+                    core.filter(|_| own).map(|core| core.secret().to_owned()),
+                )
+            }
+        };
         let (theme, theme_pinned) = match non_empty(overrides.theme.as_ref()) {
             Some(id) => (theme_id(id, None), true),
             None => (
@@ -485,14 +582,14 @@ impl Config {
             ),
         };
         Ok(Settings {
-            profile: chosen.map_or(FALLBACK_PROFILE, |(name, _)| name).to_owned(),
+            profile: chosen.map_or(FALLBACK_PROFILE, Chosen::name).to_owned(),
             url: non_empty(overrides.url.as_ref())
-                .or_else(|| profile.map(|p| p.url.as_str()))
-                .unwrap_or(DEFAULT_URL)
-                .to_owned(),
+                .map(str::to_owned)
+                .or(chosen_url)
+                .unwrap_or_else(|| DEFAULT_URL.to_owned()),
             secret: non_empty(overrides.secret.as_ref())
-                .or_else(|| profile.and_then(|p| p.secret.as_deref()))
-                .map(str::to_owned),
+                .map(str::to_owned)
+                .or(chosen_secret),
             theme,
             theme_pinned,
             theme_overrides: self.theme_overrides,
@@ -517,7 +614,7 @@ impl Config {
     /// whenever a `url` or `secret` override shaped it, or no profile did.
     pub fn profiles(&self, overrides: &Overrides, settings: &Settings) -> Profiles {
         // `resolve` has already failed on an unknown profile.
-        let chosen = self.chosen(overrides).ok().flatten().map(|(name, _)| name);
+        let chosen = self.chosen(overrides).ok().flatten();
         let overridden = non_empty(overrides.url.as_ref()).is_some()
             || non_empty(overrides.secret.as_ref()).is_some();
         let launch = match (overridden, chosen) {
@@ -531,13 +628,27 @@ impl Config {
             url: settings.url.clone(),
             secret: settings.secret.clone(),
         });
+        let managed = self.managed.as_deref().map(|core| Choice {
+            origin: Origin::Managed,
+            name: CORE_PROFILE.to_owned(),
+            url: core.url(),
+            secret: Some(core.secret().to_owned()),
+        });
+        // The profiles come after the launch connection and the core.
+        let before = usize::from(launch.is_some()) + usize::from(managed.is_some());
         let current = match (&launch, chosen) {
-            (None, Some(name)) => self.profiles.keys().position(|key| key == name),
+            (None, Some(Chosen::Core)) => Some(0),
+            (None, Some(Chosen::Profile(name, _))) => self
+                .profiles
+                .keys()
+                .position(|key| key == name)
+                .map(|index| index + before),
             _ => None,
         }
         .unwrap_or(0);
         let choices = launch
             .into_iter()
+            .chain(managed)
             .chain(self.profiles.iter().map(|(name, profile)| Choice {
                 origin: Origin::Profile,
                 name: name.clone(),
@@ -549,12 +660,22 @@ impl Config {
             choices,
             current,
             path: None,
+            core: self.managed.clone(),
         }
     }
 }
 
 fn non_empty(value: Option<&String>) -> Option<&str> {
     value.map(String::as_str).filter(|value| !value.is_empty())
+}
+
+/// The line of the `[profiles.core]` table in `text`, 1-based.
+fn reserved_profile_line(text: &str) -> Option<usize> {
+    let header = format!("[profiles.{CORE_PROFILE}]");
+    let quoted = format!("[profiles.\"{CORE_PROFILE}\"]");
+    text.lines()
+        .position(|line| matches!(line.trim(), l if l == header || l == quoted))
+        .map(|index| index + 1)
 }
 
 #[cfg(test)]
@@ -955,5 +1076,98 @@ url = "http://elsewhere:9090"
             ]
         );
         assert_eq!(profiles.current, 0);
+    }
+
+    /// `FILE` with a `[core]` table, the core's files in a scratch
+    /// directory of its own.
+    fn with_core(name: &str, default: Option<&str>) -> (Config, PathBuf) {
+        let dir = scratch(name);
+        let default = default.map_or_else(String::new, |name| format!("default = \"{name}\"\n"));
+        let text = format!(
+            "{default}{}\n[core]\n",
+            FILE.replacen("default = \"local\"\n", "", 1)
+        );
+        let mut config: Config = toml::from_str(&text).unwrap();
+        config.open_core(Some(&dir)).unwrap();
+        (config, dir)
+    }
+
+    #[test]
+    fn the_managed_core_is_offered_after_the_launch_connection_and_before_the_profiles() {
+        let (config, dir) = with_core("core-order", None);
+        let core = config.managed.clone().unwrap();
+        let profiles = offered(&config, &Overrides::default());
+        let managed = (Origin::Managed, core.url(), Some(core.secret().to_owned()));
+        let shown: Vec<_> = urls(&profiles)
+            .into_iter()
+            .map(|(origin, url, secret)| (origin, url.to_owned(), secret.map(str::to_owned)))
+            .collect();
+        // No `default`: tabby starts on the built-in address.
+        assert_eq!(shown[0].0, Origin::Default);
+        assert_eq!(shown[1], managed);
+        assert_eq!(shown[2].1, "http://local:9090");
+        assert_eq!(profiles.current, 0);
+        assert!(profiles.core.is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn default_core_starts_on_the_managed_core_and_a_profile_keeps_its_place() {
+        let (config, dir) = with_core("core-default", Some("core"));
+        let core = config.managed.clone().unwrap();
+        let settings = config.resolve(&Overrides::default()).unwrap();
+        assert_eq!(settings.profile, "core");
+        assert_eq!(settings.url, core.url());
+        assert_eq!(settings.secret.as_deref(), Some(core.secret()));
+        let profiles = config.profiles(&Overrides::default(), &settings);
+        assert_eq!(profiles.choices[profiles.current].origin, Origin::Managed);
+        assert_eq!(profiles.current, 0);
+
+        let overrides = Overrides {
+            profile: Some("router".into()),
+            ..Overrides::default()
+        };
+        let profiles = offered(&config, &overrides);
+        assert_eq!(profiles.choices[profiles.current].name, "router");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_url_override_does_not_carry_the_managed_cores_secret_elsewhere() {
+        let (config, dir) = with_core("core-url", Some("core"));
+        let overrides = Overrides {
+            url: Some("http://elsewhere:9090".into()),
+            ..Overrides::default()
+        };
+        let settings = config.resolve(&overrides).unwrap();
+        assert_eq!(settings.url, "http://elsewhere:9090");
+        assert_eq!(settings.secret, None);
+        let profiles = config.profiles(&overrides, &settings);
+        assert_eq!(profiles.choices[0].origin, Origin::Overrides);
+        assert_eq!(profiles.choices[1].origin, Origin::Managed);
+        assert_eq!(profiles.current, 0);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn core_without_a_core_table_is_an_error_that_says_what_is_missing() {
+        let config: Config = toml::from_str("default = \"core\"").unwrap();
+        let err = config.resolve(&Overrides::default()).unwrap_err();
+        assert!(err.to_string().contains("[core]"), "{err}");
+    }
+
+    #[test]
+    fn a_profile_named_core_is_refused_at_the_line_that_defines_it() {
+        let dir = scratch("reserved");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            "[profiles.a]\nurl = \"http://a:1\"\n\n[profiles.core]\nurl = \"http://c:1\"\n",
+        )
+        .unwrap();
+        let err = Config::load(Some(&path)).unwrap_err().to_string();
+        assert!(err.contains("`core`") && err.contains("line 4"), "{err}");
+        fs::remove_dir_all(dir).unwrap();
     }
 }

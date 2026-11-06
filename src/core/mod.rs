@@ -1,0 +1,357 @@
+//! The kernel tabby manages itself (plan `2026-11-06-managed-core.md`): its
+//! files, its process, and how tabby finds it again after a restart.
+//!
+//! Everything that touches the system goes through [`Runner`], so the
+//! decisions made here can be tested without systemd.
+
+mod files;
+mod runner;
+mod runtime;
+mod settings;
+mod state;
+mod supervisor;
+
+use std::{
+    env,
+    ffi::OsStr,
+    fs, io,
+    path::{Path, PathBuf},
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use color_eyre::{Result, eyre::WrapErr};
+use tokio::sync::OnceCell;
+
+use crate::api::{client::ApiClient, error::ApiError, models::CoreKind};
+use runner::Runner;
+pub use runner::System;
+use settings::CoreSettings;
+use state::State;
+use supervisor::Mode;
+
+/// What the kernel binary is called when `[core].binary` does not say.
+const BINARY_NAME: &str = "mihomo";
+
+/// How long a kernel just started has to answer on its controller.
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// How often a starting kernel is asked whether it is up.
+const READY_POLL: Duration = Duration::from_millis(200);
+
+/// How long a kernel asked to stop has before it is killed.
+const STOP_GRACE: Duration = Duration::from_secs(5);
+
+/// Where the managed core keeps its files, under `<data>/core/`.
+#[derive(Debug, Clone)]
+struct Paths {
+    root: PathBuf,
+}
+
+impl Paths {
+    fn new(data_dir: &Path) -> Self {
+        Self {
+            root: data_dir.join("core"),
+        }
+    }
+
+    /// The kernel's working directory (`-d`): geo data and its caches live
+    /// here, and it only reads files from inside it.
+    fn home(&self) -> PathBuf {
+        self.root.join("home")
+    }
+
+    /// The generated config file (`-f`).
+    fn config(&self) -> PathBuf {
+        self.home().join("config.yaml")
+    }
+
+    fn state(&self) -> PathBuf {
+        self.root.join("state.toml")
+    }
+
+    /// The kernel's output when it runs without systemd.
+    fn log(&self) -> PathBuf {
+        self.root.join("core.log")
+    }
+}
+
+/// What [`ManagedCore::ensure_running`] is doing, for the screen that waits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Step {
+    /// Looking for a kernel already running, or starting one.
+    Starting,
+    /// The kernel is running; its controller does not answer yet.
+    WaitingController,
+}
+
+/// What the managed core was asked to do when a program failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Action {
+    Start,
+    Restart,
+    Stop,
+}
+
+impl std::fmt::Display for Action {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Start => "start the kernel",
+            Self::Restart => "restart the kernel",
+            Self::Stop => "stop the kernel",
+        })
+    }
+}
+
+/// Why the managed kernel could not be brought up or taken down.
+#[derive(Debug, thiserror::Error)]
+pub enum CoreError {
+    /// There is no kernel to run: `path` is where `[core].binary` points
+    /// when it does not hold a file, `None` when no `mihomo` is on `PATH`.
+    #[error("no mihomo binary")]
+    NoBinary { path: Option<PathBuf> },
+    /// Something other than the managed kernel answers on its port.
+    #[error("port {0} is taken by another program")]
+    PortTaken(u16),
+    /// The kernel did not come up; `log` is the end of its output.
+    #[error("the kernel did not start")]
+    StartFailed { log: String },
+    /// A program tabby leans on failed: what it was asked, and what it said.
+    #[error("cannot {action}: {message}")]
+    Command { action: Action, message: String },
+    #[error("{context}: {source}")]
+    Io {
+        context: &'static str,
+        source: io::Error,
+    },
+}
+
+impl CoreError {
+    fn io(context: &'static str, source: io::Error) -> Self {
+        Self::Io { context, source }
+    }
+}
+
+/// How the controller answered a probe.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Probe {
+    /// The managed kernel.
+    Ready,
+    /// Nothing listens.
+    Down,
+    /// Something listens that is not the managed kernel: it rejected the
+    /// secret, or is not mihomo.
+    Foreign,
+}
+
+/// The waits `ManagedCore` makes; tests shorten them.
+#[derive(Debug, Clone, Copy)]
+struct Timing {
+    ready: Duration,
+    poll: Duration,
+    stop_grace: Duration,
+}
+
+/// The kernel tabby runs for the user.
+#[derive(Debug)]
+pub struct ManagedCore {
+    paths: Paths,
+    /// `[core].binary`.
+    binary: Option<PathBuf>,
+    state: State,
+    settings: CoreSettings,
+    client: ApiClient,
+    runner: Arc<dyn Runner>,
+    /// `$XDG_RUNTIME_DIR`, where a running user manager has its socket.
+    runtime_dir: Option<PathBuf>,
+    /// How the kernel is kept running, settled on first use.
+    mode: OnceCell<Mode>,
+    timing: Timing,
+}
+
+impl ManagedCore {
+    /// The managed core with its files in `data_dir`, running programs for
+    /// real. Makes `state.toml` when there is none.
+    pub fn open(binary: Option<PathBuf>, data_dir: &Path) -> Result<Self> {
+        let runtime_dir = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+        Self::with(binary, data_dir, Arc::new(System), runtime_dir)
+    }
+
+    fn with(
+        binary: Option<PathBuf>,
+        data_dir: &Path,
+        runner: Arc<dyn Runner>,
+        runtime_dir: Option<PathBuf>,
+    ) -> Result<Self> {
+        let paths = Paths::new(data_dir);
+        let state = State::load_or_create(&paths.state())
+            .wrap_err_with(|| format!("cannot use {}", paths.state().display()))?;
+        let client = ApiClient::new(
+            &format!("http://127.0.0.1:{}", state.port),
+            Some(&state.secret),
+        )?;
+        Ok(Self {
+            paths,
+            binary,
+            state,
+            settings: CoreSettings::default(),
+            client,
+            runner,
+            runtime_dir,
+            mode: OnceCell::new(),
+            timing: Timing {
+                ready: READY_TIMEOUT,
+                poll: READY_POLL,
+                stop_grace: STOP_GRACE,
+            },
+        })
+    }
+
+    /// Where the managed kernel's controller listens.
+    pub fn url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.state.port)
+    }
+
+    pub fn secret(&self) -> &str {
+        &self.state.secret
+    }
+
+    /// The kernel binary to run: `[core].binary`, else the first `mihomo`
+    /// on `PATH`.
+    pub fn binary(&self) -> Result<PathBuf, CoreError> {
+        if let Some(path) = &self.binary {
+            return if path.is_file() {
+                Ok(path.clone())
+            } else {
+                Err(CoreError::NoBinary {
+                    path: Some(path.clone()),
+                })
+            };
+        }
+        env::var_os("PATH")
+            .and_then(|path| find_in(&path, BINARY_NAME))
+            .ok_or(CoreError::NoBinary { path: None })
+    }
+
+    /// Makes sure the kernel runs and its controller answers: attaches to
+    /// one that is already there, else starts one (plan §5.2). `progress`
+    /// hears what it is doing.
+    pub async fn ensure_running(&self, progress: impl Fn(Step)) -> Result<(), CoreError> {
+        match self.probe().await {
+            Probe::Ready => return Ok(()),
+            Probe::Foreign => return Err(CoreError::PortTaken(self.state.port)),
+            Probe::Down => {}
+        }
+        if self.status().await.running() {
+            progress(Step::WaitingController);
+            return self.wait_ready().await;
+        }
+        progress(Step::Starting);
+        let binary = self.binary()?;
+        self.write_config()?;
+        self.launch(&binary).await?;
+        progress(Step::WaitingController);
+        self.wait_ready().await
+    }
+
+    /// Restarts the kernel on a freshly written config, and waits for its
+    /// controller.
+    pub async fn restart(&self) -> Result<(), CoreError> {
+        let binary = self.binary()?;
+        self.write_config()?;
+        self.relaunch(&binary).await?;
+        self.wait_ready().await
+    }
+
+    /// Whether the kernel process is there, as far as its supervisor says.
+    pub async fn alive(&self) -> bool {
+        self.status().await.running()
+    }
+
+    fn write_config(&self) -> Result<(), CoreError> {
+        let text = runtime::render(runtime::BUILTIN, &self.settings, &self.state);
+        files::write_private(&self.paths.config(), &text)
+            .map_err(|err| CoreError::io("cannot write the kernel's config", err))
+    }
+
+    async fn probe(&self) -> Probe {
+        match self.client.version().await {
+            Ok(version) if version.kind() == CoreKind::Mihomo => Probe::Ready,
+            Err(ApiError::Connect(_) | ApiError::Timeout) => Probe::Down,
+            // Something answered, and it is not the managed kernel: it
+            // rejected the secret, or it is not mihomo at all.
+            Ok(_) | Err(_) => Probe::Foreign,
+        }
+    }
+
+    /// Waits for the controller of a kernel that was just started, and
+    /// gives up on it, with the end of its log, when it stops or takes too
+    /// long.
+    async fn wait_ready(&self) -> Result<(), CoreError> {
+        let deadline = Instant::now() + self.timing.ready;
+        loop {
+            match self.probe().await {
+                Probe::Ready => return Ok(()),
+                Probe::Foreign => return Err(CoreError::PortTaken(self.state.port)),
+                Probe::Down => {}
+            }
+            if !self.status().await.running() || Instant::now() >= deadline {
+                return Err(self.start_failed().await);
+            }
+            tokio::time::sleep(self.timing.poll).await;
+        }
+    }
+
+    /// The failure of a kernel that did not come up. A kernel that keeps
+    /// being restarted is stopped, so it does not go on failing in the
+    /// background while the error is read.
+    async fn start_failed(&self) -> CoreError {
+        let log = self.log_tail().await;
+        if let Err(err) = self.stop().await {
+            tracing::warn!("cannot stop the kernel that failed to start: {err}");
+        }
+        CoreError::StartFailed { log }
+    }
+
+    fn stored_pid(&self) -> Option<u32> {
+        State::load_or_create(&self.paths.state()).ok()?.pid
+    }
+
+    /// Records the pid of a kernel run without systemd, or forgets it.
+    fn store_pid(&self, pid: Option<u32>) -> Result<(), CoreError> {
+        let mut state = State::load_or_create(&self.paths.state())
+            .map_err(|err| CoreError::io("cannot read state.toml", err))?;
+        state.pid = pid;
+        state
+            .save(&self.paths.state())
+            .map_err(|err| CoreError::io("cannot write state.toml", err))
+    }
+}
+
+/// The first executable file called `name` in the directories of `path`.
+fn find_in(path: &OsStr, name: &str) -> Option<PathBuf> {
+    env::split_paths(path)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable(candidate))
+}
+
+fn is_executable(path: &Path) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        metadata.is_file()
+    }
+}
+
+#[cfg(test)]
+mod tests;
+
+#[cfg(test)]
+pub(crate) mod testing;

@@ -1,7 +1,10 @@
 use ratatui::text::Span;
 use unicode_width::UnicodeWidthChar;
 
-use crate::api::error::ApiError;
+use crate::{
+    api::error::ApiError,
+    core::{Action, CoreError, Step},
+};
 
 /// One-line, localized summary of a failed request, for toasts and error pages.
 pub fn describe(err: &ApiError) -> String {
@@ -33,6 +36,54 @@ pub fn detail(err: &ApiError) -> Option<&str> {
         ApiError::Http { .. } | ApiError::Unauthorized | ApiError::NotFound | ApiError::Timeout => {
             None
         }
+    }
+}
+
+/// The headline of the page for a managed kernel that could not be brought
+/// up.
+pub fn core_title(err: &CoreError) -> String {
+    match err {
+        CoreError::NoBinary { path: Some(path) } => format!("找不到内核 {}", path.display()),
+        CoreError::NoBinary { path: None } => "没有找到 mihomo".to_owned(),
+        CoreError::PortTaken(port) => format!("端口 {port} 已被其他程序占用"),
+        CoreError::StartFailed { .. } => "内核启动失败".to_owned(),
+        CoreError::Command { action, .. } => match action {
+            Action::Start => "无法启动内核",
+            Action::Restart => "无法重启内核",
+            Action::Stop => "无法停止内核",
+        }
+        .to_owned(),
+        CoreError::Io { .. } => "内核的文件无法读写".to_owned(),
+    }
+}
+
+/// What goes under [`core_title`]: what the kernel said, or what to do.
+pub fn core_detail(err: &CoreError) -> Vec<String> {
+    let lines = |text: &str| text.lines().map(str::to_owned).collect();
+    match err {
+        CoreError::NoBinary { .. } => {
+            vec!["请安装 mihomo，或在 config.toml 的 [core] 里用 binary 指定路径".to_owned()]
+        }
+        CoreError::PortTaken(_) => vec!["控制器端口被别的程序占用，托管内核用不了它".to_owned()],
+        CoreError::StartFailed { log } => lines(log),
+        CoreError::Command { message, .. } => lines(message),
+        CoreError::Io { context, source } => vec![format!("{context}: {source}")],
+    }
+}
+
+/// One line for a toast: what the managed kernel said, else the headline.
+pub fn core_reason(err: &CoreError) -> String {
+    core_detail(err)
+        .into_iter()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or_else(|| core_title(err))
+}
+
+/// What the screen waiting for the managed kernel says it is doing.
+pub fn core_step(step: Step) -> &'static str {
+    match step {
+        Step::Starting => "正在启动内核…",
+        Step::WaitingController => "等待控制器…",
     }
 }
 

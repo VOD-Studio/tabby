@@ -40,7 +40,17 @@ fn line(
     let key = Style::new().fg(theme.accent).add_modifier(bold);
     let muted = Style::new().fg(theme.muted);
 
-    let mut line = if reconnect.unauthorized {
+    let mut line = if reconnect.exited {
+        Line::from(vec![
+            Span::styled(
+                format!("{} 内核已退出", icons.cross),
+                Style::new().fg(theme.error).add_modifier(bold),
+            ),
+            Span::styled("  按 ", muted),
+            Span::styled("r", key),
+            Span::styled(" 重新启动", muted),
+        ])
+    } else if reconnect.unauthorized {
         Line::styled(
             format!("{} Secret 错误，请用 --secret 或修改配置", icons.cross),
             Style::new().fg(theme.error).add_modifier(bold),
@@ -100,6 +110,7 @@ mod tests {
             attempt: 3,
             retry_at: None,
             unauthorized: false,
+            exited: false,
         };
         let full = "⚠ 正在重连（第 3 次）  按 r 立即重试 · P 切换配置";
         assert_eq!(text(&retrying, 80), full);
@@ -116,6 +127,15 @@ mod tests {
         assert_eq!(
             text(&rejected, 80),
             "✗ Secret 错误，请用 --secret 或修改配置 · P 切换配置"
+        );
+        // The kernel is gone: a retry would find nobody there.
+        let exited = Reconnect {
+            exited: true,
+            ..retrying
+        };
+        assert_eq!(
+            text(&exited, 80),
+            "✗ 内核已退出  按 r 重新启动 · P 切换配置"
         );
     }
 }

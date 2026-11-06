@@ -194,7 +194,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
 /// The settings page's keys: what `Enter` does to the setting under the
 /// cursor, dimmed where the kernel lacks it.
 fn settings_hints(app: &App) -> Vec<Hint> {
-    let setting = app.settings_view.selected();
+    let setting = app.selected_setting();
     let description = match setting {
         Setting::Mode => "切换模式",
         Setting::LogLevel => "切换级别",
@@ -205,6 +205,7 @@ fn settings_hints(app: &App) -> Vec<Hint> {
         | Setting::UpdateGeo
         | Setting::Restart
         | Setting::Upgrade => "执行",
+        Setting::StopCore => "停止",
     };
     let enabled = match &app.configs {
         Some(Ok(configs)) => app.gate(setting, configs) == Gate::Open,

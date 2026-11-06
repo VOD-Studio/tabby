@@ -188,6 +188,11 @@ pub fn page_title(page: Page) -> &'static str {
 
 /// The current page into the body, through its loading and error states.
 fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
+    // A managed kernel that is not up has no data to show on any page.
+    if let Some(phase) = app.core_pane() {
+        components::states::core(frame, area, app, phase);
+        return;
+    }
     match app.page {
         Page::Overview => {
             if let Some(configs) = ready(frame, area, app, app.configs.as_ref(), "正在连接控制器…")

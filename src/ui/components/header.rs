@@ -119,7 +119,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
                 CoreKind::Mihomo => "mihomo",
                 CoreKind::Clash => "clash",
             };
-            format!("{core} {}", version.version)
+            let managed = if app.is_managed() { " · 托管" } else { "" };
+            format!("{core} {}{managed}", version.version)
         }
         _ => String::new(),
     };
