@@ -5,6 +5,8 @@
 - 前置：主方案 `2026-11-05-tabby-tui.md`（M0–M6）。本方案取代其 §1 中“不管理内核进程”“不编辑订阅或 YAML 配置文件”两条非目标。
 - 参照：FlClash（`chen08209/FlClash`，2026-11-06 的 main 分支），下文引用的路径都相对于它的仓库根目录。
 
+FlClash 源码还留在 /tmp/flclash-src，实现时可以直接对照
+
 ## 1. 目标与范围
 
 在“连接外部控制器”之外，tabby 可以自己管理一个 mihomo 内核：下载内核、导入订阅、生成运行配置、在后台常驻、开 TUN。体验向 FlClash 看齐；连上内核之后的七个页面、`ApiClient`、`Streams`、重连逻辑全部沿用。
@@ -27,21 +29,21 @@
 
 ## 2. FlClash 调研结论
 
-| 项 | FlClash 的做法 | 源码 |
-|---|---|---|
-| 内核 | 自有 Go 程序 FlClashCore，基于作者 fork 的 Clash.Meta（`FlClash` 分支），随 App 打包、随 App 更新；与界面经 unix socket（`/tmp/FlClashSocket_<id>.sock`）通信，external-controller 默认关闭 | `core/`、`.gitmodules`、`services/helper/src/service/hub.rs` |
+| 项               | FlClash 的做法                                                                                                                                                                                                                                                            | 源码                                                                                      |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| 内核             | 自有 Go 程序 FlClashCore，基于作者 fork 的 Clash.Meta（`FlClash` 分支），随 App 打包、随 App 更新；与界面经 unix socket（`/tmp/FlClashSocket_<id>.sock`）通信，external-controller 默认关闭                                                                               | `core/`、`.gitmodules`、`services/helper/src/service/hub.rs`                              |
 | TUN 授权（首选） | 有 systemd 且不是 AppImage 时，经 pkexec 安装 root 系统服务 `flclash-helper`（`/etc/systemd/system/flclash-helper.service`），监听 `/run/flclash/helper.sock`（0660，按 peer uid 只放行安装者）；helper 核对内核 sha256（编译时写死）后以 `setresuid(uid, 0, 0)` 启动内核 | `lib/common/system.dart::authorizeCore`、`services/helper/src/service/linux.rs`、`hub.rs` |
-| TUN 授权（后备） | 无 systemd：`chown root:<gid> && chmod 4750`，内核变成 setuid root；AppImage 直接报错（只读 nosuid 挂载） | `system.dart::linuxElevationShell` |
-| 提权方式 | 先 `pkexec`；退出码 127（没有 polkit agent，平铺窗口管理器常见）时改用 `sudo`；126 是用户取消，不再重试 | `lib/common/linux_elevation.dart` |
-| 后台 | 关窗口默认最小化到托盘（`minimizeOnExit = true`）；真正退出时内核一起停 | `lib/models/config.dart`、`lib/manager/window_manager.dart` |
-| 自启 | `autoLaunch` 登录时启动 App，`silentLaunch` 启动后隐藏窗口，`autoRun` 打开 App 即启动代理 | `lib/common/launch.dart`、`lib/bootstrap.dart` |
-| 订阅类型 | `ProfileType { file, url, custom }` | `lib/enum/enum.dart` |
-| 订阅下载 | UA `FlClash/v<版本> clash-verge Platform/<os>`；名字取 `content-disposition`，用量取 `subscription-userinfo`；默认每 1 天自动更新 | `lib/common/package.dart`、`lib/models/profile.dart`、`lib/common/constant.dart` |
-| 非 YAML 订阅 | 先校验配置；不通过就按分享链接列表（纯文本或 base64）用 mihomo 的 `convert.ConvertsV2Ray` 转换，写成 `{proxies: [...]}` 再校验 | `lib/core/controller.dart::validateProfile`、`core/proxy.go::handleConvertProxies` |
-| 加密订阅 | age 加密的配置要求输入密钥，解密后原地写回明文 | `controller.dart::validateProfile` |
-| 覆写 | 订阅只允许覆盖 DNS 相关的键（`normalProfileKeys`：listen、ipv6、enhanced-mode、fake-ip-filter、nameserver 等），另有 JS 脚本覆写 | `lib/enum/enum.dart` |
-| 系统代理 | Linux 上按桌面调 `gsettings`（GNOME / MATE）或 `kwriteconfig6/5`（KDE） | `plugins/proxy/lib/src/linux_proxy.dart` |
-| 默认值 | mixed-port 7890；TUN stack `mips`（fork 专有，官方 mihomo 没有），MTU 9000 | `lib/models/clash_config.dart` |
+| TUN 授权（后备） | 无 systemd：`chown root:<gid> && chmod 4750`，内核变成 setuid root；AppImage 直接报错（只读 nosuid 挂载）                                                                                                                                                                 | `system.dart::linuxElevationShell`                                                        |
+| 提权方式         | 先 `pkexec`；退出码 127（没有 polkit agent，平铺窗口管理器常见）时改用 `sudo`；126 是用户取消，不再重试                                                                                                                                                                   | `lib/common/linux_elevation.dart`                                                         |
+| 后台             | 关窗口默认最小化到托盘（`minimizeOnExit = true`）；真正退出时内核一起停                                                                                                                                                                                                   | `lib/models/config.dart`、`lib/manager/window_manager.dart`                               |
+| 自启             | `autoLaunch` 登录时启动 App，`silentLaunch` 启动后隐藏窗口，`autoRun` 打开 App 即启动代理                                                                                                                                                                                 | `lib/common/launch.dart`、`lib/bootstrap.dart`                                            |
+| 订阅类型         | `ProfileType { file, url, custom }`                                                                                                                                                                                                                                       | `lib/enum/enum.dart`                                                                      |
+| 订阅下载         | UA `FlClash/v<版本> clash-verge Platform/<os>`；名字取 `content-disposition`，用量取 `subscription-userinfo`；默认每 1 天自动更新                                                                                                                                         | `lib/common/package.dart`、`lib/models/profile.dart`、`lib/common/constant.dart`          |
+| 非 YAML 订阅     | 先校验配置；不通过就按分享链接列表（纯文本或 base64）用 mihomo 的 `convert.ConvertsV2Ray` 转换，写成 `{proxies: [...]}` 再校验                                                                                                                                            | `lib/core/controller.dart::validateProfile`、`core/proxy.go::handleConvertProxies`        |
+| 加密订阅         | age 加密的配置要求输入密钥，解密后原地写回明文                                                                                                                                                                                                                            | `controller.dart::validateProfile`                                                        |
+| 覆写             | 订阅只允许覆盖 DNS 相关的键（`normalProfileKeys`：listen、ipv6、enhanced-mode、fake-ip-filter、nameserver 等），另有 JS 脚本覆写                                                                                                                                          | `lib/enum/enum.dart`                                                                      |
+| 系统代理         | Linux 上按桌面调 `gsettings`（GNOME / MATE）或 `kwriteconfig6/5`（KDE）                                                                                                                                                                                                   | `plugins/proxy/lib/src/linux_proxy.dart`                                                  |
+| 默认值           | mixed-port 7890；TUN stack `mips`（fork 专有，官方 mihomo 没有），MTU 9000                                                                                                                                                                                                | `lib/models/clash_config.dart`                                                            |
 
 **与 FlClash 不同之处及原因**
 
@@ -105,6 +107,7 @@ flowchart LR
   ```
 
   有单元文件（开了自启，§9.1）时改用 `systemctl --user start <unit>`。
+
 - 停止：`systemctl --user stop <unit>`。内核收到 SIGTERM，自己清理 TUN 的路由（与 FlClash helper 的 `request_exit` 同理）。
 - 重启：`systemctl --user restart <unit>`，不用 `POST /restart`。文件能力在 execve 时生效，两种方式都会重新 exec，但走 systemd 能把内核的退出码和日志都留在 journal 里。
 - 日志：内核起不来时读 `journalctl --user -u <unit> -n 20 -o cat --no-pager`，放进错误页。控制器起来之后的日志照旧走 `/logs` WS。
@@ -163,7 +166,12 @@ flowchart LR
 
      ```yaml
      proxy-providers:
-       <订阅名>: { type: file, path: ./providers/<id>.txt, health-check: { enable: true, url: <delay.url>, interval: 600 } }
+       <订阅名>:
+         {
+           type: file,
+           path: ./providers/<id>.txt,
+           health-check: { enable: true, url: <delay.url>, interval: 600 },
+         }
      proxy-groups:
        - { name: 节点选择, type: select, use: [<订阅名>] }
      rules:
@@ -171,6 +179,7 @@ flowchart LR
      ```
 
      再执行一次 `-t`。provider 文件必须放在 home 下，因为 mihomo 只接受 `SAFE_PATHS` 以内的路径。
+
   4. 两次都不通过：拒绝导入，错误信息取 mihomo 输出的第一条 error。
 - 写入都先写临时文件再 `rename`，所以更新失败时旧文件不受影响。
 - 切换：在订阅页按 `Enter` → 用新订阅重新生成 `config.yaml` → `PUT /configs?force=true`（body 的 `path` 为空，即重新加载 `-f` 指定的文件）→ 复用主方案第 41 项的 `reload_visited`。
@@ -247,29 +256,29 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 
 在主方案 §2 的基础上新增（版本为 2026-11-06 在 crates.io 查到的版本，实施时用 `cargo add` 再确认）：
 
-| crate | 版本 | 用途 |
-|---|---|---|
-| `flate2` | 1.1.10 | 解压 release 的 `.gz`（默认的 `miniz_oxide` 后端，纯 Rust） |
-| `sha2` | 0.11.1 | 校验下载的内核 |
-| `saphyr-parser` | 0.3.3 | 定位订阅 YAML 的顶层键（只解析，不输出） |
-| `age` | 0.12.1 | 第 9 项：解密订阅 |
+| crate           | 版本   | 用途                                                        |
+| --------------- | ------ | ----------------------------------------------------------- |
+| `flate2`        | 1.1.10 | 解压 release 的 `.gz`（默认的 `miniz_oxide` 后端，纯 Rust） |
+| `sha2`          | 0.11.1 | 校验下载的内核                                              |
+| `saphyr-parser` | 0.3.3  | 定位订阅 YAML 的顶层键（只解析，不输出）                    |
+| `age`           | 0.12.1 | 第 9 项：解密订阅                                           |
 
 不引入 OpenSSL；HTTP 下载继续用 `reqwest` + rustls。
 
 ## 13. 风险
 
-| 编号 | 风险 | 处理 |
-|---|---|---|
-| R1 | 二进制所在分区以 nosuid 挂载时，文件能力不生效 | 授权前查 `/proc/self/mountinfo`，提前报错（§8） |
-| R2 | 升级或替换二进制会丢掉文件能力，TUN 开不起来 | 每次连上内核、每次替换后用 `getcap` 判定；需要时关掉 TUN 并提示重新授权 |
-| R3 | 重新序列化 YAML 会改变订阅内容（`short-id`、锚点、数字写法） | 只删除和追加字节，不重新输出（§7.2） |
-| R4 | secret 泄露 | 不放命令行和 unit 属性；`config.yaml`、`state.toml`、`subscriptions.toml` 设 0600 |
-| R5 | sudo 和 crossterm 的事件读取抢终端输入 | 执行 sudo 前停掉 `EventStream`，恢复终端；结束后重建（§8） |
-| R6 | 内核在 tabby 之外退出，系统代理指向已关闭的端口 | 下次启动 tabby 时检测并提示；文档写明 |
-| R7 | 托管内核与外部内核端口冲突（例如两者都用 7890） | 启动失败时 journal 里有 `address already in use`，错误页照实显示；设置页可以改 mixed-port |
-| R8 | 两个内核同时开 TUN 并 auto-route，会互相抢路由 | 文档写明；手动验证时必须先征得用户同意（§14） |
-| R9 | 在 systemd 用户单元里文件能力是否生效 | `[INFERENCE]` 用户管理器默认没有 `NoNewPrivileges`，能力上限集合是完整的，理论上会生效；第 5 项验收时实测 |
-| R10 | GitHub 在部分网络下无法直连 | 托管内核运行时经它的 mixed-port 下载；第一次安装失败时提示可以设 `[core].binary` |
+| 编号 | 风险                                                         | 处理                                                                                                      |
+| ---- | ------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| R1   | 二进制所在分区以 nosuid 挂载时，文件能力不生效               | 授权前查 `/proc/self/mountinfo`，提前报错（§8）                                                           |
+| R2   | 升级或替换二进制会丢掉文件能力，TUN 开不起来                 | 每次连上内核、每次替换后用 `getcap` 判定；需要时关掉 TUN 并提示重新授权                                   |
+| R3   | 重新序列化 YAML 会改变订阅内容（`short-id`、锚点、数字写法） | 只删除和追加字节，不重新输出（§7.2）                                                                      |
+| R4   | secret 泄露                                                  | 不放命令行和 unit 属性；`config.yaml`、`state.toml`、`subscriptions.toml` 设 0600                         |
+| R5   | sudo 和 crossterm 的事件读取抢终端输入                       | 执行 sudo 前停掉 `EventStream`，恢复终端；结束后重建（§8）                                                |
+| R6   | 内核在 tabby 之外退出，系统代理指向已关闭的端口              | 下次启动 tabby 时检测并提示；文档写明                                                                     |
+| R7   | 托管内核与外部内核端口冲突（例如两者都用 7890）              | 启动失败时 journal 里有 `address already in use`，错误页照实显示；设置页可以改 mixed-port                 |
+| R8   | 两个内核同时开 TUN 并 auto-route，会互相抢路由               | 文档写明；手动验证时必须先征得用户同意（§14）                                                             |
+| R9   | 在 systemd 用户单元里文件能力是否生效                        | `[INFERENCE]` 用户管理器默认没有 `NoNewPrivileges`，能力上限集合是完整的，理论上会生效；第 5 项验收时实测 |
+| R10  | GitHub 在部分网络下无法直连                                  | 托管内核运行时经它的 mixed-port 下载；第一次安装失败时提示可以设 `[core].binary`                          |
 
 ## 14. 测试与验证
 
