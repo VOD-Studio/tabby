@@ -73,7 +73,7 @@ TABBY_SECRET=xxx tabby --theme tokyo-night
 | `--profile <PROFILE>` | `TABBY_PROFILE` | 使用 `config.toml` 里的哪个 profile | 配置里的 `default`；都没有就不用 profile |
 | `--url <URL>` | `TABBY_URL` | External Controller 地址，`http` 或 `https` | `http://127.0.0.1:9090` |
 | `--secret <SECRET>` | `TABBY_SECRET` | 控制器的 secret | 无 |
-| `--theme <THEME>` | `TABBY_THEME` | `terminal`、`tokyo-night`、`catppuccin-mocha` | 配置里的 `theme`，否则 `terminal` |
+| `--theme <THEME>` | `TABBY_THEME` | 内置主题名、主题目录里的主题名，或主题文件路径（相对当前目录），见“主题与图标” | 配置里的 `theme`，否则 `terminal` |
 | `-h`, `--help` | | 帮助 | |
 | `-V`, `--version` | | 版本 | |
 
@@ -81,7 +81,7 @@ TABBY_SECRET=xxx tabby --theme tokyo-night
 
 - `--url` 和 `--secret` 优先于所选 profile 自带的 `url` / `secret`。
 - `--profile` 指定的 profile 不存在、`config.toml` 里的 `default` 指向不存在的 profile 时，启动报错退出。
-- `profile`、`url`、`secret` 的环境变量设为空串等同于没设置。
+- `profile`、`url`、`secret`、`theme` 的环境变量设为空串等同于没设置。
 - 没有选中任何 profile 时，顶栏右侧的名字是 `default`。
 - `--url` / `--secret` 与对应环境变量只作用于启动时的那一次连接，见下文“切换配置”。
 - 命令行参数会出现在进程列表里；secret 更适合放在 `config.toml` 或环境变量里。
@@ -94,7 +94,7 @@ TABBY_SECRET=xxx tabby --theme tokyo-night
 - `$XDG_CONFIG_HOME/tabby/config.toml`；
 - 未设置 `XDG_CONFIG_HOME` 时为 `~/.config/tabby/config.toml`。
 
-文件里有无法识别的内容（`theme` / `icons` 写了未知值、profile 缺 `url`、`[theme_overrides]` 里有未知键或写不出的颜色等）时，tabby 在进入全屏前报错并以退出码 1 退出，信息里带出错的键。顶层、`[delay]`、`[profiles.*]` 里不认识的键会被忽略，不报错。
+文件里有无法识别的内容（`icons` 写了未知值、profile 缺 `url`、`[theme_overrides]` 里有未知键或写不出的颜色等）时，tabby 在进入全屏前报错并以退出码 1 退出，信息里带出错的键。`theme` 指向的主题不存在、主题文件写错时同样报错退出，信息里带文件路径和出错的键。顶层、`[delay]`、`[profiles.*]` 里不认识的键会被忽略，不报错。
 
 完整示例：
 
@@ -102,7 +102,8 @@ TABBY_SECRET=xxx tabby --theme tokyo-night
 # 启动时使用的 profile；--profile / TABBY_PROFILE 优先
 default = "local"
 
-# terminal（默认） | tokyo-night | catppuccin-mocha；--theme / TABBY_THEME 优先
+# 内置主题名、themes/ 目录里的主题名，或主题文件路径（相对本文件所在目录）
+# 默认 terminal；--theme / TABBY_THEME 优先；按 C 选中的主题会写回这一行
 theme = "terminal"
 
 # unicode（默认） | nerd；没有命令行或环境变量版本
@@ -127,19 +128,22 @@ accent = "#7aa2f7"        # #rrggbb
 success = "light-green"   # 16 色 ANSI 颜色名
 fg = "reset"              # 终端自己的默认颜色
 surface = "#292e42"       # 光标行背景
+bg = "reset"              # 整页背景；reset 表示用终端自己的背景
 ```
 
 `[delay]` 的 `url` 和 `timeout_ms` 用于单节点测速（`t`）和整组测速（`T`）；`url` 写成空串等同于没写。profile 在切换弹窗里按名称排序。secret 以明文保存在文件里，注意文件权限。
 
 ### `[theme_overrides]`
 
-覆盖加在当前主题之上，对三个内置主题都生效；没写的键保持主题自己的颜色。
+覆盖加在当前主题之上，对所有主题都生效，包括按 `C` 切换后的主题；没写的键保持主题自己的颜色。主题文件的 `[colors]` 用同一套键和写法。
 
 | 键 | 用途 |
 |---|---|
 | `fg` | 正文 |
 | `muted` | 次要文字、边框、单位 |
 | `surface` | 光标所在行的背景 |
+| `stripe` | 表格隔行条纹的背景；`reset` 表示不要条纹 |
+| `bg` | 整页背景，弹窗也用它；`reset` 表示用终端自己的背景 |
 | `accent` | 焦点、选中项、当前标签、底栏里的按键名 |
 | `success` | 正常、已连接、开关为开、延迟 < 200 ms |
 | `warning` | 需要注意（如重连）、延迟 200–500 ms |
@@ -155,7 +159,7 @@ surface = "#292e42"       # 光标行背景
 - 16 色 ANSI 名，只认小写：`black`、`red`、`green`、`yellow`、`blue`、`magenta`、`cyan`、`gray`、`dark-gray`、`light-red`、`light-green`、`light-yellow`、`light-blue`、`light-magenta`、`light-cyan`、`white`。具体显示什么颜色由终端的配色决定。
 - `reset`：终端自己的默认颜色，例如让真彩主题的正文跟随终端前景色。`surface` 不允许写 `reset`（光标行会看不见），会报错。
 
-不支持 256 色序号、`rgb(...)` 和粗体等修饰。`surface` 是背景色：在 `terminal` 主题下它取代原来的反色，光标行的文字保留各自的颜色。
+不支持 256 色序号、`rgb(...)` 和粗体等修饰。`surface` 和 `stripe` 是背景色：在 `terminal` 主题下 `surface` 取代原来的反色，光标行的文字保留各自的颜色。设了 `bg` 时，没有自己背景色的格子都铺上 `bg`，没有自己文字颜色的格子用 `fg`。
 
 ## 页面
 
@@ -175,7 +179,7 @@ surface = "#292e42"       # 光标行背景
 
 ## 按键
 
-`?` 打开帮助浮层：左列是全局按键，右列是当前页面的按键，与下表一致。弹窗（帮助、连接详情、确认、profile、代理组下拉）是模态的，打开时其余按键不起作用，`Esc` 关闭；`Ctrl+C` 任何时候都退出，`q` 在弹窗里也退出，但在过滤框和端口输入框里只是普通字符。
+`?` 打开帮助浮层：左列是全局按键，右列是当前页面的按键，与下表一致。弹窗（帮助、连接详情、确认、profile、主题、代理组下拉）是模态的，打开时其余按键不起作用，`Esc` 关闭；`Ctrl+C` 任何时候都退出，`q` 在弹窗里也退出，但在过滤框和端口输入框里只是普通字符。
 
 ### 全局
 
@@ -186,6 +190,7 @@ surface = "#292e42"       # 光标行背景
 | `r` | 刷新当前页（出错时重试） |
 | `m` | 循环切换代理模式：rule → global → direct |
 | `P` | 切换配置（profile） |
+| `C` | 切换主题 |
 | `?` | 打开 / 关闭帮助 |
 | `q` / `Ctrl+C` | 退出 |
 
@@ -265,8 +270,46 @@ surface = "#292e42"       # 光标行背景
 | `theme` | 说明 |
 |---|---|
 | `terminal`（默认） | 只用 16 色 ANSI，颜色跟随终端自己的配色；光标行用终端默认的前景、背景整行反色，行内文字不保留各自的颜色（加粗保留） |
-| `tokyo-night` | 内置真彩色主题，终端需要支持 24 位色 |
-| `catppuccin-mocha` | 内置真彩色主题，同上 |
+| `tokyo-night` | 内置真彩色深色主题，终端需要支持 24 位色；背景用终端自己的 |
+| `catppuccin-mocha` | 同上 |
+| `gruvbox-dark` | 同上 |
+| `nord` | 同上 |
+| `dracula` | 同上 |
+| `catppuccin-latte` | 内置真彩色浅色主题，自带整页背景 `#eff1f5`，在深色终端里也能看清 |
+
+深色内置主题不设背景，默认终端背景本来就是深色；放在浅色终端里文字会看不清，这时用 `catppuccin-latte`、`terminal`，或用 `[theme_overrides]` 的 `bg` 补一个背景。
+
+### 切换主题
+
+按 `C` 打开主题弹窗，依次列出内置主题、主题目录里的主题，以及用路径指定、但不在主题目录里的当前主题；当前主题前有 `✓`。`j` / `k` 移动时整个界面立即换成光标所在的主题（预览），`Enter` 选用并把 `theme = "…"` 写回 `config.toml`，`Esc` 或 `C` 取消并恢复原来的主题。
+
+- 写回时只改 `theme` 这一行（原值后面的注释也保留），其余内容和注释不变；没有 `config.toml` 时会新建。写入失败时主题照样切换，提示里给出原因。
+- 启动时用了 `--theme` / `TABBY_THEME` 的话，下次启动仍以它为准，提示里会说明。
+- 每次打开弹窗都重新读取主题目录，所以改完主题文件，再按一次 `C` 就能看到新效果。
+- 写错的主题文件也会列出来，显示为灰色，后面是错误原因，不能选；名字和内置主题相同的文件同样不能选（内置主题优先）。
+- 切换配置（`P`）不影响当前主题。
+
+### 自定义主题
+
+主题文件放在 `config.toml` 旁边的 `themes/` 目录里（Linux 上是 `~/.config/tabby/themes/`），文件名去掉 `.toml` 就是主题名，可以写在 `theme =`、`--theme` 里，也会出现在 `C` 弹窗中。
+
+```toml
+# ~/.config/tabby/themes/midnight.toml
+
+# 可选：从哪个内置主题开始，只能写内置主题名；不写就是 terminal
+extends = "tokyo-night"
+
+# 要改的颜色，键和写法与 [theme_overrides] 相同；没写的沿用 extends 的主题
+[colors]
+accent = "#ff9e64"
+surface = "#2a2f45"
+stripe = "#20222f"
+bg = "#16161e"
+```
+
+主题文件只认 `extends` 和 `[colors]` 两个键，其他键会报错。`theme =` 或 `--theme` 也可以直接写主题文件的路径：带 `/` 或以 `.toml` 结尾的值都当作路径，写在 `config.toml` 里时相对配置文件所在目录，写在命令行或环境变量里时相对当前目录，用 `C` 保存时会写成绝对路径。`[theme_overrides]` 总是叠在最上层，优先级是：内置主题 < 主题文件的 `[colors]` < `[theme_overrides]`。
+
+### 图标
 
 `icons = "unicode"`（默认）只使用通用的 Unicode 符号（`●`、`✓`、`◆` 等）。`icons = "nerd"` 改用 Nerd Font 图标：状态点、开关、✓ / ✗、暂停、警告、logo、上下行箭头，宽度达到 100 列时还在标签前加页面图标。需要终端字体已打上 Nerd Fonts v3 补丁，推荐 **Nerd Font Mono** 变体（图标严格占一格）。tabby 按“每个图标 1 列”排版；非 Mono 变体的字体可能把图标画成两格宽，溢出到右边一格，少数终端的字符宽度表还会把私用区字符当作宽字符，造成整行错位。遇到这种情况换 Mono 字体，或改回 `icons = "unicode"`。
 
