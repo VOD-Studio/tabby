@@ -7886,7 +7886,7 @@ secret = "b-secret"
     fn the_help_scrolls_no_further_than_its_last_row() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Connections;
-        // One column of 24 rows, 23 shown.
+        // One column of 25 rows, 23 shown.
         app.size = Size::new(69, 25);
         key_press(&mut app, KeyCode::Char('?'));
         let mut press = |code| {
@@ -7895,19 +7895,20 @@ secret = "b-secret"
         };
         assert_eq!(press(KeyCode::Char('k')), 0);
         assert_eq!(press(KeyCode::Char('j')), 1);
-        assert_eq!(press(KeyCode::Char('j')), 1);
+        assert_eq!(press(KeyCode::Char('j')), 2);
+        assert_eq!(press(KeyCode::Char('j')), 2);
         assert_eq!(press(KeyCode::Char('g')), 0);
-        assert_eq!(press(KeyCode::Char('G')), 1);
+        assert_eq!(press(KeyCode::Char('G')), 2);
         // 13 of the rows shown: half a page is 6.
         app.update(Action::Resize(Size::new(50, 15)));
         app.update(Action::Cursor(Move::Bottom));
-        assert_eq!(app.help_scroll, 11);
+        assert_eq!(app.help_scroll, 12);
         app.update(Action::Cursor(Move::HalfUp));
-        assert_eq!(app.help_scroll, 5);
+        assert_eq!(app.help_scroll, 6);
         // The page behind did not move, and growing the screen brings the
         // rows that now fit back into view.
         assert_eq!(app.connections_view.cursor, 0);
-        app.update(Action::Resize(Size::new(69, 26)));
+        app.update(Action::Resize(Size::new(69, 27)));
         assert_eq!(app.help_scroll, 0);
         // Two columns fit at 70 x 24: nothing to scroll.
         app.update(Action::Resize(Size::new(70, 24)));
