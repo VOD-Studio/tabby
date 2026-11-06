@@ -7,5 +7,6 @@ pub mod popup;
 pub mod profiles;
 pub mod states;
 pub mod tabs;
+pub mod themes;
 pub mod title;
 pub mod toast;

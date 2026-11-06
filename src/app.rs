@@ -23,8 +23,9 @@ use crate::{
         },
         stream::{Event as StreamEvent, Stream, Streams},
     },
-    config::{Profiles, Settings},
+    config::{self, Profiles, Settings},
     format::natural_cmp,
+    themes::{self, Entry, Picker},
     ui::{
         components::help,
         connections,
@@ -1286,6 +1287,8 @@ pub enum Action {
     ToggleHelp,
     /// `P`: open the profile popup, or close it.
     Profiles,
+    /// `C`: open the theme picker, or close it.
+    Themes,
     /// `Esc`: closes the topmost overlay, or clears an applied filter.
     Dismiss,
 }
@@ -1495,6 +1498,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('n') => Some(Action::Cancel),
                 KeyCode::Char('m') => Some(Action::CycleMode),
                 KeyCode::Char('P') => Some(Action::Profiles),
+                KeyCode::Char('C') => Some(Action::Themes),
                 KeyCode::Char(c) => Page::from_digit(c).map(Action::SelectPage),
                 _ => None,
             }
@@ -1534,6 +1538,8 @@ pub enum Overlay {
     Confirm,
     /// The connections in [`App::profiles`] to switch between.
     Profiles,
+    /// The themes in [`App::themes`] to pick from.
+    Themes,
     /// The drop-down of the narrow proxies page's group picker.
     Groups,
 }
@@ -2010,6 +2016,8 @@ pub struct App {
     /// cursor is on.
     pub profile_cursor: usize,
     pub profile_scroll: Scroll,
+    /// The theme picker `C` opens.
+    pub themes: Picker,
     pub version: Option<Result<Version, ApiError>>,
     pub configs: Option<Result<Configs, ApiError>>,
     pub proxies: Option<Result<Proxies, ApiError>>,
@@ -2103,10 +2111,11 @@ impl App {
         msg_tx: mpsc::Sender<Envelope>,
         size: Size,
         profiles: Profiles,
+        themes: Picker,
     ) -> Self {
         let theme = theme.with(&settings.theme_overrides);
         let outbox = Outbox::new(0, msg_tx);
-        Self::connect(settings, theme, client, outbox, size, profiles)
+        Self::connect(settings, theme, client, outbox, size, profiles, themes)
     }
 
     /// An app on the controller of `settings`, nothing loaded yet, its
@@ -2118,6 +2127,7 @@ impl App {
         outbox: Outbox,
         size: Size,
         profiles: Profiles,
+        themes: Picker,
     ) -> Self {
         let streams = Streams::new(&settings.url, settings.secret.as_deref(), outbox.clone());
         Self {
@@ -2130,6 +2140,7 @@ impl App {
             profile_cursor: profiles.current,
             profiles,
             profile_scroll: Scroll::default(),
+            themes,
             version: None,
             configs: None,
             proxies: None,
@@ -2289,6 +2300,7 @@ impl App {
             Action::Resize(size) => self.resize(size),
             _ if self.overlay == Some(Overlay::Confirm) => self.answer(action),
             _ if self.overlay == Some(Overlay::Profiles) => self.pick_profile(action),
+            _ if self.overlay == Some(Overlay::Themes) => self.pick_theme(action),
             _ if self.overlay == Some(Overlay::Groups) => self.pick_group(action),
             Action::ToggleHelp => {
                 // The connection popup is not swapped for the help.
@@ -2320,6 +2332,7 @@ impl App {
                 self.overlay = Some(Overlay::Profiles);
                 self.dirty = true;
             }
+            Action::Themes => self.open_themes(),
             Action::SelectPage(page) => self.set_page(page),
             Action::NextPage => self.set_page(self.page.next()),
             Action::PrevPage => self.set_page(self.page.prev()),
@@ -3031,7 +3044,7 @@ impl App {
         match self.overlay.take() {
             Some(Overlay::Connection) => self.connections_view.detail = None,
             Some(Overlay::Confirm) => self.pending = None,
-            Some(Overlay::Help | Overlay::Profiles | Overlay::Groups) | None => {}
+            Some(Overlay::Help | Overlay::Profiles | Overlay::Themes | Overlay::Groups) | None => {}
         }
         self.dirty = true;
     }
@@ -3055,6 +3068,90 @@ impl App {
             }
             Action::Dismiss | Action::Profiles => self.close_overlay(),
             _ => {}
+        }
+    }
+
+    /// `C`: offers every theme, the cursor on the one in use. The themes
+    /// directory is read again, so a theme file edited meanwhile shows as
+    /// it is now.
+    fn open_themes(&mut self) {
+        let picker = &mut self.themes;
+        picker.entries = themes::scan(picker.dir.as_deref(), &self.settings.theme);
+        picker.cursor = picker
+            .entries
+            .iter()
+            .position(|entry| entry.id == self.settings.theme)
+            .unwrap_or(0);
+        picker.before = Some(self.theme);
+        self.overlay = Some(Overlay::Themes);
+        self.dirty = true;
+    }
+
+    /// The theme picker answers to the cursor keys, `Enter`, `Esc` and `C`;
+    /// quitting and resizing are handled before it is asked. The whole
+    /// screen shows the theme under the cursor as it moves.
+    fn pick_theme(&mut self, action: Action) {
+        match action {
+            Action::Cursor(movement) => {
+                let len = self.themes.entries.len();
+                let half = (len / 2).max(1);
+                self.themes.cursor = movement.apply(self.themes.cursor, len, half);
+                // A theme that cannot be used shows the one in use.
+                self.theme = match self.themes.entries.get(self.themes.cursor) {
+                    Some(Entry {
+                        theme: Ok(theme), ..
+                    }) => theme.with(&self.settings.theme_overrides),
+                    _ => self.themes.before.unwrap_or(self.theme),
+                };
+                self.dirty = true;
+            }
+            Action::Confirm => self.choose_theme(),
+            Action::Dismiss | Action::Themes => {
+                if let Some(before) = self.themes.before.take() {
+                    self.theme = before;
+                }
+                self.close_overlay();
+            }
+            _ => {}
+        }
+    }
+
+    /// `Enter` in the theme picker: keeps the theme under the cursor and
+    /// saves it as `theme` in `config.toml`. One that cannot be used is
+    /// not taken: the picker stays open, its row saying why.
+    fn choose_theme(&mut self) {
+        let Some(entry) = self.themes.entries.get(self.themes.cursor) else {
+            return;
+        };
+        let &Ok(theme) = &entry.theme else {
+            return;
+        };
+        let id = entry.id.clone();
+        self.theme = theme.with(&self.settings.theme_overrides);
+        self.themes.before = None;
+        self.close_overlay();
+        if id == self.settings.theme {
+            return;
+        }
+        tracing::info!(theme = %id, "switching theme");
+        self.settings.theme.clone_from(&id);
+        let saved = match &self.themes.config {
+            Some(path) => config::save_theme(path, &id).map_err(|err| format!("{err:#}")),
+            None => Err("找不到配置文件的位置".to_owned()),
+        };
+        match saved {
+            Ok(()) if self.settings.theme_pinned => self.toast(
+                ToastKind::Success,
+                format!("已切换到主题 {id} 并保存；下次启动仍以 --theme / TABBY_THEME 为准"),
+            ),
+            Ok(()) => self.toast(ToastKind::Success, format!("已切换到主题 {id} 并保存")),
+            Err(err) => {
+                tracing::warn!("cannot save theme: {err}");
+                self.toast(
+                    ToastKind::Error,
+                    format!("已切换到主题 {id}，但未能保存：{err}"),
+                );
+            }
         }
     }
 
@@ -3090,6 +3187,7 @@ impl App {
         };
         let mut profiles = std::mem::take(&mut self.profiles);
         profiles.current = index;
+        let themes = std::mem::take(&mut self.themes);
         let mut app = Self::connect(
             settings,
             self.theme,
@@ -3097,6 +3195,7 @@ impl App {
             self.outbox.next(),
             self.size,
             profiles,
+            themes,
         );
         app.proxies_view.sort = self.proxies_view.sort;
         app.connections_view.sort = self.connections_view.sort;
@@ -4219,15 +4318,28 @@ mod tests {
         let settings = crate::config::Config::default()
             .resolve(&overrides)
             .unwrap();
-        let app = launch(settings, tx, Profiles::default());
+        let app = launch(settings, tx, Profiles::default(), Picker::default());
         (app, rx)
     }
 
     /// An app on the controller of `settings`, as `main` starts one.
-    fn launch(settings: Settings, tx: mpsc::Sender<Envelope>, profiles: Profiles) -> App {
+    fn launch(
+        settings: Settings,
+        tx: mpsc::Sender<Envelope>,
+        profiles: Profiles,
+        themes: Picker,
+    ) -> App {
         let client = ApiClient::new(&settings.url, settings.secret.as_deref()).unwrap();
-        let theme = crate::themes::load(&settings.theme, None).unwrap();
-        App::new(settings, theme, client, tx, Size::new(120, 40), profiles)
+        let theme = themes::load(&settings.theme, themes.dir.as_deref()).unwrap();
+        App::new(
+            settings,
+            theme,
+            client,
+            tx,
+            Size::new(120, 40),
+            profiles,
+            themes,
+        )
     }
 
     fn app_with(proxies: Proxies) -> App {
@@ -6948,7 +7060,7 @@ secret = "b-secret"
         let config: crate::config::Config = toml::from_str(PROFILES).unwrap();
         let settings = config.resolve(overrides).unwrap();
         let profiles = config.profiles(overrides, &settings);
-        let app = launch(settings, tx, profiles);
+        let app = launch(settings, tx, profiles, Picker::default());
         (app, rx)
     }
 
@@ -7138,7 +7250,7 @@ secret = "b-secret"
         let overrides = crate::config::Overrides::default();
         let settings = config.resolve(&overrides).unwrap();
         let profiles = config.profiles(&overrides, &settings);
-        let mut app = launch(settings, tx, profiles);
+        let mut app = launch(settings, tx, profiles, Picker::default());
 
         let colors = |app: &App| (app.theme.accent, app.theme.c1, app.theme.muted);
         let expected = (
@@ -7150,6 +7262,105 @@ secret = "b-secret"
         switch_to(&mut app, 1);
         assert_eq!(app.settings.profile, "b");
         assert_eq!(colors(&app), expected);
+    }
+
+    #[tokio::test]
+    async fn the_theme_picker_previews_restores_and_saves_under_the_overrides() {
+        use std::fs;
+
+        use ratatui::style::Color;
+
+        use crate::config::{Config, Overrides, ThemeName};
+
+        let dir = std::env::temp_dir().join(format!("tabby-{}-picker", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let themes_dir = dir.join("themes");
+        fs::create_dir_all(&themes_dir).unwrap();
+        let mine = "extends = \"nord\"\n[colors]\nfg = \"#010203\"\nbg = \"#040506\"\n";
+        fs::write(themes_dir.join("mine.toml"), mine).unwrap();
+        fs::write(themes_dir.join("broken.toml"), "[colors]\nfg = \"pink\"\n").unwrap();
+        let path = dir.join("config.toml");
+        let written = format!("{PROFILES}\n[theme_overrides]\naccent = \"#112233\"\n");
+        fs::write(&path, &written).unwrap();
+
+        let (tx, _rx) = mpsc::channel(64);
+        let config = Config::load(Some(&path)).unwrap();
+        let settings = config.resolve(&Overrides::default()).unwrap();
+        let profiles = config.profiles(&Overrides::default(), &settings);
+        let picker = Picker {
+            dir: Some(themes_dir),
+            config: Some(path.clone()),
+            ..Picker::default()
+        };
+        let mut app = launch(settings, tx, profiles, picker);
+        let start = app.theme;
+        let accent = Color::Rgb(0x11, 0x22, 0x33);
+        assert_eq!(start.accent, accent);
+
+        key_press(&mut app, KeyCode::Char('C'));
+        assert_eq!(app.overlay, Some(Overlay::Themes));
+        let ids: Vec<&str> = app.themes.entries.iter().map(|e| e.id.as_str()).collect();
+        let mut expected: Vec<&str> = ThemeName::ALL.map(ThemeName::id).to_vec();
+        expected.extend(["broken", "mine"]);
+        assert_eq!(ids, expected);
+        // On the theme in use.
+        assert_eq!(app.themes.cursor, 0);
+        let reason = app.themes.entries[expected.len() - 2]
+            .theme
+            .as_ref()
+            .unwrap_err();
+        assert!(reason.contains("`fg`"), "{reason}");
+
+        // The cursor previews: the file over what it extends, the overrides
+        // over both.
+        key_press(&mut app, KeyCode::Char('G'));
+        let nord = Theme::from(ThemeName::Nord);
+        assert_eq!(
+            (
+                app.theme.fg,
+                app.theme.bg,
+                app.theme.success,
+                app.theme.accent
+            ),
+            (
+                Color::Rgb(1, 2, 3),
+                Color::Rgb(4, 5, 6),
+                nord.success,
+                accent
+            )
+        );
+        // A broken theme previews the one in use, and is not taken.
+        key_press(&mut app, KeyCode::Char('k'));
+        assert_eq!(app.theme, start);
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.overlay, Some(Overlay::Themes));
+        // `Esc` brings back the theme in use and saves nothing.
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Esc);
+        assert_eq!((app.overlay, app.theme), (None, start));
+        assert_eq!(app.settings.theme, "terminal");
+        assert_eq!(fs::read_to_string(&path).unwrap(), written);
+
+        // `Enter` keeps it and saves it.
+        key_press(&mut app, KeyCode::Char('C'));
+        key_press(&mut app, KeyCode::Char('G'));
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.settings.theme, "mine");
+        assert_eq!(app.theme.fg, Color::Rgb(1, 2, 3));
+        assert_eq!(toast_texts(&app), ["已切换到主题 mine 并保存"]);
+        let saved = Config::load(Some(&path)).unwrap();
+        let settings = saved.resolve(&Overrides::default()).unwrap();
+        assert_eq!(settings.theme, "mine");
+        assert_eq!(settings.theme_overrides, app.settings.theme_overrides);
+
+        // It outlives a profile switch, and the picker opens on it.
+        let chosen = app.theme;
+        switch_to(&mut app, 1);
+        assert_eq!(app.theme, chosen);
+        key_press(&mut app, KeyCode::Char('C'));
+        assert_eq!(app.themes.entries[app.themes.cursor].id, "mine");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[tokio::test]
@@ -7391,8 +7602,8 @@ secret = "b-secret"
     fn the_help_scrolls_no_further_than_its_last_row() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Connections;
-        // One column of 23 rows, 22 shown.
-        app.size = Size::new(69, 24);
+        // One column of 24 rows, 23 shown.
+        app.size = Size::new(69, 25);
         key_press(&mut app, KeyCode::Char('?'));
         let mut press = |code| {
             key_press(&mut app, code);
@@ -7406,13 +7617,13 @@ secret = "b-secret"
         // 13 of the rows shown: half a page is 6.
         app.update(Action::Resize(Size::new(50, 15)));
         app.update(Action::Cursor(Move::Bottom));
-        assert_eq!(app.help_scroll, 10);
+        assert_eq!(app.help_scroll, 11);
         app.update(Action::Cursor(Move::HalfUp));
-        assert_eq!(app.help_scroll, 4);
+        assert_eq!(app.help_scroll, 5);
         // The page behind did not move, and growing the screen brings the
         // rows that now fit back into view.
         assert_eq!(app.connections_view.cursor, 0);
-        app.update(Action::Resize(Size::new(69, 25)));
+        app.update(Action::Resize(Size::new(69, 26)));
         assert_eq!(app.help_scroll, 0);
         // Two columns fit at 70 x 24: nothing to scroll.
         app.update(Action::Resize(Size::new(70, 24)));

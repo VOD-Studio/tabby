@@ -101,12 +101,13 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
 }
 
 /// Keys that work on every page, as `(key, what it does)`.
-const GLOBAL_KEYS: [(&str, &str); 7] = [
+const GLOBAL_KEYS: [(&str, &str); 8] = [
     ("1-7", "跳到第 N 页"),
     ("Tab / Shift+Tab", "下一页 / 上一页"),
     ("r", "刷新"),
     ("m", "切换代理模式"),
     ("P", "切换配置"),
+    ("C", "切换主题"),
     ("?", "打开 / 关闭帮助"),
     ("q / Ctrl+C", "退出"),
 ];
@@ -245,7 +246,7 @@ mod tests {
 
     #[test]
     fn one_column_scrolls_as_far_as_its_last_row() {
-        // Connections: 11 keys; one column holds 9 + 1 + 13 = 23 rows.
+        // Connections: 11 keys; one column holds 10 + 1 + 13 = 24 rows.
         let rows = |width, height| {
             let screen = Rect::new(0, 0, width, height);
             (
@@ -253,10 +254,10 @@ mod tests {
                 visible_rows(screen, Page::Connections),
             )
         };
-        // 25 rows hold the panel with its borders.
-        assert_eq!(rows(69, 25), (0, 23));
-        assert_eq!(rows(69, 24), (1, 22));
-        assert_eq!(rows(50, 15), (10, 13));
+        // 26 rows hold the panel with its borders.
+        assert_eq!(rows(69, 26), (0, 24));
+        assert_eq!(rows(69, 25), (1, 23));
+        assert_eq!(rows(50, 15), (11, 13));
         // Two columns from 70: 13 rows and borders.
         assert_eq!(rows(70, 15), (0, 13));
         assert_eq!(rows(70, 14), (1, 12));
@@ -265,7 +266,7 @@ mod tests {
     #[test]
     fn a_page_without_keys_still_has_its_line() {
         let screen = Rect::new(0, 0, 60, 40);
-        // 9 + 1 + 3: the heading, an empty line and `暂无专属按键`.
-        assert_eq!(visible_rows(screen, Page::Overview), 13);
+        // 10 + 1 + 3: the heading, an empty line and `暂无专属按键`.
+        assert_eq!(visible_rows(screen, Page::Overview), 14);
     }
 }

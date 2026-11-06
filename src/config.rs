@@ -291,6 +291,9 @@ pub struct Settings {
     /// The theme as `theme =` names it: a built-in name, a theme in the
     /// themes directory, or the absolute path of a theme file.
     pub theme: String,
+    /// Whether `--theme` or `TABBY_THEME` chose the theme, so a theme saved
+    /// to `config.toml` does not apply at the next start.
+    pub theme_pinned: bool,
     pub theme_overrides: Palette,
     pub icons: IconSet,
     pub delay_url: String,
@@ -388,6 +391,38 @@ fn theme_id(id: &str, base: Option<&Path>) -> String {
         .into_owned()
 }
 
+/// Sets `theme = "<id>"` in the `config.toml` at `path`, creating the file
+/// if there is none. Everything else, comments included, stays as written.
+pub fn save_theme(path: &Path, id: &str) -> Result<()> {
+    let text = match fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(err) => {
+            return Err(err).wrap_err_with(|| format!("cannot read {}", path.display()));
+        }
+    };
+    let mut document: toml_edit::DocumentMut = text
+        .parse()
+        .wrap_err_with(|| format!("invalid config file {}", path.display()))?;
+    match document
+        .get_mut("theme")
+        .and_then(toml_edit::Item::as_value_mut)
+    {
+        // The comment after the old value stays after the new one.
+        Some(value) => {
+            let decor = value.decor().clone();
+            *value = id.into();
+            *value.decor_mut() = decor;
+        }
+        None => document["theme"] = toml_edit::value(id),
+    }
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).wrap_err_with(|| format!("cannot create {}", dir.display()))?;
+    }
+    fs::write(path, document.to_string())
+        .wrap_err_with(|| format!("cannot write {}", path.display()))
+}
+
 impl Config {
     /// Loads `config.toml` from `path`.
     ///
@@ -434,11 +469,14 @@ impl Config {
     pub fn resolve(&self, overrides: &Overrides) -> Result<Settings> {
         let chosen = self.chosen(overrides)?;
         let profile = chosen.map(|(_, profile)| profile);
-        let theme = match non_empty(overrides.theme.as_ref()) {
-            Some(id) => theme_id(id, None),
-            None => self.theme.as_deref().map_or_else(
-                || ThemeName::default().id().to_owned(),
-                |id| theme_id(id, self.dir.as_deref()),
+        let (theme, theme_pinned) = match non_empty(overrides.theme.as_ref()) {
+            Some(id) => (theme_id(id, None), true),
+            None => (
+                self.theme.as_deref().map_or_else(
+                    || ThemeName::default().id().to_owned(),
+                    |id| theme_id(id, self.dir.as_deref()),
+                ),
+                false,
             ),
         };
         Ok(Settings {
@@ -451,6 +489,7 @@ impl Config {
                 .or_else(|| profile.and_then(|p| p.secret.as_deref()))
                 .map(str::to_owned),
             theme,
+            theme_pinned,
             theme_overrides: self.theme_overrides,
             icons: self.icons,
             delay_url: self
@@ -558,6 +597,7 @@ accent = "#7aa2f7"
                 url: DEFAULT_URL.into(),
                 secret: None,
                 theme: "terminal".into(),
+                theme_pinned: false,
                 theme_overrides: Palette::default(),
                 icons: IconSet::Unicode,
                 delay_url: DEFAULT_DELAY_URL.into(),
@@ -576,6 +616,7 @@ accent = "#7aa2f7"
                 url: "http://local:9090".into(),
                 secret: Some("file-secret".into()),
                 theme: "tokyo-night".into(),
+                theme_pinned: false,
                 theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
                 delay_url: "http://delay.test/204".into(),
@@ -600,6 +641,7 @@ accent = "#7aa2f7"
                 url: "http://cli:1".into(),
                 secret: Some("cli-secret".into()),
                 theme: "catppuccin-mocha".into(),
+                theme_pinned: true,
                 // Not tied to the theme they were written under.
                 theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
@@ -764,29 +806,78 @@ c4 = "gray"
             dir: Some(PathBuf::from("/etc/tabby")),
             ..Config::default()
         };
-        let theme =
-            |config: &Config, overrides: &Overrides| config.resolve(overrides).unwrap().theme;
+        let theme = |config: &Config, overrides: &Overrides| {
+            let settings = config.resolve(overrides).unwrap();
+            (settings.theme, settings.theme_pinned)
+        };
         let none = Overrides::default();
         // Relative to `config.toml`, whatever the current directory.
         assert_eq!(
             theme(&config("mine/dark.toml"), &none),
-            "/etc/tabby/mine/dark.toml"
+            ("/etc/tabby/mine/dark.toml".to_owned(), false)
         );
-        assert_eq!(theme(&config("/abs/x.toml"), &none), "/abs/x.toml");
-        assert_eq!(theme(&config("nord"), &none), "nord");
+        assert_eq!(
+            theme(&config("/abs/x.toml"), &none),
+            ("/abs/x.toml".to_owned(), false)
+        );
+        assert_eq!(theme(&config("nord"), &none), ("nord".to_owned(), false));
         // From the command line, relative to the current directory.
         let cli = Overrides {
             theme: Some("dark.toml".into()),
             ..Overrides::default()
         };
         let cwd = std::env::current_dir().unwrap().join("dark.toml");
-        assert_eq!(theme(&config("nord"), &cli), cwd.to_string_lossy());
+        assert_eq!(
+            theme(&config("nord"), &cli),
+            (cwd.to_string_lossy().into_owned(), true)
+        );
         // An empty override is no override.
         let empty = Overrides {
             theme: Some(String::new()),
             ..Overrides::default()
         };
-        assert_eq!(theme(&config("nord"), &empty), "nord");
+        assert_eq!(theme(&config("nord"), &empty), ("nord".to_owned(), false));
+    }
+
+    /// A directory of its own under the system's temporary one, emptied.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("tabby-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn saving_a_theme_changes_that_value_alone() {
+        let dir = scratch("save-theme");
+        let path = dir.join("config.toml");
+        // No file, not even its directory: both are made.
+        save_theme(&path, "nord").unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theme = \"nord\"\n");
+
+        let written = "# mine\ndefault = \"a\"\ntheme = \"terminal\"   # was\n\n[profiles.a]\nurl = \"http://a:1\"   # router\n";
+        fs::write(&path, written).unwrap();
+        save_theme(&path, "/home/me/my theme.toml").unwrap();
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            written.replace("\"terminal\"", "\"/home/me/my theme.toml\"")
+        );
+        // The file reads back with the new theme.
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(config.theme.as_deref(), Some("/home/me/my theme.toml"));
+
+        // Without a `theme`, it goes among the top-level keys, before the
+        // tables.
+        fs::write(&path, "[profiles.a]\nurl = \"http://a:1\"\n").unwrap();
+        save_theme(&path, "dracula").unwrap();
+        let config = Config::load(Some(&path)).unwrap();
+        assert_eq!(config.theme.as_deref(), Some("dracula"));
+        assert_eq!(config.profiles.len(), 1);
+
+        // A file that does not parse is left alone.
+        fs::write(&path, "theme = \n").unwrap();
+        assert!(save_theme(&path, "nord").is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), "theme = \n");
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     fn offered(config: &Config, overrides: &Overrides) -> Profiles {

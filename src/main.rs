@@ -38,7 +38,12 @@ async fn main() -> Result<()> {
     let path = config::path();
     let file = Config::load(path.as_deref())?;
     let settings = file.resolve(&cli.overrides)?;
-    let theme = themes::load(&settings.theme, config::themes_dir().as_deref())?;
+    let picker = themes::Picker {
+        dir: config::themes_dir(),
+        config: path.clone(),
+        ..themes::Picker::default()
+    };
+    let theme = themes::load(&settings.theme, picker.dir.as_deref())?;
     let profiles = Profiles {
         path,
         ..file.profiles(&cli.overrides, &settings)
@@ -56,7 +61,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = match terminal.size() {
         Ok(size) => {
-            let mut app = App::new(settings, theme, client, msg_tx, size, profiles);
+            let mut app = App::new(settings, theme, client, msg_tx, size, profiles, picker);
             app.start();
             event::run(&mut terminal, &mut app, msg_rx).await
         }

@@ -64,6 +64,16 @@ fn profile_hints(app: &App) -> Vec<Hint> {
     ]
 }
 
+/// Keys while the theme picker is open: moving previews, `Enter` keeps.
+fn theme_hints() -> Vec<Hint> {
+    vec![
+        hint("Enter", "使用并保存"),
+        hint("j/k", "预览"),
+        hint("Esc", "取消"),
+        hint("q", "退出"),
+    ]
+}
+
 /// Keys while the group picker of a narrow proxies page is open.
 fn picker_hints() -> Vec<Hint> {
     vec![
@@ -221,6 +231,7 @@ fn global_hints(page: Page) -> Vec<Hint> {
     hints.extend([
         hint("r", "刷新"),
         hint("P", "配置"),
+        hint("C", "主题"),
         hint("?", "帮助"),
         hint("q", "退出"),
     ]);
@@ -233,6 +244,7 @@ fn hints(app: &App) -> Vec<Hint> {
         Some(Overlay::Connection) => detail_hints(),
         Some(Overlay::Confirm) => confirm_hints(app),
         Some(Overlay::Profiles) => profile_hints(app),
+        Some(Overlay::Themes) => theme_hints(),
         Some(Overlay::Groups) => picker_hints(),
         None if app.page == Page::Settings && app.typing() => port_hints(),
         None => {

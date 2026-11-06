@@ -20,8 +20,44 @@ use color_eyre::{Result, eyre::eyre};
 
 use crate::{
     config::{self, Palette, ThemeName},
-    ui::theme::Theme,
+    ui::{scroll::Scroll, theme::Theme},
 };
+
+/// Where a theme comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Source {
+    Builtin,
+    /// A theme file: in the themes directory, or wherever a path put it.
+    File(PathBuf),
+}
+
+/// One theme the picker offers.
+#[derive(Debug, Clone)]
+pub struct Entry {
+    /// What `theme =` calls it; see `Settings::theme`.
+    pub id: String,
+    pub source: Source,
+    /// The theme, `[theme_overrides]` not applied; or why it cannot be used.
+    pub theme: Result<Theme, String>,
+}
+
+/// The theme picker (`C`): where it finds themes and saves the choice, and
+/// what it offers.
+#[derive(Debug, Default)]
+pub struct Picker {
+    /// The themes directory; `None` when the home directory is unknown.
+    pub dir: Option<PathBuf>,
+    /// `config.toml`, where a picked theme is saved.
+    pub config: Option<PathBuf>,
+    /// What the picker offers; scanned again every time it opens.
+    pub entries: Vec<Entry>,
+    /// Index into `entries` of the row the cursor is on.
+    pub cursor: usize,
+    pub scroll: Scroll,
+    /// The theme in use when the picker opened, overrides applied, while it
+    /// is open: the cursor previews other themes, `Esc` brings it back.
+    pub before: Option<Theme>,
+}
 
 /// The theme `id` names, `[theme_overrides]` not applied: a built-in one,
 /// else `<dir>/<id>.toml`. A path is read as it is.
@@ -47,6 +83,58 @@ pub fn load(id: &str, dir: Option<&Path>) -> Result<Theme> {
         }
     };
     read(&path).map_err(|err| eyre!("invalid theme file {}: {err}", path.display()))
+}
+
+/// Every theme the picker offers: the built-in ones, then each `*.toml` of
+/// `dir` by name, then `current` when it is a file found neither way.
+///
+/// A file that cannot be used is offered all the same, with the reason:
+/// a broken file the user is editing should say what is wrong with it.
+pub fn scan(dir: Option<&Path>, current: &str) -> Vec<Entry> {
+    let mut entries: Vec<Entry> = ThemeName::ALL
+        .into_iter()
+        .map(|name| Entry {
+            id: name.id().to_owned(),
+            source: Source::Builtin,
+            theme: Ok(name.into()),
+        })
+        .collect();
+    let mut files: Vec<(String, PathBuf)> = dir
+        .and_then(|dir| fs::read_dir(dir).ok())
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "toml" || !path.is_file() {
+                return None;
+            }
+            let id = path.file_stem()?.to_str()?.to_owned();
+            // `theme =` could not name it.
+            (!id.starts_with('.') && !config::is_theme_path(&id)).then_some((id, path))
+        })
+        .collect();
+    files.sort();
+    for (id, path) in files {
+        let theme = if ThemeName::from_id(&id).is_some() {
+            Err("named like a built-in theme, which wins".to_owned())
+        } else {
+            read(&path)
+        };
+        entries.push(Entry {
+            id,
+            source: Source::File(path),
+            theme,
+        });
+    }
+    if config::is_theme_path(current) && !entries.iter().any(|entry| entry.id == current) {
+        let path = PathBuf::from(current);
+        entries.push(Entry {
+            id: current.to_owned(),
+            theme: read(&path),
+            source: Source::File(path),
+        });
+    }
+    entries
 }
 
 fn file_of(dir: &Path, id: &str) -> PathBuf {
@@ -155,6 +243,39 @@ mod tests {
         fs::write(dir.join("bad.toml"), "[colors]\nfg = 1\n").unwrap();
         let err = format!("{:#}", load("bad", Some(&dir)).unwrap_err());
         assert!(err.contains("bad.toml") && err.contains("`fg`"), "{err}");
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_picker_offers_every_theme_file_and_says_what_is_wrong_with_one() {
+        let dir = scratch("scan");
+        fs::write(dir.join("zed.toml"), "").unwrap();
+        fs::write(dir.join("alpha.toml"), "[colors]\nfg = \"pink\"\n").unwrap();
+        fs::write(dir.join("dracula.toml"), "").unwrap();
+        fs::write(dir.join("notes.txt"), "").unwrap();
+        fs::write(dir.join(".hidden.toml"), "").unwrap();
+        let elsewhere = dir.join("elsewhere");
+        fs::create_dir(&elsewhere).unwrap();
+        let outside = elsewhere.join("outside.toml");
+        fs::write(&outside, "").unwrap();
+        let outside = outside.to_str().unwrap();
+
+        let entries = scan(Some(&dir), outside);
+        let builtins = ThemeName::ALL.len();
+        let ids: Vec<&str> = entries.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(&ids[..builtins], ThemeName::ALL.map(ThemeName::id));
+        assert_eq!(&ids[builtins..], ["alpha", "dracula", "zed", outside]);
+        let usable: Vec<bool> = entries[builtins..]
+            .iter()
+            .map(|e| e.theme.is_ok())
+            .collect();
+        // A broken file, and one named like a built-in theme, are offered
+        // but cannot be used.
+        assert_eq!(usable, [false, false, true, true]);
+        // The theme in use is not offered twice; without a directory there
+        // are the built-in themes alone.
+        assert_eq!(scan(Some(&dir), "zed").len(), builtins + 3);
+        assert_eq!(scan(None, "nord").len(), builtins);
         fs::remove_dir_all(&dir).unwrap();
     }
 }
