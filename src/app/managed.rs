@@ -27,6 +27,15 @@ pub enum CorePhase {
     Stopped,
 }
 
+/// Whether the kernel starts at login, and whether it can.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoginStart {
+    /// There is a systemd user manager to keep the unit.
+    pub supported: bool,
+    /// The unit is there.
+    pub enabled: bool,
+}
+
 /// News from the work the app spawned on the managed core.
 #[derive(Debug)]
 pub enum CoreEvent {
@@ -57,6 +66,10 @@ pub enum CoreEvent {
     Setcap(Result<Graphical, CoreError>),
     /// The capabilities are set and the kernel started again, or not.
     Authorized(Result<(), CoreError>),
+    /// Whether the kernel starts at login, as the unit file says.
+    LoginStart(LoginStart),
+    /// The `登录时启动` row ended: whether it is on now.
+    LoginStarted(Result<bool, CoreError>),
 }
 
 /// A toast about what failed: `what`, then what the managed core said.
@@ -151,6 +164,7 @@ impl App {
                 self.load_subscriptions();
                 self.say_tun_dropped();
                 self.check_authority();
+                self.check_login_start();
             }
             // Nothing downloaded yet: look up what there is to download, and
             // ask before downloading it.
@@ -188,6 +202,24 @@ impl App {
             }
             CoreEvent::Authority(_) | CoreEvent::Setcap(_) | CoreEvent::Authorized(_) => {
                 self.on_authorization(event);
+            }
+            CoreEvent::LoginStart(state) => self.login_start = Some(state),
+            CoreEvent::LoginStarted(result) => {
+                self.changing.remove(&Setting::LoginStart);
+                match result {
+                    Ok(on) => {
+                        if let Some(state) = &mut self.login_start {
+                            state.enabled = on;
+                        }
+                        let text = if on {
+                            "内核会在登录时启动"
+                        } else {
+                            "内核不再在登录时启动"
+                        };
+                        self.toast(ToastKind::Success, text.to_owned());
+                    }
+                    Err(err) => self.toast(ToastKind::Error, failure("设置失败", &err)),
+                }
             }
             CoreEvent::Regenerated(Ok(())) => {
                 // The reload itself is the one every other kernel has.
@@ -380,6 +412,33 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Asks whether the kernel starts at login.
+    pub(super) fn check_login_start(&self) {
+        self.spawn_core(|core, _| async move {
+            CoreEvent::LoginStart(LoginStart {
+                supported: core.supports_login_start().await,
+                enabled: core.login_start_enabled(),
+            })
+        });
+    }
+
+    /// `登录时启动`: turns it on or off. Turning it on restarts the kernel
+    /// as the unit, which takes about a second.
+    pub(super) fn toggle_login_start(&mut self) {
+        let Some(state) = self.login_start else {
+            return;
+        };
+        if self.changing.contains_key(&Setting::LoginStart) {
+            return;
+        }
+        let on = !state.enabled;
+        self.changing.insert(Setting::LoginStart, Stage::Sending);
+        self.dirty = true;
+        self.spawn_core(move |core, _| async move {
+            CoreEvent::LoginStarted(core.set_login_start(on).await.map(|()| on))
+        });
     }
 
     /// Asks the kernel's file what it may do.

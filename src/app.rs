@@ -46,7 +46,7 @@ use crate::{
 mod managed;
 mod subscriptions;
 
-pub use managed::{CoreEvent, CorePhase};
+pub use managed::{CoreEvent, CorePhase, LoginStart};
 pub use subscriptions::{SubEvent, SubscriptionsView};
 
 /// The eight top-level pages, in tab order.
@@ -1816,13 +1816,15 @@ pub enum Setting {
     CoreBinary,
     /// Upgrades the managed core's kernel.
     UpgradeCore,
+    /// Starts the managed core when the user logs in.
+    LoginStart,
     /// Stops the managed core.
     StopCore,
 }
 
 impl Setting {
     /// Top to bottom, as the page lists them.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Mode,
         Self::AllowLan,
         Self::LogLevel,
@@ -1840,6 +1842,7 @@ impl Setting {
         Self::Upgrade,
         Self::CoreBinary,
         Self::UpgradeCore,
+        Self::LoginStart,
         Self::StopCore,
     ];
 
@@ -1852,7 +1855,7 @@ impl Setting {
             Self::Reload | Self::FlushFakeIp | Self::UpdateGeo | Self::Restart | Self::Upgrade => {
                 "维护"
             }
-            Self::CoreBinary | Self::UpgradeCore | Self::StopCore => "托管内核",
+            Self::CoreBinary | Self::UpgradeCore | Self::LoginStart | Self::StopCore => "托管内核",
         }
     }
 
@@ -1869,6 +1872,7 @@ impl Setting {
             Self::UpdateGeo => "更新 GeoData",
             Self::Restart => "重启内核",
             Self::StopCore => "停止内核",
+            Self::LoginStart => "登录时启动",
             Self::CoreBinary => "内核",
             Self::Upgrade | Self::UpgradeCore => "升级内核",
         }
@@ -1900,7 +1904,10 @@ impl Setting {
 
     /// Only a managed core has it.
     fn managed_only(self) -> bool {
-        matches!(self, Self::CoreBinary | Self::UpgradeCore | Self::StopCore)
+        matches!(
+            self,
+            Self::CoreBinary | Self::UpgradeCore | Self::LoginStart | Self::StopCore
+        )
     }
 
     /// Only an external controller has it: tabby upgrades a managed core
@@ -1923,6 +1930,8 @@ pub enum Gate {
     SelfManaged,
     /// A managed core listens on its Mixed port alone.
     MixedOnly,
+    /// The login start is a unit of the systemd user manager.
+    NeedsSystemd,
 }
 
 /// A change to the running configuration, sent as `PATCH /configs`.
@@ -2190,6 +2199,9 @@ pub struct App {
     /// Whether the managed kernel's file has the capabilities TUN needs, as
     /// last looked; `None` until it was.
     pub tun_authorized: Option<bool>,
+    /// Whether the managed kernel starts at login, as last looked; `None`
+    /// until it was.
+    pub login_start: Option<LoginStart>,
     /// The managed core, while `sudo` has to be run on the terminal, which
     /// only the main loop can give.
     suspend: Option<std::sync::Arc<ManagedCore>>,
@@ -2332,6 +2344,7 @@ impl App {
             outbox,
             core_phase,
             tun_authorized: None,
+            login_start: None,
             suspend: None,
             profile_cursor: profiles.current,
             profiles,
@@ -3408,6 +3421,10 @@ impl App {
         {
             return Gate::SelfManaged;
         }
+        if setting == Setting::LoginStart && self.login_start.is_some_and(|state| !state.supported)
+        {
+            return Gate::NeedsSystemd;
+        }
         // One port is enough for a kernel the user does not run by hand.
         if self.is_managed() && matches!(setting, Setting::Port(port) if port != Port::Mixed) {
             return Gate::MixedOnly;
@@ -3426,6 +3443,7 @@ impl App {
             | Setting::Upgrade
             | Setting::StopCore
             | Setting::CoreBinary
+            | Setting::LoginStart
             | Setting::UpgradeCore => true,
         };
         match (reported, clash) {
@@ -3459,6 +3477,7 @@ impl App {
             | Setting::Port(_)
             | Setting::StopCore
             | Setting::CoreBinary
+            | Setting::LoginStart
             | Setting::UpgradeCore => None,
             Setting::AllowLan => Some(Change::Patch(Patch::AllowLan(flip(configs.allow_lan)))),
             Setting::LogLevel => Some(Change::Patch(Patch::LogLevel(next_kernel_log_level(
@@ -3495,6 +3514,10 @@ impl App {
                 self.toast(ToastKind::Error, "需要 mihomo".to_owned());
                 return;
             }
+            Gate::NeedsSystemd => {
+                self.toast(ToastKind::Error, "登录时启动需要 systemd".to_owned());
+                return;
+            }
             Gate::Missing => {
                 self.toast(ToastKind::Error, "内核没有提供这一项".to_owned());
                 return;
@@ -3502,6 +3525,7 @@ impl App {
         }
         match (setting, change) {
             (Setting::StopCore, _) => self.ask_stop_core(),
+            (Setting::LoginStart, _) => self.toggle_login_start(),
             // The kernel needs the capabilities before it can run a TUN.
             (Setting::Tun, Some(change @ Change::Patch(Patch::Tun(true)))) if self.is_managed() => {
                 self.ask_enable_tun(change);
@@ -9161,7 +9185,10 @@ secret = "b-secret"
             .filter(|setting| {
                 !matches!(
                     setting,
-                    Setting::CoreBinary | Setting::UpgradeCore | Setting::StopCore
+                    Setting::CoreBinary
+                        | Setting::UpgradeCore
+                        | Setting::LoginStart
+                        | Setting::StopCore
                 )
             })
             .collect();
@@ -10411,6 +10438,76 @@ secret = "b-secret"
         key_press(&mut app, KeyCode::Char('j'));
         key_press(&mut app, KeyCode::Char('t'));
         assert!(toasted(&app, "文件订阅不自动更新"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_login_start_row_writes_the_unit_and_takes_it_away_again() {
+        let dir = testing::scratch("app-login");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_settings_on(core, Setting::LoginStart).await;
+        pump_until(&mut app, &mut rx, |app| app.login_start.is_some()).await;
+        assert_eq!(
+            app.login_start,
+            Some(LoginStart {
+                supported: true,
+                enabled: false
+            })
+        );
+        let screen = draw(&app);
+        assert!(
+            screen.lines().any(|line| line.contains("登录时启动")),
+            "{screen}"
+        );
+        let unit = dir.join(format!("units/{}.service", testing::UNIT));
+
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| {
+            !app.is_changing(Setting::LoginStart)
+        })
+        .await;
+        assert!(unit.exists());
+        assert!(app.login_start.is_some_and(|state| state.enabled));
+        assert!(toasted(&app, "内核会在登录时启动"), "{:?}", app.toasts);
+
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| {
+            !app.is_changing(Setting::LoginStart)
+        })
+        .await;
+        assert!(!unit.exists());
+        assert!(app.login_start.is_some_and(|state| !state.enabled));
+        assert!(toasted(&app, "内核不再在登录时启动"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_login_start_row_is_greyed_without_a_user_manager_and_writes_nothing() {
+        let dir = testing::scratch("app-login-grey");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_settings_on(core, Setting::LoginStart).await;
+        pump_until(&mut app, &mut rx, |app| app.login_start.is_some()).await;
+        app.login_start = Some(LoginStart {
+            supported: false,
+            enabled: false,
+        });
+        let screen = draw(&app);
+        assert!(
+            screen
+                .lines()
+                .any(|line| line.contains("登录时启动") && line.contains("需要 systemd")),
+            "{screen}"
+        );
+
+        key_press(&mut app, KeyCode::Enter);
+
+        assert!(toasted(&app, "登录时启动需要 systemd"), "{:?}", app.toasts);
+        assert!(!app.is_changing(Setting::LoginStart));
+        assert!(!dir.join("units").exists());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

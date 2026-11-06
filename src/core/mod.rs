@@ -4,6 +4,7 @@
 //! Everything that touches the system goes through [`Runner`], so the
 //! decisions made here can be tested without systemd.
 
+mod autostart;
 mod files;
 mod install;
 mod privilege;
@@ -114,6 +115,7 @@ pub enum Action {
     Install,
     Validate,
     Authorize,
+    Autostart,
 }
 
 impl std::fmt::Display for Action {
@@ -125,6 +127,7 @@ impl std::fmt::Display for Action {
             Self::Stop => "stop the kernel",
             Self::Validate => "check the subscription",
             Self::Authorize => "authorize the kernel",
+            Self::Autostart => "set up the start at login",
         })
     }
 }
@@ -170,6 +173,10 @@ pub enum CoreError {
     /// kept.
     #[error("{} is gone", .0.display())]
     SourceGone(PathBuf),
+    /// There is no systemd user manager (or home directory) to keep a unit
+    /// in.
+    #[error("the start at login needs the systemd user manager")]
+    NeedsSystemd,
     /// The release list could not be read.
     #[error("cannot look up the latest kernel: {0}")]
     Release(String),
@@ -240,6 +247,8 @@ pub struct ManagedCore {
     tun_dropped: AtomicBool,
     /// Where the mounts are listed (`/proc/self/mountinfo`).
     mountinfo: PathBuf,
+    /// Where the systemd user manager keeps the units of the user.
+    unit_dir: Option<PathBuf>,
 }
 
 impl ManagedCore {
@@ -294,6 +303,8 @@ impl ManagedCore {
             delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
             tun_dropped: AtomicBool::new(false),
             mountinfo: PathBuf::from("/proc/self/mountinfo"),
+            unit_dir: directories::BaseDirs::new()
+                .map(|dirs| dirs.config_dir().join("systemd").join("user")),
             timing: Timing {
                 ready: READY_TIMEOUT,
                 poll: READY_POLL,
@@ -321,12 +332,21 @@ impl ManagedCore {
 
     /// Writes a setting down, to be what the kernel is started with next
     /// time.
+    ///
+    /// The config file is made again too: a kernel started by the session
+    /// at login runs from it as it is, with no tabby to write it.
     pub fn persist(&self, change: Persist) -> Result<(), CoreError> {
-        let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
-        settings.set(change);
-        settings
-            .save(&self.paths.settings())
-            .map_err(|err| CoreError::io("cannot write settings.toml", err))
+        {
+            let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+            settings.set(change);
+            settings
+                .save(&self.paths.settings())
+                .map_err(|err| CoreError::io("cannot write settings.toml", err))?;
+        }
+        if self.paths.config().exists() {
+            self.write_config_for(&self.subscriptions()?)?;
+        }
+        Ok(())
     }
 
     /// Writes the kernel's config file again from the subscription in use

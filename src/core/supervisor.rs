@@ -87,7 +87,7 @@ impl ManagedCore {
 
     /// `exec`, turning a failure to run or a nonzero exit into an error that
     /// says what was being done.
-    async fn exec_checked(&self, action: Action, cmd: Cmd) -> Result<(), CoreError> {
+    pub(super) async fn exec_checked(&self, action: Action, cmd: Cmd) -> Result<(), CoreError> {
         let output = self.exec(cmd).await.map_err(|err| CoreError::Command {
             action,
             message: err.to_string(),
@@ -157,6 +157,14 @@ impl ManagedCore {
     /// Starts the kernel `binary`.
     pub(super) async fn launch(&self, binary: &Path) -> Result<(), CoreError> {
         match self.mode().await {
+            // Set to start at login: the unit is there to be started.
+            Mode::Systemd if self.login_start_enabled() => {
+                self.exec_checked(
+                    Action::Start,
+                    Cmd::new("systemctl", ["--user", "start", self.state.unit.as_str()]),
+                )
+                .await
+            }
             Mode::Systemd => {
                 let mut args = vec![
                     "--user".to_owned(),
@@ -185,7 +193,7 @@ impl ManagedCore {
     }
 
     /// The kernel's own command line, program first.
-    fn kernel_command(&self, binary: &Path) -> Vec<String> {
+    pub(super) fn kernel_command(&self, binary: &Path) -> Vec<String> {
         vec![
             binary.to_string_lossy().into_owned(),
             "-d".to_owned(),

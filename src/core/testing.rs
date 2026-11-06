@@ -162,6 +162,8 @@ fn core_in(
     .unwrap();
     // The mounts of the machine the tests run on are not what they are about.
     core.mountinfo = dir.join("mountinfo");
+    // Nor the units of whoever runs them.
+    core.unit_dir = Some(dir.join("units"));
     core.timing = Timing {
         ready: Duration::from_secs(3),
         poll: Duration::from_millis(20),
@@ -265,6 +267,16 @@ pub(crate) fn systemd(port: u16, delay: Duration) -> Arc<Recorder> {
         }
         _ => answer(0, ""),
     })
+}
+
+/// What `systemctl --user` was asked, without the `--user`, one string each.
+pub(crate) fn units_of(recorder: &Recorder) -> Vec<String> {
+    recorder
+        .calls()
+        .iter()
+        .filter(|cmd| cmd.program == "systemctl")
+        .map(|cmd| cmd.args[1..].join(" "))
+        .collect()
 }
 
 pub(crate) const TAG: &str = "v1.2.3";

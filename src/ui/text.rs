@@ -54,6 +54,7 @@ pub fn core_title(err: &CoreError) -> String {
             Action::Install => "无法安装内核",
             Action::Validate => "无法检查订阅",
             Action::Authorize => "无法授权内核",
+            Action::Autostart => "无法设置登录时启动",
         }
         .to_owned(),
         CoreError::Release(_) => "无法获取内核版本".to_owned(),
@@ -67,6 +68,7 @@ pub fn core_title(err: &CoreError) -> String {
         CoreError::NoSubscription => "找不到这个订阅".to_owned(),
         CoreError::ActiveSubscription => "正在使用的订阅不能删除".to_owned(),
         CoreError::SourceGone(_) => "订阅文件已不存在".to_owned(),
+        CoreError::NeedsSystemd => "登录时启动需要 systemd".to_owned(),
     }
 }
 
@@ -102,6 +104,7 @@ pub fn core_detail(err: &CoreError) -> Vec<String> {
             format!("原文件已不存在：{}", path.display()),
             "沿用已导入的内容".to_owned(),
         ],
+        CoreError::NeedsSystemd => vec!["需要 systemd".to_owned()],
     }
 }
 

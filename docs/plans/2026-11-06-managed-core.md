@@ -373,6 +373,13 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 7. `feat(core): start the managed core at login`
    - 范围：§9.1。
    - 验收：开启后单元文件存在并已 enable，`systemctl --user restart default.target` 之后内核在运行；关闭后单元文件不存在；后备模式下开关置灰。
+   - 实现记录（2026-11-06）：
+     - `src/core/autostart.rs`：`ManagedCore::set_login_start(on)`。开：写 `<config_dir>/systemd/user/<unit>.service`（`ExecStart` 与 §5.1 的 `systemd-run` 同一条命令，每个词加双引号并转义 `\`、`"`、`%`；`Restart=on-failure`、`RestartSec=2`、`WantedBy=default.target`），然后 `daemon-reload`、`enable`。关：`disable`、删文件、`daemon-reload`，正在跑的内核不动。有单元文件时 `launch()` 改用 `systemctl --user start <unit>`，不再 `systemd-run`（§5.1）。开关状态就是“单元文件在不在”，没有另存。后备模式（没有 systemd 用户管理器）返回 `CoreError::NeedsSystemd`，设置页该行置灰并写 `需要 systemd`。
+     - **实机发现并改正的顺序问题**：先 `daemon-reload`+`enable` 再换单元会失败，`Failed to enable unit: Unit …/transient/…service is transient or generated`——临时单元还加载着，同名的单元文件 enable 不了。所以正确顺序是：写文件 → 停掉临时单元 → `daemon-reload` → `enable` → `start` → 等控制器就绪（内核中断约 1 秒，方案本来就写了会停再起）。测试按这个顺序断言。
+     - **顺带的修正**：开机登录时是 systemd 直接拉起内核，没有 tabby 去重新生成 `config.yaml`，所以之前改的设置（端口、模式、DNS、TUN 等）只写进 `settings.toml` 的话登录后不生效。`ManagedCore::persist` 现在在 `config.yaml` 已存在时顺带重新生成它（还没跑过内核就不写；写之前先放开设置的锁，避免和 `write_config_for` 自己取锁死锁）。
+     - 设置页（托管内核组，`升级内核` 与 `停止内核` 之间）新增 `登录时启动` 开关，`Enter` 切换；状态在内核起来后读一次（`App.login_start`、`CoreEvent::LoginStart`），切换后 toast `内核会在登录时启动` / `内核不再在登录时启动`。`Setting::ALL` 变成 19 项。
+     - 测试：单元文件的完整内容、开/关的 `systemctl` 调用顺序、关两次不报错、后备模式不写任何文件、有单元文件时启动走 `systemctl start` 而不是 `systemd-run`、设置变更进入 `config.yaml`、设置页的开关与置灰。测试的单元目录是临时目录（`core.unit_dir`），不会写到用户的 `~/.config/systemd/user`。
+     - 手动验证（真 systemd 用户管理器，临时 `XDG_*`，把临时 `XDG_CONFIG_HOME/systemd` 软链到 `~/.config/systemd` 让管理器找得到单元；`~/.config/tabby` 没碰）：设置页 `登录时启动` 开 → 单元文件在、`UnitFileState=enabled`、`FragmentPath` 变成文件、内核换了新 PID 且 tabby 显示 `● 开`；`systemd-analyze --user verify` 通过；`systemctl --user stop` 内核后 `systemctl --user restart default.target`，内核自己起来了（`default.target` 没有任何反向依赖，restart 不会停掉用户自己的 frpc、rclone、pipewire-pulse，前后 PID 不变）；再关 → 文件和 `default.target.wants` 里的链接都没了，内核仍在运行。结束后 `~/.config/systemd/user` 里没有 tabby 的东西，临时单元已停。**没有验证**：真正的注销/登录（只用 `restart default.target` 代替）。
 8. `feat(core): set system proxy on gnome and kde`
    - 范围：§9.2。
    - 验收：用记录参数的 `Runner` 测 gsettings 和 kwriteconfig 的参数，以及关闭时的恢复；在 Hyprland 上开关置灰。没有 GNOME / KDE 环境时不做实机验证，在实现记录里写明。
