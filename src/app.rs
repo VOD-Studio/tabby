@@ -322,6 +322,20 @@ impl ConnectionSort {
         }
     }
 
+    /// The order a click on the heading of `column` asks for: that column
+    /// in its first direction, or, when the table already runs by it, the
+    /// other way round.
+    fn toward(self, column: SortColumn) -> Self {
+        if self.column == column {
+            self.reversed()
+        } else {
+            Self {
+                column,
+                ascending: column.ascending_first(),
+            }
+        }
+    }
+
     /// Orders two values in this direction. A missing value goes last
     /// either way: reversing the whole comparison would bring them to the
     /// top.
@@ -1299,6 +1313,12 @@ pub enum Action {
     /// Two quick left clicks on the same row: picks it, then does what
     /// `Enter` does there.
     Activate(Target),
+    /// A click on a column heading of the connections table: sorts by it,
+    /// or the other way round when it already does.
+    SortBy(SortColumn),
+    /// A click on a mode of the overview: asks the kernel for it, as `m`
+    /// does for the next one.
+    SetMode(Mode),
     /// A turn of the wheel over something that scrolls: one step of
     /// `Up` or `Down`.
     Wheel(Target, Move),
@@ -2379,26 +2399,19 @@ impl App {
             Action::Accept | Action::Cancel => {}
             Action::TestNode => self.test_node(),
             Action::TestGroup => self.test_group(),
-            Action::CycleSort => {
-                match self.page {
-                    Page::Proxies => {
-                        self.proxies_view.sort = self.proxies_view.sort.next();
-                        self.proxies_view.node = None;
-                    }
-                    Page::Connections => {
-                        let shown: Vec<SortColumn> = connections::sort_columns(self.size).collect();
-                        let view = &mut self.connections_view;
-                        view.set_sort(view.sort.next(&shown));
-                    }
-                    _ => {}
-                }
-                self.dirty = true;
-            }
+            Action::CycleSort => self.cycle_sort(),
             Action::ReverseSort => {
                 let view = &mut self.connections_view;
                 view.set_sort(view.sort.reversed());
                 self.dirty = true;
             }
+            Action::SortBy(column) => {
+                self.release_input();
+                let view = &mut self.connections_view;
+                view.set_sort(view.sort.toward(column));
+                self.dirty = true;
+            }
+            Action::SetMode(mode) => self.set_mode(mode),
             Action::TogglePause => self.toggle_pause(),
             Action::CycleLevel => self.cycle_level(),
             Action::ClearLogs => {
@@ -2466,6 +2479,18 @@ impl App {
     /// `m`: asks the kernel for the next mode and, once it agrees, fetches
     /// `/configs` to show what it really runs. An unknown mode goes to rule.
     fn cycle_mode(&mut self) {
+        self.change_mode(None);
+    }
+
+    /// A click on a mode: the same request as `m`, for that mode. The one
+    /// the kernel already runs is left alone.
+    fn set_mode(&mut self, mode: Mode) {
+        self.release_input();
+        self.change_mode(Some(mode));
+    }
+
+    /// Asks the kernel for `wanted`, or for the mode after the current one.
+    fn change_mode(&mut self, wanted: Option<Mode>) {
         if self.changing.contains_key(&Setting::Mode) {
             return;
         }
@@ -2473,8 +2498,30 @@ impl App {
             self.toast(ToastKind::Error, "尚未获取到当前模式".to_owned());
             return;
         };
-        let target = configs.mode().map_or(Mode::Rule, Mode::next);
+        let current = configs.mode();
+        if wanted.is_some() && wanted == current {
+            return;
+        }
+        let target = wanted.unwrap_or_else(|| current.map_or(Mode::Rule, Mode::next));
         self.send_change(Change::Patch(Patch::Mode(target)));
+    }
+
+    /// `s`: the next ordering of the proxies' nodes, or the next column the
+    /// connections are sorted by.
+    fn cycle_sort(&mut self) {
+        match self.page {
+            Page::Proxies => {
+                self.proxies_view.sort = self.proxies_view.sort.next();
+                self.proxies_view.node = None;
+            }
+            Page::Connections => {
+                let shown: Vec<SortColumn> = connections::sort_columns(self.size).collect();
+                let view = &mut self.connections_view;
+                view.set_sort(view.sort.next(&shown));
+            }
+            _ => {}
+        }
+        self.dirty = true;
     }
 
     /// Keeps the group cursor sensible when the mode change added or removed
@@ -2769,7 +2816,12 @@ impl App {
             return Some(Action::Activate(target));
         }
         self.last_click = Some((target.clone(), now));
-        Some(Action::Pick(target))
+        // These two are not a cursor move but a change of order or mode.
+        Some(match target {
+            Target::Column(column) => Action::SortBy(column),
+            Target::Mode(mode) => Action::SetMode(mode),
+            target => Action::Pick(target),
+        })
     }
 
     /// A click on `target`: puts the cursor on it, or opens what it opens.
@@ -2853,7 +2905,9 @@ impl App {
                 self.settings_view.cursor = index;
                 true
             }
-            Target::Pane(_)
+            Target::Column(_)
+            | Target::Mode(_)
+            | Target::Pane(_)
             | Target::List
             | Target::Backdrop
             | Target::Popup
@@ -8461,5 +8515,105 @@ secret = "b-secret"
         double_click(&mut app, x, y);
         assert_eq!(app.overlay, None);
         assert_eq!(app.settings.theme, "nord");
+    }
+
+    /// The connections page of `size` with some connections in it.
+    fn connections_page(size: Size) -> App {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        app.size = size;
+        feed(
+            &mut app,
+            vec![
+                flow("a", "1", 5, 0),
+                flow("b", "2", 9, 0),
+                flow("c", "3", 1, 0),
+            ],
+        );
+        app
+    }
+
+    #[tokio::test]
+    async fn a_click_on_a_heading_sorts_by_it_and_a_second_one_turns_the_order() {
+        let mut app = connections_page(Size::new(120, 30));
+        let sort = |app: &App| {
+            (
+                app.connections_view.sort.column,
+                app.connections_view.sort.ascending,
+            )
+        };
+        assert_eq!(sort(&app), (SortColumn::Duration, true));
+        let screen = draw(&app);
+        let (x, y) = locate(&screen, "上行", 0..120);
+        click(&mut app, x, y);
+        // Traffic: the most first.
+        assert_eq!(sort(&app), (SortColumn::Up, false));
+        assert!(draw(&app).contains("上行 ▼"));
+        click(&mut app, x, y);
+        assert_eq!(sort(&app), (SortColumn::Up, true));
+        assert!(draw(&app).contains("上行 ▲"));
+        // Names: A to Z first.
+        let (x, y) = locate(&screen, "主机", 0..120);
+        click(&mut app, x, y);
+        assert_eq!(sort(&app), (SortColumn::Host, true));
+        // The route has nothing to sort by.
+        let (x, y) = locate(&screen, "规则 → 链路", 0..120);
+        click(&mut app, x, y);
+        assert_eq!(sort(&app), (SortColumn::Host, true));
+
+        // The rows follow: by size, the biggest first, then the smallest.
+        let (x, y) = locate(&screen, "总量", 0..120);
+        click(&mut app, x, y);
+        assert_eq!(sort(&app), (SortColumn::Total, false));
+        assert_eq!(table_ids(&app), ["b", "a", "c"]);
+        click(&mut app, x, y);
+        assert_eq!(table_ids(&app), ["c", "a", "b"]);
+    }
+
+    #[tokio::test]
+    async fn a_compact_table_has_no_heading_for_the_columns_it_drops() {
+        let mut app = connections_page(Size::new(60, 20));
+        let screen = draw(&app);
+        for hidden in ["进程", "总量"] {
+            assert!(!screen.contains(hidden), "{screen}");
+        }
+        let (x, y) = locate(&screen, "时长", 0..60);
+        click(&mut app, x, y);
+        // The one that stays: shortest first is what it opens with, so
+        // this is the other way round.
+        assert_eq!(
+            (
+                app.connections_view.sort.column,
+                app.connections_view.sort.ascending
+            ),
+            (SortColumn::Duration, false)
+        );
+        // A click on a heading takes the keyboard from the filter.
+        key_press(&mut app, KeyCode::Char('/'));
+        assert!(app.typing());
+        draw(&app);
+        let (x, y) = locate(&screen, "下行", 0..60);
+        click(&mut app, x, y);
+        assert!(!app.typing());
+        assert_eq!(app.connections_view.sort.column, SortColumn::Down);
+    }
+
+    #[tokio::test]
+    async fn a_click_on_a_mode_asks_the_kernel_for_it_and_the_one_in_use_asks_nothing() {
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, r#"{"mode":"rule"}"#);
+        app.page = Page::Overview;
+        let screen = draw(&app);
+        // The mode in use.
+        let (x, y) = locate(&screen, "规则", 0..120);
+        click(&mut app, x, y);
+        assert!(!app.is_changing(Setting::Mode));
+        let (x, y) = locate(&screen, "全局", 0..120);
+        click(&mut app, x, y);
+        assert!(app.is_changing(Setting::Mode));
+        // Until the kernel agrees the mode on screen is the old one, and a
+        // second click waits for the first.
+        click(&mut app, x, y);
+        assert!(app.is_changing(Setting::Mode));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 1));
     }
 }

@@ -142,6 +142,34 @@ fn columns(inner: Rect, shown: &[Column]) -> Vec<(Column, usize)> {
         .collect()
 }
 
+/// What the mouse can act on in the table inside `inner`: each of the rows
+/// of `window`, and the headings that sort. The route does not sort.
+fn register_hits(
+    app: &App,
+    inner: Rect,
+    columns: &[(Column, usize)],
+    visible: &[&ConnectionRow],
+    window: std::ops::Range<usize>,
+) {
+    // The header is the table's first row.
+    for (offset, index) in window.enumerate() {
+        let y = inner.y + 1 + u16::try_from(offset).unwrap_or(0);
+        app.hits.add(
+            Rect::new(inner.x, y, inner.width, 1),
+            Target::Connection(visible[index].connection.id.clone()),
+        );
+    }
+    let mut x = inner.x;
+    for &(column, width) in columns {
+        let width = u16::try_from(width).unwrap_or(u16::MAX);
+        if let Some(sort) = column.sort_column() {
+            app.hits
+                .add(Rect::new(x, inner.y, width, 1), Target::Column(sort));
+        }
+        x = x.saturating_add(width).saturating_add(SPACING);
+    }
+}
+
 /// The connections page: one panel holding the live table.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
@@ -206,14 +234,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let columns = columns(inner, shown(app.size));
     let cursor = view.cursor.min(visible.len() - 1);
     let window = view.scroll.window(cursor, visible.len(), capacity(area));
-    // The header is the table's first row.
-    for (offset, index) in window.clone().enumerate() {
-        let y = inner.y + 1 + u16::try_from(offset).unwrap_or(0);
-        app.hits.add(
-            Rect::new(inner.x, y, inner.width, 1),
-            Target::Connection(visible[index].connection.id.clone()),
-        );
-    }
+    register_hits(app, inner, &columns, &visible, window.clone());
 
     let header = Row::new(
         columns

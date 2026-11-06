@@ -2,7 +2,10 @@ use std::cell::RefCell;
 
 use ratatui::layout::{Position, Rect};
 
-use crate::app::{Page, Pane, ProviderRef, Setting};
+use crate::{
+    api::models::Mode,
+    app::{Page, Pane, ProviderRef, Setting, SortColumn},
+};
 
 /// What a place on the screen stands for when the mouse acts on it.
 ///
@@ -39,6 +42,10 @@ pub enum Target {
     Profile(usize),
     /// A row of the theme picker, by index.
     Theme(usize),
+    /// A heading of the connections table that sorts it.
+    Column(SortColumn),
+    /// One of the overview's modes.
+    Mode(Mode),
 }
 
 impl Target {

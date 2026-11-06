@@ -17,7 +17,7 @@ use crate::{
     api::models::{Configs, ConnectionStats, CoreKind, Mode, Traffic},
     app::{App, TRAFFIC_HISTORY},
     format,
-    ui::{components::title::titled, theme::Theme},
+    ui::{components::title::titled, hit::Target, theme::Theme},
 };
 
 /// Rows of the mode panel: two borders and a three-row pill.
@@ -210,6 +210,7 @@ fn render_mode(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
         .split(inner);
     for (mode, slot) in Mode::ALL.into_iter().zip(slots.iter()) {
         let mark = (current == Some(mode)).then_some(app.icons.dot);
+        app.hits.add(*slot, Target::Mode(mode));
         render_pill(frame, *slot, theme, mode, mark);
     }
 }
