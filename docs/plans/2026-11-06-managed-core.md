@@ -319,6 +319,15 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 2. `feat(core): download and update mihomo releases`
    - 范围：§6 的全部内容；设置页“托管内核”组里的路径、版本和 `升级内核`。
    - 验收：干净的数据目录里确认下载后能启动；篡改 `digest` 时拒绝并保留旧文件；已是最新时提示 `已是最新`；`[core].binary` 已设置时 `升级内核` 置灰。
+   - 实现记录（2026-11-06）：
+     - `src/core/install.rs`：`latest`（读 release）、`choose`（按 `/proc/cpuinfo` 的 x86-64 等级与架构选资产，只认 `mihomo-linux-amd64-v{3,2,1}-<tag>.gz` 与 `mihomo-linux-arm64-<tag>.gz`，不会误选 `-go123-` 之类的变体）、`download`（边下载边算 sha256，不符就删文件）、`unpack`、`version_of`；`ManagedCore::{latest_release, install, check_upgrade, installed_version}`。核对过 v1.19.33 的资产清单：arm64 的文件名确实是 `mihomo-linux-arm64-<tag>.gz`。
+     - 没有 `digest` 的资产一律拒绝（`内核校验失败`），不退而求其次。解压出的 `mihomo.new` 要运行 `-v` 并且版本等于 release 的 `tag_name` 才会 `rename` 替换；任何一步失败，旧文件原样保留，`mihomo.gz.part` 和 `mihomo.new` 都清掉。
+     - 网络：托管内核在运行时先经它的 mixed-port 访问，失败再直连；没运行时直连。reqwest 没开 `system-proxy`，`http()` 里 `no_proxy()` 后按需加 `Proxy`。校验失败不会换路再试（文件到了但不对，换路没用）。
+     - `ManagedCore::binary()` 不再在 `PATH` 里找 `mihomo`：`[core].binary` 或 `<data>/core/bin/mihomo`。用系统里的 mihomo 要写 `[core].binary = "/usr/bin/mihomo"`。
+     - 界面：没有内核时 `Started(Err(NoBinary { path: None }))` → 查最新 release → 错误页（`没有找到 mihomo`）上弹 `下载 mihomo <tag>？`；`y` 下载、安装并启动，`n` 留在错误页，`r` 再问。下载中转圈写 `正在下载内核… 45%`，解压和自检时写 `正在安装内核…`。release 查不到时错误页写出 GitHub 的原话（比如限流）并提示可以设 `[core].binary`。
+     - 设置页的“托管内核”组现在是 `内核`（版本与路径，只读）、`升级内核`、`停止内核`；托管模式下不再列内核自己的 `升级内核`（`POST /upgrade`），外部控制器模式不变。`升级内核` 先问 GitHub：已是最新 → toast `已是最新（<tag>）`；否则问 `升级内核到 <tag>？内核会重启。`，确认后下载、替换，再 `ManagedCore::restart`。`[core].binary` 已设置时这一行的值是 `由你自己管理`，按 `Enter` 只给提示。
+     - 手动验证（临时 `XDG_*`，真实的 api.github.com，直连）：数据目录里没有内核时弹出 `下载 mihomo v1.19.33？`，确认后下载 22 MB 的 `.gz`、解出 62 MB 的二进制，启动后顶栏是 `mihomo v1.19.33 · 托管`；设置页 `升级内核` 给出 `已是最新（v1.19.33）`；`[core].binary` 指向自己的二进制时这一行显示 `由你自己管理`。篡改 `digest`、`-v` 版本不符、没有摘要、限流这几种失败只在 wiremock 测试里覆盖（真实的 GitHub 不会给出篡改的摘要）。
+     - 未认证的 GitHub API 每小时 60 次，开发时反复查询会被限流（本次开发中遇到一次），生产里一次安装只查一次。
 3. `feat(subscriptions): import, switch and update subscriptions`
    - 范围：§7.1（自动更新除外）、§7.2 的运行配置生成（覆盖块先只含必需的键）、订阅页。
    - 验收：导入 URL（名字取自 `content-disposition`，用量与到期时间显示正确）、导入文件、导入 base64 分享链接列表（节点在代理页的 provider 里，可以测速和选择）；切换后代理页和规则页变成新订阅的内容；更新失败时旧内容保留；当前订阅不能删除。

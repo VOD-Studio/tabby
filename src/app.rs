@@ -26,6 +26,7 @@ use crate::{
         stream::{Event as StreamEvent, Stream, Streams},
     },
     config::{self, Origin, Profiles, Settings},
+    core::Release,
     format::natural_cmp,
     themes::{self, Entry, Picker},
     ui::{
@@ -1621,6 +1622,12 @@ pub enum Confirm {
     Change(Change),
     /// `停止内核` on the settings page.
     StopCore,
+    /// The kernel to download, on first start (`upgrade` false) or as an
+    /// upgrade of the installed one.
+    InstallCore {
+        release: Release,
+        upgrade: bool,
+    },
 }
 
 impl Confirm {
@@ -1629,6 +1636,8 @@ impl Confirm {
             Self::CloseConnections(_) => "关闭连接",
             Self::UpdateProviders { .. } => "更新 Provider",
             Self::StopCore => "停止内核",
+            Self::InstallCore { upgrade: true, .. } => "升级内核",
+            Self::InstallCore { .. } => "下载内核",
             Self::Change(change) => change.title(),
         }
     }
@@ -1646,6 +1655,11 @@ impl Confirm {
                 format!("更新匹配「{filter}」的 {} 个 provider？", targets.len())
             }
             Self::StopCore => "停止托管内核？经由它的连接都会断开。".to_owned(),
+            Self::InstallCore {
+                release,
+                upgrade: true,
+            } => format!("升级内核到 {}？内核会重启。", release.tag),
+            Self::InstallCore { release, .. } => format!("下载 mihomo {}？", release.tag),
             Self::Change(change) => change.question().to_owned(),
         }
     }
@@ -1656,6 +1670,8 @@ impl Confirm {
             Self::CloseConnections(_) => "确认",
             Self::UpdateProviders { .. } => "更新",
             Self::StopCore => "停止",
+            Self::InstallCore { upgrade: true, .. } => "升级",
+            Self::InstallCore { .. } => "下载",
             Self::Change(change) => change.verb(),
         }
     }
@@ -1722,13 +1738,17 @@ pub enum Setting {
     UpdateGeo,
     Restart,
     Upgrade,
+    /// The managed core's kernel, as a line of information.
+    CoreBinary,
+    /// Upgrades the managed core's kernel.
+    UpgradeCore,
     /// Stops the managed core.
     StopCore,
 }
 
 impl Setting {
     /// Top to bottom, as the page lists them.
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 18] = [
         Self::Mode,
         Self::AllowLan,
         Self::LogLevel,
@@ -1744,6 +1764,8 @@ impl Setting {
         Self::UpdateGeo,
         Self::Restart,
         Self::Upgrade,
+        Self::CoreBinary,
+        Self::UpgradeCore,
         Self::StopCore,
     ];
 
@@ -1756,7 +1778,7 @@ impl Setting {
             Self::Reload | Self::FlushFakeIp | Self::UpdateGeo | Self::Restart | Self::Upgrade => {
                 "维护"
             }
-            Self::StopCore => "托管内核",
+            Self::CoreBinary | Self::UpgradeCore | Self::StopCore => "托管内核",
         }
     }
 
@@ -1772,8 +1794,9 @@ impl Setting {
             Self::FlushFakeIp => "刷新 FakeIP",
             Self::UpdateGeo => "更新 GeoData",
             Self::Restart => "重启内核",
-            Self::Upgrade => "升级内核",
             Self::StopCore => "停止内核",
+            Self::CoreBinary => "内核",
+            Self::Upgrade | Self::UpgradeCore => "升级内核",
         }
     }
 
@@ -1803,7 +1826,13 @@ impl Setting {
 
     /// Only a managed core has it.
     fn managed_only(self) -> bool {
-        matches!(self, Self::StopCore)
+        matches!(self, Self::CoreBinary | Self::UpgradeCore | Self::StopCore)
+    }
+
+    /// Only an external controller has it: tabby upgrades a managed core
+    /// itself, not through the kernel's own `/upgrade`.
+    fn external_only(self) -> bool {
+        matches!(self, Self::Upgrade)
     }
 }
 
@@ -1816,6 +1845,8 @@ pub enum Gate {
     Missing,
     /// Original Clash, which does not have it.
     NeedsMihomo,
+    /// The kernel is the user's own binary: tabby does not replace it.
+    SelfManaged,
 }
 
 /// A change to the running configuration, sent as `PATCH /configs`.
@@ -3224,6 +3255,13 @@ impl App {
         if clash && setting.mihomo_only() {
             return Gate::NeedsMihomo;
         }
+        if setting == Setting::UpgradeCore
+            && self
+                .managed_core()
+                .is_some_and(|core| core.is_user_binary())
+        {
+            return Gate::SelfManaged;
+        }
         let reported = match setting {
             Setting::AllowLan => configs.allow_lan.is_some(),
             Setting::LogLevel => !configs.log_level.is_empty(),
@@ -3236,7 +3274,9 @@ impl App {
             | Setting::UpdateGeo
             | Setting::Restart
             | Setting::Upgrade
-            | Setting::StopCore => true,
+            | Setting::StopCore
+            | Setting::CoreBinary
+            | Setting::UpgradeCore => true,
         };
         match (reported, clash) {
             (true, _) => Gate::Open,
@@ -3265,7 +3305,11 @@ impl App {
         let gate = self.gate(setting, configs);
         let flip = |on: Option<bool>| !on.unwrap_or_default();
         let change = match setting {
-            Setting::Mode | Setting::Port(_) | Setting::StopCore => None,
+            Setting::Mode
+            | Setting::Port(_)
+            | Setting::StopCore
+            | Setting::CoreBinary
+            | Setting::UpgradeCore => None,
             Setting::AllowLan => Some(Change::Patch(Patch::AllowLan(flip(configs.allow_lan)))),
             Setting::LogLevel => Some(Change::Patch(Patch::LogLevel(next_kernel_log_level(
                 &configs.log_level,
@@ -3286,6 +3330,13 @@ impl App {
         };
         match gate {
             Gate::Open => {}
+            Gate::SelfManaged => {
+                self.toast(
+                    ToastKind::Error,
+                    "内核由你自己管理，tabby 不更新它".to_owned(),
+                );
+                return;
+            }
             Gate::NeedsMihomo => {
                 self.toast(ToastKind::Error, "需要 mihomo".to_owned());
                 return;
@@ -3297,6 +3348,8 @@ impl App {
         }
         match (setting, change) {
             (Setting::StopCore, _) => self.ask_stop_core(),
+            (Setting::CoreBinary, _) => {}
+            (Setting::UpgradeCore, _) => self.check_upgrade(),
             (Setting::Mode, _) => self.cycle_mode(),
             (Setting::Port(port), _) => {
                 // Off is typed as nothing rather than as a 0 to delete first.
@@ -3572,6 +3625,13 @@ impl App {
             Confirm::UpdateProviders { targets, .. } => self.update_providers(targets),
             Confirm::Change(change) => self.send_change(change),
             Confirm::StopCore => self.stop_core(),
+            Confirm::InstallCore { release, upgrade } => {
+                if upgrade {
+                    self.upgrade_core(release);
+                } else {
+                    self.install_core(release);
+                }
+            }
         }
     }
 
@@ -4613,7 +4673,7 @@ fn healthcheck_timeout(delay_timeout_ms: u32) -> Duration {
 mod tests {
     use super::*;
     use crate::api::models::{Connection, ConnectionSnapshot, Memory};
-    use crate::core::{ManagedCore, testing};
+    use crate::core::{ManagedCore, Step, testing};
     use std::sync::Arc;
 
     /// 10 cards, 3 per row: the last row holds only card 9.
@@ -8919,7 +8979,16 @@ secret = "b-secret"
     #[tokio::test]
     async fn only_a_managed_connection_lists_the_managed_cores_settings() {
         let (external, _rx) = app_without_controller();
-        assert_eq!(external.settings(), &Setting::ALL[..Setting::ALL.len() - 1]);
+        let expected: Vec<Setting> = Setting::ALL
+            .into_iter()
+            .filter(|setting| {
+                !matches!(
+                    setting,
+                    Setting::CoreBinary | Setting::UpgradeCore | Setting::StopCore
+                )
+            })
+            .collect();
+        assert_eq!(external.settings(), expected);
 
         let dir = testing::scratch("app-rows");
         let recorder = testing::systemd(testing::free_port(), Duration::ZERO);
@@ -8930,7 +8999,12 @@ secret = "b-secret"
             true,
         ));
         let (managed, _rx) = managed_app(core);
-        assert_eq!(managed.settings(), Setting::ALL);
+        // The kernel's own `/upgrade` gives way to the managed core's upgrade.
+        let expected: Vec<Setting> = Setting::ALL
+            .into_iter()
+            .filter(|setting| *setting != Setting::Upgrade)
+            .collect();
+        assert_eq!(managed.settings(), expected);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -8983,6 +9057,277 @@ secret = "b-secret"
                 .count(),
             0
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A user manager that starts the unit when asked, after which the
+    /// kernel answers on `port`; with `running`, it already does. `-v` of
+    /// the downloaded `mihomo.new` says v1.2.3, `-v` of the kernel in use
+    /// says `installed`.
+    fn updating_systemd(
+        port: u16,
+        running: bool,
+        installed: &'static str,
+    ) -> Arc<testing::Recorder> {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        if running {
+            testing::serve(port, testing::Reply::Mihomo, Duration::ZERO);
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        let started = AtomicBool::new(running);
+        testing::Recorder::new(move |cmd| {
+            if cmd.args == ["-v"] {
+                let said = if cmd.program.ends_with("mihomo.new") {
+                    "Mihomo Meta v1.2.3 linux amd64\n"
+                } else {
+                    installed
+                };
+                return testing::answer(0, said);
+            }
+            match (cmd.program.as_str(), cmd.args.get(1).map(String::as_str)) {
+                ("systemd-run", _) => {
+                    testing::serve(port, testing::Reply::Mihomo, Duration::ZERO);
+                    started.store(true, Ordering::SeqCst);
+                    testing::answer(0, "")
+                }
+                ("systemctl", Some("is-active")) => {
+                    if started.load(Ordering::SeqCst) {
+                        testing::answer(0, "active\n")
+                    } else {
+                        testing::answer(3, "inactive\n")
+                    }
+                }
+                _ => testing::answer(0, ""),
+            }
+        })
+    }
+
+    /// A release server whose download matches its digest.
+    async fn honest_server() -> wiremock::MockServer {
+        let packed = testing::gzip(testing::KERNEL);
+        testing::release_server(Some(format!("sha256:{}", testing::sha256(&packed))), packed).await
+    }
+
+    #[tokio::test]
+    async fn a_missing_kernel_is_downloaded_after_the_question_and_then_started() {
+        let dir = testing::scratch("app-download");
+        let port = testing::free_port();
+        let server = honest_server().await;
+        let recorder = updating_systemd(port, false, "");
+        let core = Arc::new(testing::core_downloading(
+            &dir,
+            port,
+            &recorder,
+            &server.uri(),
+        ));
+        let (mut app, mut rx) = managed_app(core);
+
+        app.start();
+        pump_until(&mut app, &mut rx, |app| app.pending.is_some()).await;
+        // The question is over the page that says there is no kernel.
+        let screen = draw(&app);
+        assert!(matches!(app.core_phase, Some(CorePhase::Failed(_))));
+        assert!(screen.contains("下载 mihomo v1.2.3？"), "{screen}");
+        assert!(!dir.join("core/bin/mihomo").exists());
+
+        key_press(&mut app, KeyCode::Char('y'));
+        assert!(matches!(
+            app.core_phase,
+            Some(CorePhase::Starting(Step::Downloading(_)))
+        ));
+        pump_until(&mut app, &mut rx, core_up).await;
+        assert_eq!(
+            std::fs::read(dir.join("core/bin/mihomo")).unwrap(),
+            testing::KERNEL
+        );
+        assert_eq!(recorder.runs("systemd-run").len(), 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn declining_the_download_leaves_a_page_that_says_so_and_r_asks_again() {
+        let dir = testing::scratch("app-decline");
+        let port = testing::free_port();
+        let server = honest_server().await;
+        let recorder = updating_systemd(port, false, "");
+        let core = Arc::new(testing::core_downloading(
+            &dir,
+            port,
+            &recorder,
+            &server.uri(),
+        ));
+        let (mut app, mut rx) = managed_app(core);
+        app.start();
+        pump_until(&mut app, &mut rx, |app| app.pending.is_some()).await;
+
+        key_press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.overlay, None);
+        let screen = draw(&app);
+        assert!(screen.contains("没有找到 mihomo"), "{screen}");
+        assert!(screen.contains("tabby 还没有下载内核"), "{screen}");
+        // Only the release was looked up; the file was never asked for.
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().starts_with("/dl"))
+        );
+
+        key_press(&mut app, KeyCode::Char('r'));
+        pump_until(&mut app, &mut rx, |app| app.pending.is_some()).await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_refused_release_lookup_is_the_page_and_says_why() {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let dir = testing::scratch("app-refused");
+        let port = testing::free_port();
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/repos/MetaCubeX/mihomo/releases/latest"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .set_body_json(serde_json::json!({"message": "API rate limit exceeded"})),
+            )
+            .mount(&server)
+            .await;
+        let recorder = updating_systemd(port, false, "");
+        let core = Arc::new(testing::core_downloading(
+            &dir,
+            port,
+            &recorder,
+            &server.uri(),
+        ));
+        let (mut app, mut rx) = managed_app(core);
+
+        app.start();
+        pump_until(&mut app, &mut rx, |app| {
+            matches!(app.core_phase, Some(CorePhase::Failed(_)))
+        })
+        .await;
+
+        let screen = draw(&app);
+        assert!(screen.contains("无法获取内核版本"), "{screen}");
+        assert!(screen.contains("API rate limit exceeded"), "{screen}");
+        assert_eq!(app.pending, None);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// On the settings page of a managed app whose kernel runs, the cursor
+    /// on `setting`.
+    async fn managed_settings_on(
+        core: Arc<ManagedCore>,
+        setting: Setting,
+    ) -> (App, mpsc::Receiver<Envelope>) {
+        let (mut app, mut rx) = managed_app(core);
+        app.start();
+        pump_until(&mut app, &mut rx, core_up).await;
+        pump_until(&mut app, &mut rx, |app| app.configs.is_some()).await;
+        app.update(Action::SelectPage(Page::Settings));
+        app.settings_view.cursor = app
+            .settings()
+            .iter()
+            .position(|each| *each == setting)
+            .unwrap();
+        (app, rx)
+    }
+
+    fn toasted(app: &App, text: &str) -> bool {
+        app.toasts.iter().any(|toast| toast.text.contains(text))
+    }
+
+    #[tokio::test]
+    async fn an_upgrade_downloads_replaces_and_restarts_the_kernel() {
+        let dir = testing::scratch("app-upgrade");
+        let port = testing::free_port();
+        let server = honest_server().await;
+        let recorder = updating_systemd(port, true, "Mihomo Meta v1.2.2 linux amd64\n");
+        let kept = dir.join("core/bin/mihomo");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "old").unwrap();
+        let core = Arc::new(testing::core_downloading(
+            &dir,
+            port,
+            &recorder,
+            &server.uri(),
+        ));
+        let (mut app, mut rx) = managed_settings_on(core, Setting::UpgradeCore).await;
+
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.is_changing(Setting::UpgradeCore));
+        pump_until(&mut app, &mut rx, |app| app.pending.is_some()).await;
+        assert!(draw(&app).contains("升级内核到 v1.2.3？"));
+        // Nothing changes before the answer.
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "old");
+
+        key_press(&mut app, KeyCode::Char('y'));
+        pump_until(&mut app, &mut rx, |app| {
+            !app.is_changing(Setting::UpgradeCore)
+        })
+        .await;
+
+        assert!(toasted(&app, "已升级到 v1.2.3"), "{:?}", app.toasts);
+        assert_eq!(std::fs::read(&kept).unwrap(), testing::KERNEL);
+        assert_eq!(
+            recorder.runs("systemctl").last().unwrap(),
+            &format!("--user restart {}", testing::UNIT)
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_newest_kernel_is_told_so_and_nothing_is_downloaded() {
+        let dir = testing::scratch("app-current");
+        let port = testing::free_port();
+        let server = honest_server().await;
+        let recorder = updating_systemd(port, true, "Mihomo Meta v1.2.3 linux amd64\n");
+        let kept = dir.join("core/bin/mihomo");
+        std::fs::create_dir_all(kept.parent().unwrap()).unwrap();
+        std::fs::write(&kept, "kernel").unwrap();
+        let core = Arc::new(testing::core_downloading(
+            &dir,
+            port,
+            &recorder,
+            &server.uri(),
+        ));
+        let (mut app, mut rx) = managed_settings_on(core, Setting::UpgradeCore).await;
+
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| {
+            !app.is_changing(Setting::UpgradeCore)
+        })
+        .await;
+
+        assert!(toasted(&app, "已是最新（v1.2.3）"), "{:?}", app.toasts);
+        assert_eq!(app.pending, None);
+        assert_eq!(std::fs::read_to_string(&kept).unwrap(), "kernel");
+        let requests = server.received_requests().await.unwrap();
+        assert!(
+            requests
+                .iter()
+                .all(|request| !request.url.path().starts_with("/dl"))
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_kernel_of_the_users_own_is_not_upgraded_and_the_row_says_so() {
+        let dir = testing::scratch("app-own-kernel");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, _rx) = managed_settings_on(core, Setting::UpgradeCore).await;
+
+        assert!(draw(&app).contains("由你自己管理"));
+        key_press(&mut app, KeyCode::Enter);
+
+        assert!(toasted(&app, "由你自己管理"), "{:?}", app.toasts);
+        assert!(!app.is_changing(Setting::UpgradeCore));
+        assert_eq!(app.pending, None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -88,8 +88,8 @@ pub fn error_lines<S: AsRef<str>>(
 /// at, why it failed, or that it was stopped.
 pub fn core(frame: &mut Frame, area: Rect, app: &App, phase: &CorePhase) {
     match phase {
-        CorePhase::Idle => loading(frame, area, app, text::core_step(Step::Starting)),
-        CorePhase::Starting(step) => loading(frame, area, app, text::core_step(*step)),
+        CorePhase::Idle => loading(frame, area, app, &text::core_step(Step::Starting)),
+        CorePhase::Starting(step) => loading(frame, area, app, &text::core_step(*step)),
         CorePhase::Failed(err) => error_lines(
             frame,
             area,

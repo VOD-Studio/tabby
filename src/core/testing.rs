@@ -1,4 +1,5 @@
 use std::{
+    fs,
     io::{BufRead, BufReader, Write},
     net::{TcpListener, TcpStream},
     os::unix::{fs::PermissionsExt, process::ExitStatusExt},
@@ -80,12 +81,29 @@ impl Recorder {
 }
 
 /// A managed core in `dir` with the controller on `port`, run through
-/// `recorder`. With `systemd`, a user manager is there.
+/// `recorder`, its kernel the user's own script in `dir`. With `systemd`, a
+/// user manager is there.
 pub(crate) fn core_at(
     dir: &Path,
     port: u16,
     recorder: &Arc<Recorder>,
     systemd: bool,
+) -> ManagedCore {
+    core_in(dir, port, recorder, systemd, true)
+}
+
+/// Like [`core_at`], but with no `[core].binary`: the kernel is the one
+/// tabby downloads, which is not there yet.
+pub(crate) fn core_without_binary(dir: &Path, port: u16, recorder: &Arc<Recorder>) -> ManagedCore {
+    core_in(dir, port, recorder, false, false)
+}
+
+fn core_in(
+    dir: &Path,
+    port: u16,
+    recorder: &Arc<Recorder>,
+    systemd: bool,
+    user_binary: bool,
 ) -> ManagedCore {
     let state = State {
         port,
@@ -105,7 +123,7 @@ pub(crate) fn core_at(
     fs::write(&binary, "#!/bin/sh\nwhile :; do sleep 1; done\n").unwrap();
     fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
     let mut core = ManagedCore::with(
-        Some(binary),
+        user_binary.then_some(binary),
         dir,
         Arc::new(Arc::clone(recorder)),
         Some(runtime),
@@ -129,16 +147,25 @@ pub(crate) enum Reply {
     Other,
 }
 
-/// Starts a controller on `port` in a thread of its own, after `delay`.
+/// Starts a controller on `port` in a thread of its own, after `delay`. With
+/// none, it is listening when this returns, not whenever the thread gets to
+/// it.
 pub(crate) fn serve(port: u16, reply: Reply, delay: Duration) {
-    thread::spawn(move || {
-        thread::sleep(delay);
-        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+    let accept = move |listener: TcpListener| {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
             thread::spawn(move || respond(stream, reply));
         }
-    });
+    };
+    if delay.is_zero() {
+        let listener = TcpListener::bind(("127.0.0.1", port)).unwrap();
+        thread::spawn(move || accept(listener));
+    } else {
+        thread::spawn(move || {
+            thread::sleep(delay);
+            accept(TcpListener::bind(("127.0.0.1", port)).unwrap());
+        });
+    }
 }
 
 pub(crate) fn respond(stream: TcpStream, reply: Reply) {
@@ -182,4 +209,74 @@ pub(crate) fn systemd(port: u16, delay: Duration) -> Arc<Recorder> {
         }
         _ => answer(0, ""),
     })
+}
+
+pub(crate) const TAG: &str = "v1.2.3";
+pub(crate) const ASSET: &str = "mihomo-linux-amd64-v1-v1.2.3.gz";
+pub(crate) const KERNEL: &[u8] = b"#!/bin/sh\necho kernel\n";
+
+pub(crate) fn gzip(bytes: &[u8]) -> Vec<u8> {
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+    encoder.write_all(bytes).unwrap();
+    encoder.finish().unwrap()
+}
+
+pub(crate) fn sha256(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    use std::fmt::Write as _;
+    sha2::Sha256::digest(bytes)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            let _ = write!(hex, "{byte:02x}");
+            hex
+        })
+}
+
+/// A release server: the API lists [`ASSET`] of [`TAG`] with `digest`, and
+/// the download serves `served`.
+pub(crate) async fn release_server(
+    digest: Option<String>,
+    served: Vec<u8>,
+) -> wiremock::MockServer {
+    use wiremock::{
+        Mock, ResponseTemplate,
+        matchers::{method, path},
+    };
+    let mock = wiremock::MockServer::start().await;
+    let release = serde_json::json!({
+        "tag_name": TAG,
+        "assets": [{
+            "name": ASSET,
+            "browser_download_url": format!("{}/dl/{ASSET}", mock.uri()),
+            "digest": digest,
+        }],
+    });
+    Mock::given(method("GET"))
+        .and(path(super::install::LATEST_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(release))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(format!("/dl/{ASSET}")))
+        .respond_with(ResponseTemplate::new(200).set_body_bytes(served))
+        .mount(&mock)
+        .await;
+    mock
+}
+
+/// A managed core under a user manager with no kernel of its own and none
+/// downloaded, looking releases up at `release_api` as an x86-64 machine.
+pub(crate) fn core_downloading(
+    dir: &Path,
+    port: u16,
+    recorder: &Arc<Recorder>,
+    release_api: &str,
+) -> ManagedCore {
+    let mut core = core_in(dir, port, recorder, true, false);
+    core.release_api = release_api.to_owned();
+    core.target = Target {
+        arch: "x86_64".to_owned(),
+        cpuinfo: String::new(),
+    };
+    core
 }

@@ -55,7 +55,7 @@ impl Status {
 
 impl ManagedCore {
     /// Runs `cmd` on a thread of its own: the runner blocks.
-    async fn exec(&self, cmd: Cmd) -> io::Result<Output> {
+    pub(super) async fn exec(&self, cmd: Cmd) -> io::Result<Output> {
         let runner = Arc::clone(&self.runner);
         tokio::task::spawn_blocking(move || runner.run(&cmd))
             .await

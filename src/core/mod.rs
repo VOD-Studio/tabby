@@ -5,6 +5,7 @@
 //! decisions made here can be tested without systemd.
 
 mod files;
+mod install;
 mod runner;
 mod runtime;
 mod settings;
@@ -12,9 +13,7 @@ mod state;
 mod supervisor;
 
 use std::{
-    env,
-    ffi::OsStr,
-    fs, io,
+    env, io,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
@@ -24,14 +23,13 @@ use color_eyre::{Result, eyre::WrapErr};
 use tokio::sync::OnceCell;
 
 use crate::api::{client::ApiClient, error::ApiError, models::CoreKind};
+use install::Target;
+pub use install::{Release, Upgrade};
 use runner::Runner;
 pub use runner::System;
 use settings::CoreSettings;
 use state::State;
 use supervisor::Mode;
-
-/// What the kernel binary is called when `[core].binary` does not say.
-const BINARY_NAME: &str = "mihomo";
 
 /// How long a kernel just started has to answer on its controller.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,6 +68,10 @@ impl Paths {
         self.root.join("state.toml")
     }
 
+    /// The kernel tabby downloads.
+    fn bin(&self) -> PathBuf {
+        self.root.join("bin").join("mihomo")
+    }
     /// The kernel's output when it runs without systemd.
     fn log(&self) -> PathBuf {
         self.root.join("core.log")
@@ -83,6 +85,12 @@ pub enum Step {
     Starting,
     /// The kernel is running; its controller does not answer yet.
     WaitingController,
+    /// Asking where the newest kernel is.
+    CheckingRelease,
+    /// Downloading it, `percent` done when the size is known.
+    Downloading(Option<u8>),
+    /// Unpacking it and making sure it runs.
+    Installing,
 }
 
 /// What the managed core was asked to do when a program failed.
@@ -91,6 +99,7 @@ pub enum Action {
     Start,
     Restart,
     Stop,
+    Install,
 }
 
 impl std::fmt::Display for Action {
@@ -98,6 +107,7 @@ impl std::fmt::Display for Action {
         f.write_str(match self {
             Self::Start => "start the kernel",
             Self::Restart => "restart the kernel",
+            Self::Install => "install the kernel",
             Self::Stop => "stop the kernel",
         })
     }
@@ -107,7 +117,8 @@ impl std::fmt::Display for Action {
 #[derive(Debug, thiserror::Error)]
 pub enum CoreError {
     /// There is no kernel to run: `path` is where `[core].binary` points
-    /// when it does not hold a file, `None` when no `mihomo` is on `PATH`.
+    /// when it does not hold a file, `None` when tabby has not downloaded
+    /// one yet.
     #[error("no mihomo binary")]
     NoBinary { path: Option<PathBuf> },
     /// Something other than the managed kernel answers on its port.
@@ -124,6 +135,17 @@ pub enum CoreError {
         context: &'static str,
         source: io::Error,
     },
+    /// The release list could not be read.
+    #[error("cannot look up the latest kernel: {0}")]
+    Release(String),
+    /// The release has no kernel for this machine.
+    #[error("no kernel for {arch} in the release")]
+    NoAsset { arch: String },
+    /// What was downloaded is not what the release says it is.
+    #[error("checksum mismatch: {0}")]
+    Checksum(String),
+    #[error("download failed: {0}")]
+    Download(String),
 }
 
 impl CoreError {
@@ -167,6 +189,9 @@ pub struct ManagedCore {
     /// How the kernel is kept running, settled on first use.
     mode: OnceCell<Mode>,
     timing: Timing,
+    /// Where releases are looked up.
+    release_api: String,
+    target: Target,
 }
 
 impl ManagedCore {
@@ -199,6 +224,8 @@ impl ManagedCore {
             runner,
             runtime_dir,
             mode: OnceCell::new(),
+            release_api: install::API_BASE.to_owned(),
+            target: Target::current(),
             timing: Timing {
                 ready: READY_TIMEOUT,
                 poll: READY_POLL,
@@ -216,21 +243,28 @@ impl ManagedCore {
         &self.state.secret
     }
 
-    /// The kernel binary to run: `[core].binary`, else the first `mihomo`
-    /// on `PATH`.
+    /// Where the kernel to run is, whether or not it is there yet:
+    /// `[core].binary`, else the one tabby keeps in its data directory.
+    pub fn binary_path(&self) -> PathBuf {
+        self.binary.clone().unwrap_or_else(|| self.paths.bin())
+    }
+
+    /// Whether `[core].binary` names the kernel: tabby neither downloads nor
+    /// replaces one that is the user's own.
+    pub fn is_user_binary(&self) -> bool {
+        self.binary.is_some()
+    }
+
+    /// The kernel binary to run, when there is one.
     pub fn binary(&self) -> Result<PathBuf, CoreError> {
-        if let Some(path) = &self.binary {
-            return if path.is_file() {
-                Ok(path.clone())
-            } else {
-                Err(CoreError::NoBinary {
-                    path: Some(path.clone()),
-                })
-            };
+        let path = self.binary_path();
+        if path.is_file() {
+            Ok(path)
+        } else {
+            Err(CoreError::NoBinary {
+                path: self.binary.clone(),
+            })
         }
-        env::var_os("PATH")
-            .and_then(|path| find_in(&path, BINARY_NAME))
-            .ok_or(CoreError::NoBinary { path: None })
     }
 
     /// Makes sure the kernel runs and its controller answers: attaches to
@@ -327,29 +361,6 @@ impl ManagedCore {
             .map_err(|err| CoreError::io("cannot write state.toml", err))
     }
 }
-
-/// The first executable file called `name` in the directories of `path`.
-fn find_in(path: &OsStr, name: &str) -> Option<PathBuf> {
-    env::split_paths(path)
-        .map(|dir| dir.join(name))
-        .find(|candidate| is_executable(candidate))
-}
-
-fn is_executable(path: &Path) -> bool {
-    let Ok(metadata) = fs::metadata(path) else {
-        return false;
-    };
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
-    }
-    #[cfg(not(unix))]
-    {
-        metadata.is_file()
-    }
-}
-
 #[cfg(test)]
 mod tests;
 

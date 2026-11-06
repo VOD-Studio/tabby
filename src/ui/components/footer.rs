@@ -206,9 +206,13 @@ fn settings_hints(app: &App) -> Vec<Hint> {
         | Setting::Restart
         | Setting::Upgrade => "执行",
         Setting::StopCore => "停止",
+        Setting::UpgradeCore => "升级",
+        Setting::CoreBinary => "—",
     };
     let enabled = match &app.configs {
-        Some(Ok(configs)) => app.gate(setting, configs) == Gate::Open,
+        Some(Ok(configs)) => {
+            app.gate(setting, configs) == Gate::Open && setting != Setting::CoreBinary
+        }
         _ => false,
     };
     vec![

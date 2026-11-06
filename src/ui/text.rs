@@ -51,8 +51,13 @@ pub fn core_title(err: &CoreError) -> String {
             Action::Start => "无法启动内核",
             Action::Restart => "无法重启内核",
             Action::Stop => "无法停止内核",
+            Action::Install => "无法安装内核",
         }
         .to_owned(),
+        CoreError::Release(_) => "无法获取内核版本".to_owned(),
+        CoreError::NoAsset { arch } => format!("没有适合 {arch} 的内核"),
+        CoreError::Checksum(_) => "内核校验失败".to_owned(),
+        CoreError::Download(_) => "内核下载失败".to_owned(),
         CoreError::Io { .. } => "内核的文件无法读写".to_owned(),
     }
 }
@@ -61,12 +66,22 @@ pub fn core_title(err: &CoreError) -> String {
 pub fn core_detail(err: &CoreError) -> Vec<String> {
     let lines = |text: &str| text.lines().map(str::to_owned).collect();
     match err {
-        CoreError::NoBinary { .. } => {
-            vec!["请安装 mihomo，或在 config.toml 的 [core] 里用 binary 指定路径".to_owned()]
+        CoreError::NoBinary { path: None } => vec!["tabby 还没有下载内核".to_owned()],
+        CoreError::NoBinary { path: Some(_) } => {
+            vec!["请检查 config.toml 的 [core] 里 binary 指定的路径".to_owned()]
         }
         CoreError::PortTaken(_) => vec!["控制器端口被别的程序占用，托管内核用不了它".to_owned()],
         CoreError::StartFailed { log } => lines(log),
-        CoreError::Command { message, .. } => lines(message),
+        CoreError::Command { message, .. }
+        | CoreError::Checksum(message)
+        | CoreError::Download(message) => lines(message),
+        CoreError::Release(message) => vec![
+            message.clone(),
+            "也可以在 config.toml 的 [core] 里用 binary 指定内核".to_owned(),
+        ],
+        CoreError::NoAsset { .. } => {
+            vec!["请在 config.toml 的 [core] 里用 binary 指定内核".to_owned()]
+        }
         CoreError::Io { context, source } => vec![format!("{context}: {source}")],
     }
 }
@@ -80,10 +95,14 @@ pub fn core_reason(err: &CoreError) -> String {
 }
 
 /// What the screen waiting for the managed kernel says it is doing.
-pub fn core_step(step: Step) -> &'static str {
+pub fn core_step(step: Step) -> String {
     match step {
-        Step::Starting => "正在启动内核…",
-        Step::WaitingController => "等待控制器…",
+        Step::Starting => "正在启动内核…".to_owned(),
+        Step::WaitingController => "等待控制器…".to_owned(),
+        Step::CheckingRelease => "正在查询最新版本…".to_owned(),
+        Step::Downloading(None) => "正在下载内核…".to_owned(),
+        Step::Downloading(Some(percent)) => format!("正在下载内核… {percent}%"),
+        Step::Installing => "正在安装内核…".to_owned(),
     }
 }
 

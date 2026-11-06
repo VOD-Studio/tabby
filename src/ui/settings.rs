@@ -219,6 +219,7 @@ fn value(
         Gate::Open => {}
         Gate::Missing => return vec![Span::styled(NO_VALUE, muted)],
         Gate::NeedsMihomo => return vec![Span::styled("需要 mihomo", muted)],
+        Gate::SelfManaged => return vec![Span::styled("由你自己管理", muted)],
     }
     let fg = Style::new().fg(theme.fg);
     match setting {
@@ -250,11 +251,25 @@ fn value(
             }
             spans
         }
+        Setting::CoreBinary => {
+            let Some(path) = app.core_binary() else {
+                return vec![Span::styled(NO_VALUE, muted)];
+            };
+            // The version first: a path too long for the row is cut, and
+            // the version is what is looked for.
+            let mut spans = Vec::new();
+            if let Some(Ok(version)) = &app.version {
+                spans.push(Span::styled(format!("{}  ", version.version), muted));
+            }
+            spans.push(Span::styled(path.display().to_string(), fg));
+            spans
+        }
         Setting::Reload
         | Setting::FlushFakeIp
         | Setting::UpdateGeo
         | Setting::Restart
         | Setting::Upgrade
+        | Setting::UpgradeCore
         | Setting::StopCore => {
             if busy {
                 vec![Span::styled("进行中…", muted)]
@@ -332,7 +347,7 @@ mod tests {
         let (indices, titles) = headings(&Setting::ALL);
         assert_eq!(indices, (0..Setting::ALL.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护", "托管内核"]);
-        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 1].to_vec();
+        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 3].to_vec();
         let (indices, titles) = headings(&external);
         assert_eq!(indices, (0..external.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护"]);

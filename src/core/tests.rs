@@ -1,4 +1,4 @@
-use std::{os::unix::fs::PermissionsExt, sync::Mutex, thread};
+use std::{fs, os::unix::fs::PermissionsExt, sync::Mutex, thread};
 
 use super::{runner::Cmd, testing::*, *};
 
@@ -345,19 +345,23 @@ async fn a_fallback_kernel_that_exits_at_start_fails_with_its_log() {
 }
 
 #[test]
-fn a_binary_is_looked_up_in_path_order_and_must_be_executable() {
-    let dir = scratch("path");
-    let (first, second) = (dir.join("a"), dir.join("b"));
-    for sub in [&first, &second] {
-        fs::create_dir_all(sub).unwrap();
-        fs::write(sub.join("mihomo"), "").unwrap();
-    }
-    fs::set_permissions(second.join("mihomo"), fs::Permissions::from_mode(0o755)).unwrap();
-    let path = env::join_paths([&first, &second]).unwrap();
+fn without_a_configured_kernel_the_one_tabby_keeps_is_used_once_it_is_there() {
+    let dir = scratch("kept");
+    let recorder = Recorder::new(|_| answer(0, ""));
+    let core = core_without_binary(&dir, free_port(), &recorder);
+    let kept = dir.join("core/bin/mihomo");
+    assert_eq!(core.binary_path(), kept);
+    assert!(!core.is_user_binary());
+    // Nothing downloaded yet: not a path that was configured, so it says
+    // there is nothing to point at.
+    assert!(matches!(
+        core.binary(),
+        Err(CoreError::NoBinary { path: None })
+    ));
 
-    // The first has no execute bit, so the second is the one.
-    assert_eq!(find_in(&path, "mihomo"), Some(second.join("mihomo")));
-    assert_eq!(find_in(&path, "clash"), None);
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, "").unwrap();
+    assert_eq!(core.binary().unwrap(), kept);
     fs::remove_dir_all(dir).unwrap();
 }
 
