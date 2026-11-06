@@ -46,7 +46,7 @@ RUST_LOG=tabby=debug tabby                    # log file: $XDG_STATE_HOME/tabby/
 ```
 CLI flags (each also an env var): `--profile/TABBY_PROFILE`, `--url/TABBY_URL` (default `http://127.0.0.1:9090`), `--secret/TABBY_SECRET`, `--theme/TABBY_THEME`. `--theme` pins the theme and is not persisted.
 
-Per-commit gate: build + clippy `-D warnings` + test must all pass.
+Per-commit gate: build + clippy `-D warnings` + test must all pass. `make check` runs fmt-check + clippy + test (tests under a throwaway `XDG_*`); `make help` lists targets.
 
 **Commit after every completed feature point.** One feature/fix = one commit, made as soon as it is done and the gate above passes — never batch several feature points into one commit, and never leave finished work uncommitted. Use a Conventional Commit message (e.g. `feat(connections): sort, filter and detail popup`). Stage only the files for that feature point.
 
@@ -80,7 +80,7 @@ Per-commit gate: build + clippy `-D warnings` + test must all pass.
 - `docs/plans/2026-11-05-tabby-tui.md` — design rationale, risks R1–R7; its §4 file tree is stale (omits `themes.rs`, `ui/icons.rs`, `shadow.rs`, `text.rs`, `scroll.rs`, `components/{themes,profiles}.rs`).
 
 ## Runtime/Tooling Preferences
-- Rust stable, edition 2024 (dev toolchain 1.99; no `rust-version`, no `rust-toolchain`). Cargo only; no Makefile/justfile/CI/scripts.
+- Rust stable, edition 2024 (dev toolchain 1.99; no `rust-version`, no `rust-toolchain`). Cargo + a thin `Makefile` wrapping the commands above; no justfile/CI/scripts.
 - Async runtime: tokio multi-thread. TLS: rustls only (reqwest, tokio-tungstenite) — do not add OpenSSL.
 - Commits: Conventional Commits, English, lowercase, imperative, no trailing period; scopes like `app`, `api`, `ui`, `config`, `proxies`, `logs`, `connections`, `settings`. Docs follow features with `docs: record M<n> <area> decisions`. Work on `main`; start from a clean tree.
 - **Never touch `~/.config/tabby`**. Any run that may read/write config must set a temp `XDG_CONFIG_HOME`. Manual checks must target a local throwaway mihomo (127.0.0.1, DIRECT-only), never the user's live kernel.
