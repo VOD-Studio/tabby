@@ -135,6 +135,7 @@ fn draw(frame: &mut Frame, area: Rect, app: &App, total: usize) {
 
     let now = Zoned::now();
     let times: Vec<String> = visible.iter().map(|sub| updated(sub, &now)).collect();
+    let autos: Vec<String> = visible.iter().map(|sub| auto_label(sub)).collect();
     let layout = fit(
         usize::from(inner.width),
         visible
@@ -143,6 +144,7 @@ fn draw(frame: &mut Frame, area: Rect, app: &App, total: usize) {
             .max()
             .unwrap_or(0),
         times.iter().map(|time| time.width()).max().unwrap_or(0),
+        autos.iter().map(|auto| auto.width()).max().unwrap_or(0),
         visible.iter().any(|sub| sub.usage.is_some()),
     );
     let cursor = view.cursor.min(visible.len() - 1);
@@ -156,7 +158,7 @@ fn draw(frame: &mut Frame, area: Rect, app: &App, total: usize) {
         };
         app.hits.add(rect, Target::Subscription(sub.id.clone()));
 
-        let line = row_line(app, sub, &times[index], layout, &now);
+        let line = row_line(app, sub, (&times[index], &autos[index]), layout, &now);
         frame.render_widget(line, rect);
         if index == cursor {
             theme.paint_cursor(frame.buffer_mut(), rect);
@@ -168,7 +170,7 @@ fn draw(frame: &mut Frame, area: Rect, app: &App, total: usize) {
 fn row_line(
     app: &App,
     sub: &Subscription,
-    time: &str,
+    (time, auto): (&str, &str),
     layout: Layout,
     now: &Zoned,
 ) -> Line<'static> {
@@ -207,6 +209,16 @@ fn row_line(
         spans.push(Span::raw(" ".repeat(GAP)));
         spans.push(cell(time, layout.time, muted));
     }
+    if layout.auto > 0 {
+        spans.push(Span::raw(" ".repeat(GAP)));
+        // Off is what stands out: the rest is as it was set.
+        let style = if sub.auto_update || sub.kind == Kind::File {
+            muted
+        } else {
+            Style::new().fg(theme.warning)
+        };
+        spans.push(cell(auto, layout.auto, style));
+    }
     if layout.usage > 0
         && let Some(used) = sub.usage
     {
@@ -223,6 +235,17 @@ fn row_line(
         ));
     }
     Line::from(spans)
+}
+
+/// How a subscription is kept up to date: `24h` for the interval it is
+/// asked at, `关` when it is not, `—` for a file, which only `u` reads
+/// again.
+fn auto_label(sub: &Subscription) -> String {
+    match (sub.kind, sub.auto_update) {
+        (Kind::File, _) => NEVER.to_owned(),
+        (Kind::Url, false) => "关".to_owned(),
+        (Kind::Url, true) => format!("{}h", sub.interval_hours.max(1)),
+    }
 }
 
 /// When a subscription was last imported or updated.
@@ -248,33 +271,44 @@ struct Layout {
     kind: bool,
     /// The width of the update time; 0 leaves it out.
     time: usize,
+    /// The width of the auto-update state; 0 leaves it out.
+    auto: usize,
     /// Room for the usage, after everything else; 0 leaves it out.
     usage: usize,
 }
 
 /// Fits a row `width` columns wide: a name as wide as `name` (up to
-/// [`NAME_MAX`]); then the time and the kind, dropped from the right while
-/// the name would get fewer than [`NAME_MIN`] columns; then, if everything
-/// else fits and at least [`USAGE_MIN`] columns are left, the usage.
-fn fit(width: usize, name: usize, time: usize, has_usage: bool) -> Layout {
+/// [`NAME_MAX`]); then the auto-update state, the time and the kind, dropped
+/// in that order while the name would get fewer than [`NAME_MIN`] columns;
+/// then, if everything else fits and at least [`USAGE_MIN`] columns are
+/// left, the usage.
+fn fit(width: usize, name: usize, time: usize, auto: usize, has_usage: bool) -> Layout {
     let name = name.min(NAME_MAX);
-    // The columns after the name, in the order they are dropped.
-    let cost = |kind: bool, time: usize| -> usize {
-        MARK_WIDTH + if kind { GAP + KIND_WIDTH } else { 0 } + if time > 0 { GAP + time } else { 0 }
+    let cost = |kind: bool, time: usize, auto: usize| -> usize {
+        MARK_WIDTH
+            + if kind { GAP + KIND_WIDTH } else { 0 }
+            + if time > 0 { GAP + time } else { 0 }
+            + if auto > 0 { GAP + auto } else { 0 }
     };
-    let (mut kind, mut time) = (true, time);
-    if cost(kind, time) + name.min(NAME_MIN) > width {
+    let (mut kind, mut time, mut auto) = (true, time, auto);
+    let squeezed = |kind, time, auto| cost(kind, time, auto) + name.min(NAME_MIN) > width;
+    if squeezed(kind, time, auto) {
+        auto = 0;
+    }
+    if squeezed(kind, time, auto) {
         time = 0;
     }
-    if cost(kind, time) + name.min(NAME_MIN) > width {
+    if squeezed(kind, time, auto) {
         kind = false;
     }
-    let name = name.min(width.saturating_sub(cost(kind, time)));
-    let rest = width.saturating_sub(cost(kind, time) + name + GAP);
+    let used = cost(kind, time, auto);
+    let name = name.min(width.saturating_sub(used));
+    let rest = width.saturating_sub(used + name + GAP);
     Layout {
         name,
         kind,
         time,
+        auto,
         usage: if has_usage && rest >= USAGE_MIN {
             rest
         } else {
@@ -290,28 +324,51 @@ mod tests {
     #[test]
     fn the_columns_on_the_right_go_before_the_name_is_squeezed() {
         // Everything fits: the name as wide as it is, the usage gets the rest.
-        let wide = fit(100, 10, 8, true);
+        let wide = fit(100, 10, 8, 4, true);
         assert_eq!(
             wide,
             Layout {
                 name: 10,
                 kind: true,
                 time: 8,
-                // 100 less the mark, the kind and the time (18), the name (10)
-                // and the gap before the usage.
-                usage: 70,
+                auto: 4,
+                // 100 less the mark, the kind, the time and the state (24),
+                // the name (10) and the gap before the usage.
+                usage: 64,
             }
         );
         // Too narrow for the usage: nothing is left over to give it.
-        assert_eq!(fit(40, 10, 8, true).usage, 0);
-        // The time goes first, then the kind.
-        let no_time = fit(24, 20, 8, false);
-        assert_eq!((no_time.time, no_time.kind), (0, true));
-        let neither = fit(12, 20, 8, false);
-        assert_eq!((neither.time, neither.kind), (0, false));
+        assert_eq!(fit(46, 10, 8, 4, true).usage, 0);
+        // The state goes first, then the time, then the kind.
+        let (a, b, c) = (
+            fit(30, 20, 8, 4, false),
+            fit(24, 20, 8, 4, false),
+            fit(12, 20, 8, 4, false),
+        );
+        assert_eq!((a.auto, a.time, a.kind), (0, 8, true));
+        assert_eq!((b.auto, b.time, b.kind), (0, 0, true));
+        assert_eq!((c.auto, c.time, c.kind), (0, 0, false));
         // And a name is never wider than the room it has.
-        assert_eq!(neither.name, 10);
+        assert_eq!(c.name, 10);
         // A name wider than NAME_MAX is cut so the columns keep their room.
-        assert_eq!(fit(100, 60, 8, false).name, NAME_MAX);
+        assert_eq!(fit(100, 60, 8, 4, false).name, NAME_MAX);
+    }
+
+    #[test]
+    fn the_state_says_the_interval_or_off_or_that_a_file_is_read_by_hand() {
+        let sub = |kind, auto, hours| Subscription {
+            id: "a".to_owned(),
+            name: "a".to_owned(),
+            kind,
+            source: String::new(),
+            auto_update: auto,
+            interval_hours: hours,
+            updated_at: 0,
+            usage: None,
+        };
+        assert_eq!(auto_label(&sub(Kind::Url, true, 24)), "24h");
+        assert_eq!(auto_label(&sub(Kind::Url, true, 0)), "1h");
+        assert_eq!(auto_label(&sub(Kind::Url, false, 24)), "关");
+        assert_eq!(auto_label(&sub(Kind::File, true, 24)), "—");
     }
 }

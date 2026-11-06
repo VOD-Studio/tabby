@@ -1,16 +1,26 @@
 //! The subscriptions page (plan §10): the list of a managed core's
 //! subscriptions, and what its keys do.
 
-use std::collections::HashSet;
+use std::{
+    collections::{HashMap, HashSet},
+    time::{Duration, Instant},
+};
 
+use jiff::Timestamp;
 use tui_input::Input;
 
 use super::{App, Confirm, CorePhase, Msg, Overlay, ToastKind, managed::failure};
 use crate::{
     api::error::ApiError,
-    core::{CoreError, ManagedCore, Outcome, Store, Subscription},
+    core::{CoreError, Kind, ManagedCore, Outcome, Store, Subscription},
     ui::{scroll::Scroll, text::reason},
 };
+
+/// How often the subscriptions are looked at for any that came due.
+const AUTO_CHECK: Duration = Duration::from_secs(60);
+
+/// How long after a failed automatic update the next try waits.
+const AUTO_RETRY: Duration = Duration::from_mins(30);
 
 /// What is being done to subscriptions, for the answer to say what it was.
 #[derive(Debug)]
@@ -20,6 +30,10 @@ pub enum Work {
     Update(String),
     /// Making subscription `id` the one in use.
     Switch(String),
+    /// Reading subscription `id` again because its interval has passed.
+    AutoUpdate(String),
+    /// Turning the automatic update of a subscription on (or off).
+    Toggle(bool),
     Remove,
 }
 
@@ -55,6 +69,10 @@ pub struct SubscriptionsView {
     pub busy: HashSet<String>,
     /// An import is under way.
     pub importing: bool,
+    /// When the subscriptions are looked at next for any that came due.
+    next_auto: Option<Instant>,
+    /// When an automatic update of each was last tried.
+    auto_tried: HashMap<String, Instant>,
 }
 
 impl SubscriptionsView {
@@ -241,16 +259,78 @@ impl App {
     }
 
     fn start_update(&mut self, id: String) {
+        self.begin_update(id, false);
+    }
+
+    /// Starts reading subscription `id` again, `auto` when nobody asked.
+    fn begin_update(&mut self, id: String, auto: bool) {
         if !self.subscriptions_view.busy.insert(id.clone()) {
             return;
         }
         self.dirty = true;
         self.spawn_subscription(move |core| async move {
+            let result = core.update(&id).await;
+            let work = if auto {
+                Work::AutoUpdate(id)
+            } else {
+                Work::Update(id)
+            };
+            SubEvent::Done { result, work }
+        });
+    }
+
+    /// `t`: turns the automatic update of the subscription under the cursor
+    /// on or off.
+    pub(super) fn toggle_auto_update(&mut self) {
+        let Some(sub) = self.subscriptions_view.selected() else {
+            return;
+        };
+        if sub.kind == Kind::File {
+            self.toast(
+                ToastKind::Error,
+                "文件订阅不自动更新，按 u 重新读取".to_owned(),
+            );
+            return;
+        }
+        let (id, on) = (sub.id.clone(), !sub.auto_update);
+        self.spawn_subscription(move |core| async move {
             SubEvent::Done {
-                result: core.update(&id).await,
-                work: Work::Update(id),
+                result: core.set_auto_update(&id, on).await,
+                work: Work::Toggle(on),
             }
         });
+    }
+
+    /// Every [`AUTO_CHECK`]: updates the subscriptions that came due. One
+    /// that failed is left alone for [`AUTO_RETRY`], so that a server that
+    /// is down is not asked every minute, with a toast each time.
+    pub(super) fn auto_update_due(&mut self, now: Instant) {
+        if self.subscriptions_core().is_none() {
+            return;
+        }
+        let view = &mut self.subscriptions_view;
+        if view.next_auto.is_some_and(|at| now < at) {
+            return;
+        }
+        let Some(store) = view.store() else {
+            // Not read yet; look again at the next tick.
+            return;
+        };
+        let due: Vec<String> = store
+            .due(Timestamp::now().as_second())
+            .into_iter()
+            .map(|sub| sub.id.clone())
+            .filter(|id| {
+                view.auto_tried
+                    .get(id)
+                    .is_none_or(|tried| now.saturating_duration_since(*tried) >= AUTO_RETRY)
+            })
+            .collect();
+        view.next_auto = Some(now + AUTO_CHECK);
+        for id in due {
+            self.subscriptions_view.auto_tried.insert(id.clone(), now);
+            self.begin_update(id, true);
+        }
     }
 
     /// `U`: asks whether to update every subscription the page shows.
@@ -335,17 +415,17 @@ impl App {
         let view = &mut self.subscriptions_view;
         match work {
             Work::Import => view.importing = false,
-            Work::Update(id) | Work::Switch(id) => {
+            Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) => {
                 view.busy.remove(id);
             }
-            Work::Remove => {}
+            Work::Remove | Work::Toggle(_) => {}
         }
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(err) => {
                 let what = match work {
                     Work::Import => "导入失败".to_owned(),
-                    Work::Update(id) | Work::Switch(id) => {
+                    Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) => {
                         let name = self
                             .subscriptions_view
                             .store()
@@ -359,6 +439,7 @@ impl App {
                         format!("{verb}「{name}」失败")
                     }
                     Work::Remove => "删除失败".to_owned(),
+                    Work::Toggle(_) => "设置失败".to_owned(),
                 };
                 self.toast(ToastKind::Error, failure(&what, &err));
                 return;
@@ -371,14 +452,22 @@ impl App {
                 // The new subscription is the last of the list.
                 let last = self.subscriptions_view.visible().len().saturating_sub(1);
                 self.subscriptions_view.cursor = last;
-                format!("已导入「{name}」")
+                Some(format!("已导入「{name}」"))
             }
-            Work::Update(_) => format!("已更新「{name}」"),
-            Work::Switch(_) if outcome.reload => format!("已切换到「{name}」"),
-            Work::Switch(_) => format!("「{name}」已在使用"),
-            Work::Remove => format!("已删除「{name}」"),
+            Work::Update(_) => Some(format!("已更新「{name}」")),
+            // Nobody asked: nothing to say unless it failed.
+            Work::AutoUpdate(_) => None,
+            Work::Switch(_) if outcome.reload => Some(format!("已切换到「{name}」")),
+            Work::Switch(_) => Some(format!("「{name}」已在使用")),
+            Work::Remove => Some(format!("已删除「{name}」")),
+            Work::Toggle(on) => Some(format!(
+                "「{name}」自动更新已{}",
+                if *on { "开启" } else { "关闭" }
+            )),
         };
-        self.toast(ToastKind::Success, text);
+        if let Some(text) = text {
+            self.toast(ToastKind::Success, text);
+        }
         if outcome.reload {
             self.reload_kernel();
         }

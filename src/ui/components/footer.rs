@@ -209,6 +209,7 @@ fn subscription_hints(app: &App) -> Vec<Hint> {
                 "更新匹配"
             },
         ),
+        hint("t", "自动更新"),
         hint("d", "删除"),
         hint("/", "过滤"),
         hint("j/k", "移动"),

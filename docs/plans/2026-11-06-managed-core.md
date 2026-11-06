@@ -365,6 +365,11 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 6. `feat(subscriptions): auto-update subscriptions`
    - 范围：§7.1 的自动更新，订阅页的开关和间隔显示。
    - 验收：用 `start_paused` 的时钟测到期判断；实测把间隔改成 1 分钟，本地 http server 收到请求，当前订阅更新后配置被重载。
+   - 实现记录（2026-11-06）：
+     - 到期判断是纯函数 `Store::due(now)`（`src/core/subscription.rs`）：只看 URL 订阅，`auto_update` 开着，`updated_at + interval_hours×3600 <= now`；`interval_hours` 为 0 当 1，从没更新过的算到期。文件订阅不自动更新（它是用户的文件，可能写到一半），只在 `u` 时重新读取。测试直接给数字，没有用 `start_paused`：判断不碰时钟，`App::on_tick(now)` 的 `now` 本来就是参数，测试里传 `Instant::now() + …` 即可，比暂停运行时的时间更直接。
+     - `App::auto_update_due`（`src/app/subscriptions.rs`）挂在 `on_tick` 上，每 60 秒看一次内存里的列表（列表还没读出来就下个 tick 再看），到期的走 `core.update`，与手动更新同一条路。成功不弹 toast（`Work::AutoUpdate`），当前订阅更新后照常重新生成配置并 `PUT /configs`；失败弹 `更新「名字」失败：原因`，并且 30 分钟内不再自动重试同一个订阅，免得服务器挂了每分钟弹一次。
+     - 订阅页：`t` 开关当前 URL 订阅的自动更新（写 `subscriptions.toml`；文件订阅提示 `文件订阅不自动更新，按 u 重新读取`），每行多一列：`24h`（间隔）、`关`（橙色）、`—`（文件）；宽度不够时这一列最先让出。**间隔本身没有界面可改**，要改就编辑 `subscriptions.toml` 的 `interval_hours`（方案只要求显示）。
+     - 手动验证（临时 `XDG_*`，v1.19.33，本地 `http.server`）：导入 URL 订阅后退出，把 `subscriptions.toml` 里的 `updated_at` 改成 25 小时前，再启动 tabby：6 秒内服务器收到 `GET /cfg`（UA `tabby/v0.1.0 clash-verge Platform/linux`），`updated_at` 变成当前时间，没有 toast，订阅页那一行显示 `刚刚  24h`，内核日志里有重新加载。没有真的等一分钟（启动后第一次检查是立即的，之后每 60 秒；间隔逻辑由测试覆盖）。
 7. `feat(core): start the managed core at login`
    - 范围：§9.1。
    - 验收：开启后单元文件存在并已 enable，`systemctl --user restart default.target` 之后内核在运行；关闭后单元文件不存在；后备模式下开关置灰。

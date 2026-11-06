@@ -1309,6 +1309,9 @@ pub enum Action {
     /// `d` on the subscriptions page: ask to delete the subscription under
     /// the cursor.
     DeleteSubscription,
+    /// `t` on the subscriptions page: turn the automatic update of the
+    /// subscription under the cursor on or off.
+    ToggleAutoUpdate,
     /// `h` on the providers page: health-check the proxy provider under the
     /// cursor.
     HealthCheck,
@@ -1573,6 +1576,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('d') if page == Page::Subscriptions => {
                     Some(Action::DeleteSubscription)
                 }
+                KeyCode::Char('t') if page == Page::Subscriptions => Some(Action::ToggleAutoUpdate),
                 // Only lowercase: the dialog says `y`, and a dangerous action
                 // should not go ahead on a Shift slip.
                 KeyCode::Char('y') => Some(Action::Accept),
@@ -2598,6 +2602,7 @@ impl App {
             Action::UpdateSubscription => self.update_subscription(),
             Action::UpdateSubscriptions => self.ask_update_subscriptions(),
             Action::DeleteSubscription => self.ask_delete_subscription(),
+            Action::ToggleAutoUpdate => self.toggle_auto_update(),
             Action::Refresh => self.refresh(),
         }
     }
@@ -4415,6 +4420,7 @@ impl App {
             self.spinner = self.spinner.wrapping_add(1);
             self.dirty = true;
         }
+        self.auto_update_due(now);
         let mut retry_due = false;
         if let Some(reconnect) = &mut self.reconnect
             && let Some(at) = reconnect.retry_at
@@ -10234,5 +10240,177 @@ secret = "b-secret"
             .count();
         assert_eq!(rows, 3, "{screen}");
         assert!(screen.contains('…'), "{screen}");
+    }
+
+    /// Makes every subscription of the managed core in `dir` look as if it
+    /// was last updated `hours` ago.
+    fn age_subscriptions(dir: &std::path::Path, hours: i64) {
+        let path = dir.join("core/subscriptions.toml");
+        let mut store = crate::core::Store::load(&path).unwrap();
+        let then = jiff::Timestamp::now().as_second() - hours * 3600;
+        for sub in &mut store.subscriptions {
+            sub.updated_at = then;
+        }
+        store.save(&path).unwrap();
+    }
+
+    async fn requests_for(server: &wiremock::MockServer) -> usize {
+        server.received_requests().await.unwrap().len()
+    }
+
+    #[tokio::test]
+    async fn a_subscription_whose_interval_has_passed_is_updated_in_the_background_without_a_word()
+    {
+        let server = subscription_server(200, SUB_YAML).await;
+        let dir = testing::scratch("subs-auto");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()))
+            .await
+            .unwrap();
+        let file = dir.join("local.yaml");
+        std::fs::write(&file, SUB_YAML).unwrap();
+        core.import_file(&file).await.unwrap();
+        age_subscriptions(&dir, 25);
+        let imported = requests_for(&server).await;
+        let (mut app, mut rx) = managed_app(core);
+        app.start();
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.list.is_some()
+        })
+        .await;
+        let before = testing::requests_to(port).len();
+
+        let now = Instant::now();
+        app.on_tick(now);
+        // The URL one, and not the file.
+        assert_eq!(app.subscriptions_view.busy.len(), 1);
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.busy.is_empty()
+        })
+        .await;
+
+        assert_eq!(requests_for(&server).await, imported + 1);
+        // Nothing is said about it (a toast of the connection to the stand-in
+        // kernel may be on screen, which is not what is asked).
+        assert!(
+            !toasted(&app, "更新") && !toasted(&app, "订阅"),
+            "{:?}",
+            app.toasts
+        );
+        let refreshed = app.subscriptions_view.visible()[0].updated_at;
+        assert!(refreshed > jiff::Timestamp::now().as_second() - 60);
+        // It was the one in use: the kernel is asked to read it again.
+        requested(&mut app, &mut rx, port, |requests| {
+            requests[before..]
+                .iter()
+                .any(|request| request.starts_with("PUT /configs"))
+        })
+        .await;
+
+        // Looked at again only a minute on, and then there is nothing due.
+        app.on_tick(now + Duration::from_secs(30));
+        app.on_tick(now + Duration::from_secs(61));
+        assert!(app.subscriptions_view.busy.is_empty());
+        assert_eq!(requests_for(&server).await, imported + 1);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_automatic_update_says_so_and_is_not_tried_again_for_half_an_hour() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let dir = testing::scratch("subs-auto-fail");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()))
+            .await
+            .unwrap();
+        age_subscriptions(&dir, 25);
+        server.reset().await;
+        let (mut app, mut rx) = managed_app(core);
+        app.start();
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.list.is_some()
+        })
+        .await;
+
+        let now = Instant::now();
+        app.on_tick(now);
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.busy.is_empty()
+        })
+        .await;
+        assert!(toasted(&app, "更新「机场」失败"), "{:?}", app.toasts);
+        assert_eq!(requests_for(&server).await, 1);
+
+        // Every minute it is looked at, and left alone, until half an hour.
+        app.on_tick(now + Duration::from_secs(61));
+        app.on_tick(now + Duration::from_mins(29));
+        assert!(app.subscriptions_view.busy.is_empty());
+        assert_eq!(requests_for(&server).await, 1);
+        app.on_tick(now + Duration::from_mins(31));
+        assert_eq!(app.subscriptions_view.busy.len(), 1);
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.busy.is_empty()
+        })
+        .await;
+        assert_eq!(requests_for(&server).await, 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn t_turns_a_subscription_off_for_the_timer_and_the_row_says_so() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, _) = subscriptions_app("subs-auto-toggle", &server).await;
+        age_subscriptions(&dir, 25);
+        let screen = draw(&app);
+        assert!(
+            screen
+                .lines()
+                .any(|line| line.contains("机场") && line.contains("24h")),
+            "{screen}"
+        );
+        // A file is read by hand, and says it is not on the timer.
+        assert!(
+            screen
+                .lines()
+                .any(|line| line.contains("local") && line.contains('—')),
+            "{screen}"
+        );
+
+        key_press(&mut app, KeyCode::Char('t'));
+        pump_until(&mut app, &mut rx, |app| {
+            !app.subscriptions_view.visible()[0].auto_update
+        })
+        .await;
+        assert!(toasted(&app, "「机场」自动更新已关闭"), "{:?}", app.toasts);
+        let screen = draw(&app);
+        assert!(
+            screen
+                .lines()
+                .any(|line| line.contains("机场") && line.contains('关')),
+            "{screen}"
+        );
+        // Off, it is never due, however old.
+        let imported = requests_for(&server).await;
+        let store = crate::core::Store::load(&dir.join("core/subscriptions.toml")).unwrap();
+        assert!(!store.subscriptions[0].auto_update);
+        app.subscriptions_view.list = Some(Ok(store));
+        app.on_tick(Instant::now());
+        assert!(app.subscriptions_view.busy.is_empty());
+        assert_eq!(requests_for(&server).await, imported);
+
+        // On again, and the file's row cannot be switched.
+        key_press(&mut app, KeyCode::Char('t'));
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.visible()[0].auto_update
+        })
+        .await;
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Char('t'));
+        assert!(toasted(&app, "文件订阅不自动更新"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

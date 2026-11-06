@@ -101,6 +101,7 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
             ("a", "添加：订阅地址或文件路径"),
             ("u", "更新当前订阅"),
             ("U", "更新全部 / 匹配的"),
+            ("t", "开关自动更新（URL 订阅）"),
             ("d", "删除（正在使用的不能删）"),
             ("/", "按名称过滤"),
             ("Esc", "清除过滤"),

@@ -108,6 +108,22 @@ impl Store {
     pub fn active(&self) -> Option<&Subscription> {
         self.get(self.active.as_deref()?)
     }
+
+    /// The subscriptions to update at `now` (unix seconds): those that are
+    /// asked for from an address, with auto-update on, whose last update is
+    /// more than their interval ago. One never updated is due. A file is
+    /// read when the user says so: it is theirs, and may be half written.
+    pub fn due(&self, now: i64) -> Vec<&Subscription> {
+        self.subscriptions
+            .iter()
+            .filter(|sub| {
+                let interval = i64::from(sub.interval_hours.max(1)) * 3600;
+                sub.kind == Kind::Url
+                    && sub.auto_update
+                    && sub.updated_at.saturating_add(interval) <= now
+            })
+            .collect()
+    }
 }
 
 /// What a `subscription-userinfo` header says
@@ -360,6 +376,46 @@ mod tests {
             "  boom happened"
         );
         assert_eq!(first_error(""), "");
+    }
+
+    fn sub(id: &str, kind: Kind, auto: bool, hours: u32, updated_at: i64) -> Subscription {
+        Subscription {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            kind,
+            source: "https://x.test".to_owned(),
+            auto_update: auto,
+            interval_hours: hours,
+            updated_at,
+            usage: None,
+        }
+    }
+
+    #[test]
+    fn a_subscription_is_due_once_its_interval_has_passed_and_only_if_it_may_be_updated_alone() {
+        const HOUR: i64 = 3600;
+        let store = Store {
+            active: None,
+            subscriptions: vec![
+                sub("on-time", Kind::Url, true, 24, 1_000_000),
+                sub("off", Kind::Url, false, 1, 0),
+                sub("file", Kind::File, true, 1, 0),
+                sub("never", Kind::Url, true, 24, 0),
+                // An interval of 0 is no reason to ask every minute.
+                sub("zero", Kind::Url, true, 0, 1_000_000),
+            ],
+        };
+        let due =
+            |now: i64| -> Vec<&str> { store.due(now).iter().map(|sub| sub.id.as_str()).collect() };
+        // Just short of 24 hours after the last: only the one never updated.
+        assert_eq!(due(1_000_000 + 24 * HOUR - 1), ["never", "zero"]);
+        // On the hour it is due, as the one that asks for an hour is.
+        assert_eq!(due(1_000_000 + 24 * HOUR), ["on-time", "never", "zero"]);
+        // A zero interval is an hour.
+        assert!(!due(1_000_000 + HOUR - 1).contains(&"zero"));
+        assert!(due(1_000_000 + HOUR).contains(&"zero"));
+        // Off, and files, never.
+        assert!(!due(i64::MAX / 2).contains(&"off") && !due(i64::MAX / 2).contains(&"file"));
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {

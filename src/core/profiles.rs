@@ -342,6 +342,21 @@ impl ManagedCore {
         })
     }
 
+    /// Turns the automatic update of subscription `id` on or off.
+    pub async fn set_auto_update(&self, id: &str, on: bool) -> Result<Outcome, CoreError> {
+        let _guard = self.lock.lock().await;
+        let mut store = self.subscriptions()?;
+        let entry = store.get_mut(id).ok_or(CoreError::NoSubscription)?;
+        entry.auto_update = on;
+        let name = entry.name.clone();
+        self.save_subscriptions(&store)?;
+        Ok(Outcome {
+            store,
+            reload: false,
+            name,
+        })
+    }
+
     /// Deletes subscription `id` and its files. The one in use stays: the
     /// kernel is running it.
     pub async fn remove(&self, id: &str) -> Result<Outcome, CoreError> {
