@@ -150,6 +150,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 },
             ),
         ],
+        Page::Subscriptions => subscription_hints(app),
         Page::Providers => vec![
             hint("u", "更新"),
             hint(
@@ -191,6 +192,29 @@ fn page_hints(app: &App) -> Vec<Hint> {
     hints
 }
 
+/// The subscriptions page's keys; an external controller has none.
+fn subscription_hints(app: &App) -> Vec<Hint> {
+    if !app.is_managed() {
+        return vec![];
+    }
+    vec![
+        hint("Enter", "切换"),
+        hint("a", "添加"),
+        hint("u", "更新"),
+        hint(
+            "U",
+            if app.subscriptions_view.filter.value().is_empty() {
+                "全部更新"
+            } else {
+                "更新匹配"
+            },
+        ),
+        hint("d", "删除"),
+        hint("/", "过滤"),
+        hint("j/k", "移动"),
+    ]
+}
+
 /// The settings page's keys: what `Enter` does to the setting under the
 /// cursor, dimmed where the kernel lacks it.
 fn settings_hints(app: &App) -> Vec<Hint> {
@@ -228,7 +252,7 @@ fn settings_hints(app: &App) -> Vec<Hint> {
 
 /// Keys that work on every page.
 fn global_hints(page: Page) -> Vec<Hint> {
-    let mut hints = vec![hint("1-7/Tab", "切换页面")];
+    let mut hints = vec![hint("1-8/Tab", "切换页面")];
     // Only where it has something to show; the proxies bar is already full.
     if page == Page::Overview {
         hints.push(hint("m", "切换模式"));
@@ -357,11 +381,16 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 /// The filter box that replaces the hints while typing: `/ text`, with the
 /// terminal cursor at the insertion point.
 fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
-    const PROMPT: &str = "/ ";
-    const HINT: &str = "  Enter 确定   Esc 清除";
+    // The same box takes the address or path of a subscription to import.
+    let adding = app.adding_subscription();
+    let (prompt, hint) = if adding {
+        ("+ ", "  Enter 导入   Esc 取消")
+    } else {
+        ("/ ", "  Enter 确定   Esc 清除")
+    };
 
     let theme = app.theme;
-    let room = usize::from(area.width).saturating_sub(PROMPT.len() + HINT.width());
+    let room = usize::from(area.width).saturating_sub(prompt.width() + hint.width());
     let scroll = input.visual_scroll(room);
 
     // Drop the leading columns that scrolled out of the box.
@@ -376,18 +405,23 @@ fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
         })
         .collect();
 
+    let text = if adding && visible.is_empty() {
+        Span::styled("订阅地址或文件路径", Style::new().fg(theme.muted))
+    } else {
+        Span::styled(visible, Style::new().fg(theme.fg))
+    };
     let line = Line::from(vec![
         Span::styled(
-            PROMPT,
+            prompt,
             Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
         ),
-        Span::styled(visible, Style::new().fg(theme.fg)),
-        Span::styled(HINT, Style::new().fg(theme.muted)),
+        text,
+        Span::styled(hint, Style::new().fg(theme.muted)),
     ]);
     frame.render_widget(Paragraph::new(line), area);
 
     let cursor_x = area.x
-        + u16::try_from(PROMPT.len() + input.visual_cursor().saturating_sub(scroll)).unwrap_or(0);
+        + u16::try_from(prompt.width() + input.visual_cursor().saturating_sub(scroll)).unwrap_or(0);
     frame.set_cursor_position((cursor_x, area.y));
 }
 

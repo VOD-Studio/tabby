@@ -250,7 +250,10 @@ async fn without_systemd_the_kernel_is_a_process_that_can_be_found_and_stopped()
 
     assert_eq!(core.status().await, supervisor::Status::Inactive);
     core.launch(&binary).await.unwrap();
-    let pid = core.stored_pid().expect("the pid is kept in state.toml");
+    let pid = core
+        .stored_process()
+        .expect("the process is kept in state.toml")
+        .pid;
     assert_eq!(core.status().await, supervisor::Status::Active);
     assert!(core.alive().await);
     // Its own process group: a ^C for tabby does not reach it.
@@ -267,7 +270,7 @@ async fn without_systemd_the_kernel_is_a_process_that_can_be_found_and_stopped()
     assert_eq!(group, pid);
 
     core.stop().await.unwrap();
-    assert_eq!(core.stored_pid(), None);
+    assert_eq!(core.stored_process(), None);
     assert_eq!(core.status().await, supervisor::Status::Inactive);
     assert!(gone(&core, pid));
     fs::remove_dir_all(dir).unwrap();
@@ -309,14 +312,17 @@ async fn a_pid_that_is_not_the_kernel_is_never_signalled() {
     let dir = scratch("stale");
     let recorder = without_systemd();
     let core = core_at(&dir, free_port(), &recorder, false);
-    // This very process has a number, but is not the kernel.
-    core.store_pid(Some(std::process::id())).unwrap();
+    // This very process has a number, but did not start when the kernel did.
+    let mut state = State::load_or_create(&core.paths.state()).unwrap();
+    state.pid = Some(std::process::id());
+    state.pid_start = Some(1);
+    state.save(&core.paths.state()).unwrap();
 
     assert_eq!(core.status().await, supervisor::Status::Inactive);
     core.stop().await.unwrap();
 
     assert_eq!(recorder.runs("kill"), Vec::<String>::new());
-    assert_eq!(core.stored_pid(), None);
+    assert_eq!(core.stored_process(), None);
     fs::remove_dir_all(dir).unwrap();
 }
 

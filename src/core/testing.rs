@@ -110,6 +110,7 @@ fn core_in(
         secret: SECRET.to_owned(),
         unit: UNIT.to_owned(),
         pid: None,
+        pid_start: None,
     };
     let root = dir.join("core");
     fs::create_dir_all(&root).unwrap();
@@ -154,7 +155,7 @@ pub(crate) fn serve(port: u16, reply: Reply, delay: Duration) {
     let accept = move |listener: TcpListener| {
         for stream in listener.incoming() {
             let Ok(stream) = stream else { return };
-            thread::spawn(move || respond(stream, reply));
+            thread::spawn(move || respond(stream, reply, port));
         }
     };
     if delay.is_zero() {
@@ -168,13 +169,32 @@ pub(crate) fn serve(port: u16, reply: Reply, delay: Duration) {
     }
 }
 
-pub(crate) fn respond(stream: TcpStream, reply: Reply) {
+/// The request lines every stand-in controller was sent, by port.
+static REQUESTS: Mutex<Vec<(u16, String)>> = Mutex::new(Vec::new());
+
+/// What the stand-in controller on `port` was asked, as `METHOD /path`.
+pub(crate) fn requests_to(port: u16) -> Vec<String> {
+    REQUESTS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(at, _)| *at == port)
+        .map(|(_, line)| line.clone())
+        .collect()
+}
+
+pub(crate) fn respond(stream: TcpStream, reply: Reply, port: u16) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut authorized = false;
+    let mut first = true;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
             break;
+        }
+        if std::mem::take(&mut first) {
+            let request: Vec<&str> = line.split_whitespace().take(2).collect();
+            REQUESTS.lock().unwrap().push((port, request.join(" ")));
         }
         authorized |= line
             .to_lowercase()

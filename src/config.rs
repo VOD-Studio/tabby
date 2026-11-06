@@ -524,7 +524,14 @@ impl Config {
             return Ok(());
         };
         let dir = data_dir.ok_or_else(|| eyre!("cannot find a data directory for [core]"))?;
-        self.managed = Some(Arc::new(ManagedCore::open(core.binary.clone(), dir)?));
+        let delay_url = self
+            .delay
+            .url
+            .clone()
+            .filter(|url| !url.is_empty())
+            .unwrap_or_else(|| DEFAULT_DELAY_URL.to_owned());
+        let core = ManagedCore::open(core.binary.clone(), dir, &delay_url)?;
+        self.managed = Some(Arc::new(core));
         Ok(())
     }
 

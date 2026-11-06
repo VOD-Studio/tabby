@@ -38,6 +38,8 @@ pub enum Target {
     Rule(usize),
     Provider(ProviderRef),
     Setting(Setting),
+    /// A row of the subscriptions page, by subscription id.
+    Subscription(String),
     /// A row of the profile popup, by index.
     Profile(usize),
     /// A row of the theme picker, by index.
@@ -66,6 +68,7 @@ impl Target {
                 | Self::Rule(_)
                 | Self::Provider(_)
                 | Self::Setting(_)
+                | Self::Subscription(_)
                 | Self::Profile(_)
                 | Self::Theme(_)
         )

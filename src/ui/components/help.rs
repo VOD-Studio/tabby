@@ -96,13 +96,25 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
             ("g / G", "顶部 / 底部"),
             ("Ctrl+d / Ctrl+u", "翻半页"),
         ],
+        Page::Subscriptions => &[
+            ("Enter", "切换到这个订阅"),
+            ("a", "添加：订阅地址或文件路径"),
+            ("u", "更新当前订阅"),
+            ("U", "更新全部 / 匹配的"),
+            ("d", "删除（正在使用的不能删）"),
+            ("/", "按名称过滤"),
+            ("Esc", "清除过滤"),
+            ("j / k / ↓ / ↑", "上下移动"),
+            ("g / G", "顶部 / 底部"),
+            ("Ctrl+d / Ctrl+u", "翻半页"),
+        ],
         Page::Overview => &[],
     }
 }
 
 /// Keys that work on every page, as `(key, what it does)`.
 const GLOBAL_KEYS: [(&str, &str); 9] = [
-    ("1-7", "跳到第 N 页"),
+    ("1-8", "跳到第 N 页"),
     ("Tab / Shift+Tab", "下一页 / 上一页"),
     ("r", "刷新"),
     ("m", "切换代理模式"),

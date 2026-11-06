@@ -44,10 +44,12 @@ use crate::{
 };
 
 mod managed;
+mod subscriptions;
 
 pub use managed::{CoreEvent, CorePhase};
+pub use subscriptions::{SubEvent, SubscriptionsView};
 
-/// The seven top-level pages, in tab order.
+/// The eight top-level pages, in tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Overview,
@@ -57,10 +59,12 @@ pub enum Page {
     Connections,
     Logs,
     Settings,
+    /// The managed core's subscriptions; an external controller has none.
+    Subscriptions,
 }
 
 impl Page {
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 8] = [
         Self::Overview,
         Self::Proxies,
         Self::Providers,
@@ -68,9 +72,10 @@ impl Page {
         Self::Connections,
         Self::Logs,
         Self::Settings,
+        Self::Subscriptions,
     ];
 
-    /// The page bound to number key `1`–`7`.
+    /// The page bound to number key `1`–`8`.
     fn from_digit(key: char) -> Option<Self> {
         let number = usize::try_from(key.to_digit(10)?).ok()?;
         Self::ALL.get(number.checked_sub(1)?).copied()
@@ -1293,6 +1298,17 @@ pub enum Action {
     UpdateProvider,
     /// `U`: ask to update the providers the page shows.
     UpdateProviders,
+    /// `a` on the subscriptions page: type an address or a file to import.
+    AddSubscription,
+    /// `u` on the subscriptions page: read the subscription under the
+    /// cursor again.
+    UpdateSubscription,
+    /// `U` on the subscriptions page: ask to update every subscription it
+    /// shows.
+    UpdateSubscriptions,
+    /// `d` on the subscriptions page: ask to delete the subscription under
+    /// the cursor.
+    DeleteSubscription,
     /// `h` on the providers page: health-check the proxy provider under the
     /// cursor.
     HealthCheck,
@@ -1399,6 +1415,8 @@ pub enum Msg {
     },
     /// Something about the managed kernel.
     Core(CoreEvent),
+    /// Something about the subscriptions of the managed kernel.
+    Subscription(SubEvent),
 }
 
 /// A [`Msg`] stamped with the connection it was sent for.
@@ -1503,7 +1521,12 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
             let sorted = matches!(page, Page::Proxies | Page::Connections);
             let filtered = matches!(
                 page,
-                Page::Proxies | Page::Providers | Page::Rules | Page::Connections | Page::Logs
+                Page::Proxies
+                    | Page::Providers
+                    | Page::Rules
+                    | Page::Connections
+                    | Page::Logs
+                    | Page::Subscriptions
             );
             let pausable = matches!(page, Page::Connections | Page::Logs);
             match key.code {
@@ -1540,6 +1563,16 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Char('u') if page == Page::Providers => Some(Action::UpdateProvider),
                 KeyCode::Char('U') if page == Page::Providers => Some(Action::UpdateProviders),
                 KeyCode::Char('h') if page == Page::Providers => Some(Action::HealthCheck),
+                KeyCode::Char('a') if page == Page::Subscriptions => Some(Action::AddSubscription),
+                KeyCode::Char('u') if page == Page::Subscriptions => {
+                    Some(Action::UpdateSubscription)
+                }
+                KeyCode::Char('U') if page == Page::Subscriptions => {
+                    Some(Action::UpdateSubscriptions)
+                }
+                KeyCode::Char('d') if page == Page::Subscriptions => {
+                    Some(Action::DeleteSubscription)
+                }
                 // Only lowercase: the dialog says `y`, and a dangerous action
                 // should not go ahead on a Shift slip.
                 KeyCode::Char('y') => Some(Action::Accept),
@@ -1617,6 +1650,17 @@ pub enum Confirm {
         filter: String,
         targets: Vec<ProviderRef>,
     },
+    /// `U` on the subscriptions page: the subscriptions it showed, under
+    /// `filter` when it is not empty.
+    UpdateSubscriptions {
+        filter: String,
+        ids: Vec<String>,
+    },
+    /// `d` on the subscriptions page.
+    DeleteSubscription {
+        id: String,
+        name: String,
+    },
     /// A setting that changes routing, reloads, downloads or replaces the
     /// kernel.
     Change(Change),
@@ -1635,6 +1679,8 @@ impl Confirm {
         match self {
             Self::CloseConnections(_) => "关闭连接",
             Self::UpdateProviders { .. } => "更新 Provider",
+            Self::UpdateSubscriptions { .. } => "更新订阅",
+            Self::DeleteSubscription { .. } => "删除订阅",
             Self::StopCore => "停止内核",
             Self::InstallCore { upgrade: true, .. } => "升级内核",
             Self::InstallCore { .. } => "下载内核",
@@ -1655,6 +1701,15 @@ impl Confirm {
                 format!("更新匹配「{filter}」的 {} 个 provider？", targets.len())
             }
             Self::StopCore => "停止托管内核？经由它的连接都会断开。".to_owned(),
+            Self::UpdateSubscriptions { filter, ids } if filter.is_empty() => {
+                format!("更新全部 {} 个订阅？", ids.len())
+            }
+            Self::UpdateSubscriptions { filter, ids } => {
+                format!("更新匹配「{filter}」的 {} 个订阅？", ids.len())
+            }
+            Self::DeleteSubscription { name, .. } => {
+                format!("删除订阅「{name}」及其文件？")
+            }
             Self::InstallCore {
                 release,
                 upgrade: true,
@@ -1668,8 +1723,9 @@ impl Confirm {
     pub fn verb(&self) -> &'static str {
         match self {
             Self::CloseConnections(_) => "确认",
-            Self::UpdateProviders { .. } => "更新",
+            Self::UpdateProviders { .. } | Self::UpdateSubscriptions { .. } => "更新",
             Self::StopCore => "停止",
+            Self::DeleteSubscription { .. } => "删除",
             Self::InstallCore { upgrade: true, .. } => "升级",
             Self::InstallCore { .. } => "下载",
             Self::Change(change) => change.verb(),
@@ -2132,6 +2188,8 @@ pub struct App {
     changing: HashMap<Setting, Stage>,
     /// The settings page.
     pub settings_view: SettingsView,
+    /// The subscriptions page.
+    pub subscriptions_view: SubscriptionsView,
     /// Nodes with a delay test in flight.
     pub testing: HashSet<String>,
     /// `/proxies` fetches issued so far; numbers them.
@@ -2258,6 +2316,7 @@ impl App {
             applied_config: 0,
             changing: HashMap::new(),
             settings_view: SettingsView::default(),
+            subscriptions_view: SubscriptionsView::default(),
             proxies_view: ProxiesView::default(),
             testing: HashSet::new(),
             fetches: 0,
@@ -2511,6 +2570,10 @@ impl App {
             Action::UpdateProvider => self.update_provider(),
             Action::UpdateProviders => self.ask_update_providers(),
             Action::HealthCheck => self.health_check(),
+            Action::AddSubscription => self.add_subscription(),
+            Action::UpdateSubscription => self.update_subscription(),
+            Action::UpdateSubscriptions => self.ask_update_subscriptions(),
+            Action::DeleteSubscription => self.ask_delete_subscription(),
             Action::Refresh => self.refresh(),
         }
     }
@@ -2544,6 +2607,7 @@ impl App {
                 }
                 self.fetch_rules(false);
             }
+            Page::Subscriptions => self.load_subscriptions(),
             Page::Providers => {
                 let view = &mut self.providers_view;
                 if matches!(view.proxies, Some(Err(_))) {
@@ -2688,6 +2752,17 @@ impl App {
                 let half = (capacity / 2).max(1);
                 let view = &mut self.providers_view;
                 view.cursor = movement.apply(view.cursor, view.rows().len(), half);
+                self.dirty = true;
+                return;
+            }
+            Page::Subscriptions => {
+                let screen = Rect::from(self.size);
+                let capacity = crate::ui::subscriptions::capacity(
+                    regions(screen, self.reconnect.is_some()).body,
+                );
+                let half = (capacity / 2).max(1);
+                let view = &mut self.subscriptions_view;
+                view.cursor = movement.apply(view.cursor, view.visible().len(), half);
                 self.dirty = true;
                 return;
             }
@@ -2850,6 +2925,9 @@ impl App {
             Page::Rules => self.rules_view.typing,
             Page::Logs => self.logs_view.typing,
             Page::Settings => self.settings_view.editing.is_some(),
+            Page::Subscriptions => {
+                self.subscriptions_view.typing || self.subscriptions_view.adding.is_some()
+            }
             Page::Overview => false,
         }
     }
@@ -2862,6 +2940,13 @@ impl App {
             Page::Connections => Some(&self.connections_view.filter),
             Page::Rules => Some(&self.rules_view.filter),
             Page::Logs => Some(&self.logs_view.filter),
+            // What is typed to import goes where the filter goes.
+            Page::Subscriptions => Some(
+                self.subscriptions_view
+                    .adding
+                    .as_ref()
+                    .unwrap_or(&self.subscriptions_view.filter),
+            ),
             _ => None,
         }
     }
@@ -2985,6 +3070,14 @@ impl App {
                 view.cursor = index;
                 true
             }
+            Target::Subscription(id) => {
+                let view = &mut self.subscriptions_view;
+                let Some(index) = view.visible().iter().position(|sub| sub.id == *id) else {
+                    return false;
+                };
+                view.cursor = index;
+                true
+            }
             Target::Setting(setting) => {
                 let Some(index) = self.settings().iter().position(|each| each == setting) else {
                     return false;
@@ -3056,10 +3149,13 @@ impl App {
         if !self.typing() {
             return;
         }
-        if self.page == Page::Settings {
-            self.settings_view.editing = None;
-        } else {
-            self.set_typing(false);
+        match self.page {
+            Page::Settings => self.settings_view.editing = None,
+            Page::Subscriptions => {
+                self.subscriptions_view.adding = None;
+                self.set_typing(false);
+            }
+            _ => self.set_typing(false),
         }
         self.dirty = true;
     }
@@ -3099,6 +3195,17 @@ impl App {
                 self.logs_view.settle(fit);
             }
             Page::Settings => self.settings_view.type_key(key),
+            Page::Subscriptions => {
+                let view = &mut self.subscriptions_view;
+                match &mut view.adding {
+                    Some(input) => {
+                        input.handle_event(&event);
+                    }
+                    None => view.edit_filter(|filter| {
+                        filter.handle_event(&event);
+                    }),
+                }
+            }
             Page::Overview => {}
         }
         self.dirty = true;
@@ -3112,6 +3219,7 @@ impl App {
             Page::Connections => self.connections_view.typing = typing,
             Page::Rules => self.rules_view.typing = typing,
             Page::Logs => self.logs_view.typing = typing,
+            Page::Subscriptions => self.subscriptions_view.typing = typing,
             _ => {}
         }
         self.dirty = true;
@@ -3121,6 +3229,8 @@ impl App {
     fn accept_input(&mut self) {
         if self.page == Page::Settings {
             self.submit_port();
+        } else if self.subscriptions_view.adding.is_some() && self.page == Page::Subscriptions {
+            self.submit_subscription();
         } else {
             self.set_typing(false);
         }
@@ -3145,6 +3255,12 @@ impl App {
                 self.logs_view.settle(fit);
             }
             Page::Settings => self.settings_view.editing = None,
+            Page::Subscriptions => {
+                // The box of an import first, then the filter.
+                if self.subscriptions_view.adding.take().is_none() {
+                    self.subscriptions_view.clear_filter();
+                }
+            }
             Page::Overview => {}
         }
     }
@@ -3242,6 +3358,7 @@ impl App {
                 self.dirty = true;
             }
             Page::Settings => self.activate_setting(),
+            Page::Subscriptions => self.switch_subscription(),
             _ => {}
         }
     }
@@ -3625,6 +3742,8 @@ impl App {
             Confirm::UpdateProviders { targets, .. } => self.update_providers(targets),
             Confirm::Change(change) => self.send_change(change),
             Confirm::StopCore => self.stop_core(),
+            Confirm::UpdateSubscriptions { ids, .. } => self.update_subscriptions(ids),
+            Confirm::DeleteSubscription { id, .. } => self.delete_subscription(id),
             Confirm::InstallCore { release, upgrade } => {
                 if upgrade {
                     self.upgrade_core(release);
@@ -4223,6 +4342,7 @@ impl App {
             },
             Msg::Providers(msg) => self.on_providers(msg),
             Msg::Core(event) => self.on_core(event),
+            Msg::Subscription(event) => self.on_subscription(event),
             Msg::Stream { stream, event } => self.on_stream(stream, event),
         }
         self.dirty = true;
@@ -4239,6 +4359,7 @@ impl App {
             Page::Proxies => !self.testing.is_empty(),
             Page::Providers => self.providers_spinning(),
             Page::Settings => !self.changing.is_empty(),
+            Page::Subscriptions => self.subscriptions_view.working(),
             _ => false,
         };
         if self.is_loading() || spinning {
@@ -4366,6 +4487,7 @@ impl App {
         }
         match self.page {
             Page::Overview | Page::Settings => self.configs.is_none(),
+            Page::Subscriptions => self.is_managed() && self.subscriptions_view.list.is_none(),
             Page::Proxies => self.proxies.is_none(),
             Page::Connections => self.connections_view.rows.is_none(),
             Page::Rules => self.rules_view.rows.is_none(),
@@ -9329,5 +9451,313 @@ secret = "b-secret"
         assert!(!app.is_changing(Setting::UpgradeCore));
         assert_eq!(app.pending, None);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    const SUB_YAML: &str = "proxies:\n  - {name: a, type: ss, server: 1.2.3.4, port: 1, cipher: aes-128-gcm, password: p}\nrules:\n  - MATCH,DIRECT\n";
+
+    /// A subscription server for `/sub`: `body`, named 机场 with 1 GB of
+    /// 10 GB used.
+    async fn subscription_server(status: u16, body: &str) -> wiremock::MockServer {
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let server = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sub"))
+            .respond_with(
+                ResponseTemplate::new(status)
+                    .set_body_string(body)
+                    .insert_header(
+                        "content-disposition",
+                        "attachment; filename*=UTF-8''%E6%9C%BA%E5%9C%BA.yaml",
+                    )
+                    .insert_header(
+                        "subscription-userinfo",
+                        "upload=0; download=1073741824; total=10737418240",
+                    ),
+            )
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// A managed app on the subscriptions page with the kernel running and
+    /// two subscriptions imported (`机场` from `server`, active; `local`
+    /// from a file), and the list read.
+    async fn subscriptions_app(
+        name: &str,
+        server: &wiremock::MockServer,
+    ) -> (App, mpsc::Receiver<Envelope>, std::path::PathBuf, u16) {
+        let dir = testing::scratch(name);
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()))
+            .await
+            .unwrap();
+        let file = dir.join("local.yaml");
+        std::fs::write(&file, SUB_YAML).unwrap();
+        core.import_file(&file).await.unwrap();
+        let (mut app, mut rx) = managed_app(core);
+        app.start();
+        pump_until(&mut app, &mut rx, core_up).await;
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.list.is_some()
+        })
+        .await;
+        key_press(&mut app, KeyCode::Char('8'));
+        assert_eq!(app.page, Page::Subscriptions);
+        (app, rx, dir, port)
+    }
+
+    #[tokio::test]
+    async fn an_external_controller_has_no_subscriptions_and_says_who_manages_them() {
+        let (mut app, _rx) = app_without_controller();
+        key_press(&mut app, KeyCode::Char('8'));
+        assert_eq!(app.page, Page::Subscriptions);
+
+        let screen = draw(&app);
+        assert!(
+            screen.contains("连接的是外部控制器，订阅由它自己管理"),
+            "{screen}"
+        );
+        assert!(screen.contains("P 切换到托管内核"), "{screen}");
+        // Its keys have nothing to act on.
+        for key in ['a', 'u', 'U', 'd'] {
+            key_press(&mut app, KeyCode::Char(key));
+        }
+        key_press(&mut app, KeyCode::Enter);
+        assert!(!app.typing() && app.pending.is_none() && app.toasts.is_empty());
+        // The eighth tab is there, with its number alone at 60 columns too.
+        app.update(Action::Resize(Size::new(60, 20)));
+        assert!(draw(&app).contains('8'));
+    }
+
+    #[tokio::test]
+    async fn the_list_marks_the_one_in_use_and_shows_each_ones_kind_age_and_usage() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (app, _rx, dir, _) = subscriptions_app("subs-list", &server).await;
+
+        let screen = draw(&app);
+
+        let rows: Vec<&str> = screen
+            .lines()
+            .filter(|line| line.contains("刚刚"))
+            .collect();
+        assert_eq!(rows.len(), 2, "{screen}");
+        assert!(
+            rows[0].contains("✓ 机场") && rows[0].contains("URL"),
+            "{}",
+            rows[0]
+        );
+        assert!(rows[0].contains("1.0 GB / 10.0 GB"), "{}", rows[0]);
+        assert!(
+            rows[1].contains("local") && rows[1].contains("文件"),
+            "{}",
+            rows[1]
+        );
+        assert!(!rows[1].contains('✓'), "{}", rows[1]);
+        assert!(screen.contains("订阅  2"), "{screen}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_address_typed_into_the_box_is_imported_and_the_new_row_is_under_the_cursor() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, _) = subscriptions_app("subs-add", &server).await;
+
+        key_press(&mut app, KeyCode::Char('a'));
+        assert!(app.typing() && app.adding_subscription());
+        // Keys that mean something elsewhere are text in the box.
+        type_text(&mut app, &format!("{}/sub?x=1", server.uri()));
+        assert_eq!(app.page, Page::Subscriptions);
+        key_press(&mut app, KeyCode::Enter);
+        assert!(!app.typing() && app.subscriptions_view.importing);
+        assert!(draw(&app).contains("正在导入"));
+
+        pump_until(&mut app, &mut rx, |app| !app.subscriptions_view.importing).await;
+
+        assert!(toasted(&app, "已导入「机场」"), "{:?}", app.toasts);
+        let view = &app.subscriptions_view;
+        assert_eq!(view.visible().len(), 3);
+        assert_eq!(view.selected().unwrap().name, "机场");
+        // The first was already in use: the new one is not.
+        assert_ne!(view.active(), view.selected().map(|sub| sub.id.as_str()));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_import_says_why_and_a_path_is_taken_for_a_file() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, _) = subscriptions_app("subs-add-fail", &server).await;
+
+        key_press(&mut app, KeyCode::Char('a'));
+        type_text(&mut app, &format!("{}/missing.yaml", dir.display()));
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| !app.subscriptions_view.importing).await;
+        assert!(
+            toasted(&app, "导入失败：原文件已不存在"),
+            "{:?}",
+            app.toasts
+        );
+
+        // Esc drops what was typed; an empty box imports nothing.
+        key_press(&mut app, KeyCode::Char('a'));
+        type_text(&mut app, "http://x");
+        key_press(&mut app, KeyCode::Esc);
+        assert!(app.subscriptions_view.adding.is_none() && !app.typing());
+        key_press(&mut app, KeyCode::Char('a'));
+        key_press(&mut app, KeyCode::Enter);
+        assert!(!app.subscriptions_view.importing);
+        assert_eq!(app.subscriptions_view.visible().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn enter_switches_the_subscription_and_the_kernel_is_asked_to_read_its_config_again() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, port) = subscriptions_app("subs-switch", &server).await;
+        let before = testing::requests_to(port).len();
+
+        // On the one in use there is nothing to do.
+        key_press(&mut app, KeyCode::Enter);
+        assert!(toasted(&app, "「机场」已在使用"));
+        assert!(app.subscriptions_view.busy.is_empty());
+
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Enter);
+        assert!(!app.subscriptions_view.busy.is_empty());
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.busy.is_empty()
+        })
+        .await;
+        assert!(toasted(&app, "已切换到「local」"), "{:?}", app.toasts);
+        // Wait for the reload's reply, which refreshes the pages behind it.
+        pump_until(&mut app, &mut rx, |_| {
+            testing::requests_to(port)[before..]
+                .iter()
+                .any(|request| request.starts_with("PUT /configs"))
+        })
+        .await;
+
+        let config = std::fs::read_to_string(dir.join("core/home/config.yaml")).unwrap();
+        assert!(config.starts_with(SUB_YAML), "{config}");
+        assert!(draw(&app).contains("✓ local"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_subscription_in_use_cannot_be_deleted_and_another_goes_after_a_question() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, _) = subscriptions_app("subs-delete", &server).await;
+
+        key_press(&mut app, KeyCode::Char('d'));
+        assert!(toasted(&app, "先切换到其他订阅"));
+        assert!(app.pending.is_none());
+
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Char('d'));
+        assert!(draw(&app).contains("删除订阅「local」及其文件？"));
+        // Declined, nothing goes.
+        key_press(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.subscriptions_view.visible().len(), 2);
+        key_press(&mut app, KeyCode::Char('d'));
+        key_press(&mut app, KeyCode::Char('y'));
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.visible().len() == 1
+        })
+        .await;
+        assert!(toasted(&app, "已删除「local」"));
+        assert_eq!(app.subscriptions_view.visible()[0].name, "机场");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_update_is_a_toast_and_the_row_stops_spinning() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, _) = subscriptions_app("subs-update", &server).await;
+
+        server.reset().await;
+        key_press(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.subscriptions_view.busy.len(), 1);
+        // A second press while it runs is not a second update.
+        key_press(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.subscriptions_view.busy.len(), 1);
+        pump_until(&mut app, &mut rx, |app| {
+            app.subscriptions_view.busy.is_empty()
+        })
+        .await;
+
+        assert!(toasted(&app, "更新「机场」失败"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_filter_narrows_the_list_and_a_bulk_update_asks_about_what_is_shown() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, _rx, dir, _) = subscriptions_app("subs-filter", &server).await;
+
+        key_press(&mut app, KeyCode::Char('U'));
+        assert!(draw(&app).contains("更新全部 2 个订阅？"));
+        key_press(&mut app, KeyCode::Char('n'));
+
+        key_press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "LOC");
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.subscriptions_view.visible().len(), 1);
+        let screen = draw(&app);
+        assert!(
+            screen.contains("1/2 · 过滤「LOC」") && !screen.contains("机场"),
+            "{screen}"
+        );
+        key_press(&mut app, KeyCode::Char('U'));
+        assert!(draw(&app).contains("更新匹配「LOC」的 1 个订阅？"));
+        key_press(&mut app, KeyCode::Char('n'));
+
+        type_filter_none(&mut app);
+        assert_eq!(app.subscriptions_view.visible().len(), 2);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// `Esc` on the page: the filter goes, the keyboard is the page's.
+    fn type_filter_none(app: &mut App) {
+        key_press(app, KeyCode::Esc);
+    }
+
+    #[test]
+    fn the_subscription_keys_are_the_pages_own() {
+        for (key, expected) in [
+            ('a', Action::AddSubscription),
+            ('u', Action::UpdateSubscription),
+            ('U', Action::UpdateSubscriptions),
+            ('d', Action::DeleteSubscription),
+            ('/', Action::StartFilter),
+        ] {
+            assert_eq!(
+                press(key, Page::Subscriptions, false),
+                Some(expected),
+                "{key}"
+            );
+        }
+        // Elsewhere they are what they were, or nothing.
+        assert_eq!(press('a', Page::Rules, false), None);
+        assert_eq!(press('d', Page::Rules, false), None);
+        assert_eq!(
+            press('u', Page::Providers, false),
+            Some(Action::UpdateProvider)
+        );
+        assert_eq!(
+            press('8', Page::Rules, false),
+            Some(Action::SelectPage(Page::Subscriptions))
+        );
+        // And in the box they are text.
+        assert_eq!(
+            press('a', Page::Subscriptions, true),
+            Some(Action::FilterInput(KeyEvent::new(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE
+            )))
+        );
     }
 }

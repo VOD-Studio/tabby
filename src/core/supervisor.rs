@@ -18,6 +18,29 @@ const LOG_LINES: usize = 20;
 /// How often a kernel asked to stop is looked at again.
 const STOP_POLL: Duration = Duration::from_millis(100);
 
+/// A process, as it is told apart from the next one with its number.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Process {
+    pub pid: u32,
+    /// When it started, from [`start_time`].
+    pub start: Option<u64>,
+}
+
+/// When process `pid` started, in clock ticks since boot (field 22 of
+/// `/proc/<pid>/stat`); `None` when there is no such process, it has ended
+/// without being waited for, or there is no `/proc`.
+pub fn start_time(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The name in the second field may hold spaces and parentheses: the
+    // rest starts after the last one. Then comes the state, field 3.
+    let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+    let state = fields.next()?;
+    if state == "Z" || state == "X" {
+        return None;
+    }
+    fields.nth(18)?.parse().ok()
+}
+
 /// How the kernel is kept running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -124,8 +147,8 @@ impl ManagedCore {
                     Status::parse(&String::from_utf8_lossy(&output.stdout))
                 })
             }
-            Mode::Fallback => match self.stored_pid() {
-                Some(pid) if self.process_is_kernel(pid).await => Status::Active,
+            Mode::Fallback => match self.stored_process() {
+                Some(process) if self.is_kernel(process).await => Status::Active,
                 _ => Status::Inactive,
             },
         }
@@ -156,7 +179,7 @@ impl ManagedCore {
                         action: Action::Start,
                         message: err.to_string(),
                     })?;
-                self.store_pid(Some(pid))
+                self.store_process(Some(pid))
             }
         }
     }
@@ -207,21 +230,21 @@ impl ManagedCore {
                 .await
             }
             Mode::Fallback => {
-                let Some(pid) = self.stored_pid() else {
+                let Some(process) = self.stored_process() else {
                     return Ok(());
                 };
-                if self.process_is_kernel(pid).await {
-                    self.signal("TERM", pid).await?;
+                if self.is_kernel(process).await {
+                    self.signal("TERM", process.pid).await?;
                     let deadline = Instant::now() + self.timing.stop_grace;
-                    while self.process_is_kernel(pid).await {
+                    while self.is_kernel(process).await {
                         if Instant::now() >= deadline {
-                            self.signal("KILL", pid).await?;
+                            self.signal("KILL", process.pid).await?;
                             break;
                         }
                         tokio::time::sleep(STOP_POLL).await;
                     }
                 }
-                self.store_pid(None)
+                self.store_process(None)
             }
         }
     }
@@ -234,26 +257,14 @@ impl ManagedCore {
         .await
     }
 
-    /// Whether process `pid` is the managed kernel, not just a process
-    /// with that number: its command line has the kernel binary in it, as
-    /// the program or, for a wrapper script, as the script an interpreter
-    /// runs.
-    async fn process_is_kernel(&self, pid: u32) -> bool {
-        let Ok(binary) = self.binary() else {
-            return false;
-        };
-        let proc = Path::new("/proc");
-        if proc.join("self").exists() {
-            let Ok(cmdline) = fs::read(proc.join(pid.to_string()).join("cmdline")) else {
-                return false;
-            };
-            return cmdline
-                .split(|byte| *byte == 0)
-                .take(2)
-                .any(|part| part == binary.as_os_str().as_encoded_bytes());
+    /// Whether `process` is still the kernel tabby started, and not just a
+    /// process with that number: it started when the kernel did. Without
+    /// `/proc` only the number can be checked.
+    async fn is_kernel(&self, process: Process) -> bool {
+        if Path::new("/proc/self").exists() {
+            return process.start.is_some() && start_time(process.pid) == process.start;
         }
-        // Without /proc only the number can be checked.
-        self.exec(Cmd::new("kill", ["-0".to_owned(), pid.to_string()]))
+        self.exec(Cmd::new("kill", ["-0".to_owned(), process.pid.to_string()]))
             .await
             .is_ok_and(|output| output.status.success())
     }

@@ -611,7 +611,7 @@ fn health_cells(theme: &Theme, health: Health, width: usize) -> Vec<Span<'static
 /// What a subscription used and when it ends: `12.4 GB / 100.0 GB ·
 /// 2027-01-01 到期`. Without a total only the use, without an expiry no
 /// date; the date is in `now`'s time zone.
-fn usage(subscription: Subscription, now: &Zoned) -> String {
+pub fn usage(subscription: Subscription, now: &Zoned) -> String {
     let size = |count: i64| {
         let (number, unit) = format::bytes(u64::try_from(count).unwrap_or(0));
         format!("{number} {unit}")

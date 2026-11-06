@@ -63,7 +63,7 @@ pub async fn latest(http: &reqwest::Client, api_base: &str) -> Result<Release, C
 
 /// `err` and its causes, which reqwest keeps out of its own message
 /// ("Connection refused").
-fn describe(err: &reqwest::Error) -> String {
+pub(super) fn describe(err: &reqwest::Error) -> String {
     let mut message = err.to_string();
     let mut source = std::error::Error::source(err);
     while let Some(cause) = source {

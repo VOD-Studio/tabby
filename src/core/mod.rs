@@ -6,10 +6,12 @@
 
 mod files;
 mod install;
+mod profiles;
 mod runner;
 mod runtime;
 mod settings;
 mod state;
+mod subscription;
 mod supervisor;
 
 use std::{
@@ -25,10 +27,12 @@ use tokio::sync::OnceCell;
 use crate::api::{client::ApiClient, error::ApiError, models::CoreKind};
 use install::Target;
 pub use install::{Release, Upgrade};
+pub use profiles::Outcome;
 use runner::Runner;
 pub use runner::System;
 use settings::CoreSettings;
 use state::State;
+pub use subscription::{Kind, Store, Subscription};
 use supervisor::Mode;
 
 /// How long a kernel just started has to answer on its controller.
@@ -100,6 +104,7 @@ pub enum Action {
     Restart,
     Stop,
     Install,
+    Validate,
 }
 
 impl std::fmt::Display for Action {
@@ -109,6 +114,7 @@ impl std::fmt::Display for Action {
             Self::Restart => "restart the kernel",
             Self::Install => "install the kernel",
             Self::Stop => "stop the kernel",
+            Self::Validate => "check the subscription",
         })
     }
 }
@@ -135,6 +141,25 @@ pub enum CoreError {
         context: &'static str,
         source: io::Error,
     },
+    /// The subscription could not be downloaded.
+    #[error("cannot download the subscription: {0}")]
+    Fetch(String),
+    /// The kernel does not accept the subscription, and says why.
+    #[error("the kernel does not accept the subscription: {0}")]
+    Invalid(String),
+    /// A subscription whose top level is not a block mapping.
+    #[error("the subscription is not a block mapping")]
+    UnsupportedProfile,
+    /// No such subscription in the list.
+    #[error("no such subscription")]
+    NoSubscription,
+    /// The subscription in use cannot be deleted.
+    #[error("the subscription is in use")]
+    ActiveSubscription,
+    /// The file a subscription was imported from is gone; its last copy is
+    /// kept.
+    #[error("{} is gone", .0.display())]
+    SourceGone(PathBuf),
     /// The release list could not be read.
     #[error("cannot look up the latest kernel: {0}")]
     Release(String),
@@ -192,14 +217,24 @@ pub struct ManagedCore {
     /// Where releases are looked up.
     release_api: String,
     target: Target,
+    /// Held across the operations that change the subscriptions, so that two
+    /// do not write the list at once.
+    lock: tokio::sync::Mutex<()>,
+    /// Downloads subscriptions.
+    http: reqwest::Client,
+    /// What the nodes of a share-link subscription are tested with.
+    delay_url: String,
 }
 
 impl ManagedCore {
     /// The managed core with its files in `data_dir`, running programs for
-    /// real. Makes `state.toml` when there is none.
-    pub fn open(binary: Option<PathBuf>, data_dir: &Path) -> Result<Self> {
+    /// real. Makes `state.toml` when there is none. `delay_url` is the page
+    /// the nodes of a share-link subscription are tested with.
+    pub fn open(binary: Option<PathBuf>, data_dir: &Path, delay_url: &str) -> Result<Self> {
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-        Self::with(binary, data_dir, Arc::new(System), runtime_dir)
+        let mut core = Self::with(binary, data_dir, Arc::new(System), runtime_dir)?;
+        delay_url.clone_into(&mut core.delay_url);
+        Ok(core)
     }
 
     fn with(
@@ -226,6 +261,19 @@ impl ManagedCore {
             mode: OnceCell::new(),
             release_api: install::API_BASE.to_owned(),
             target: Target::current(),
+            lock: tokio::sync::Mutex::new(()),
+            http: reqwest::Client::builder()
+                .no_proxy()
+                .user_agent(format!(
+                    "tabby/v{} clash-verge Platform/{}",
+                    env!("CARGO_PKG_VERSION"),
+                    env::consts::OS
+                ))
+                .connect_timeout(Duration::from_secs(10))
+                .timeout(Duration::from_secs(60))
+                .build()
+                .wrap_err("cannot build HTTP client")?,
+            delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
             timing: Timing {
                 ready: READY_TIMEOUT,
                 poll: READY_POLL,
@@ -303,9 +351,7 @@ impl ManagedCore {
     }
 
     fn write_config(&self) -> Result<(), CoreError> {
-        let text = runtime::render(runtime::BUILTIN, &self.settings, &self.state);
-        files::write_private(&self.paths.config(), &text)
-            .map_err(|err| CoreError::io("cannot write the kernel's config", err))
+        self.write_config_for(&self.subscriptions()?)
     }
 
     async fn probe(&self) -> Probe {
@@ -347,15 +393,22 @@ impl ManagedCore {
         CoreError::StartFailed { log }
     }
 
-    fn stored_pid(&self) -> Option<u32> {
-        State::load_or_create(&self.paths.state()).ok()?.pid
+    /// The kernel process run without systemd, as `state.toml` has it.
+    fn stored_process(&self) -> Option<supervisor::Process> {
+        let state = State::load_or_create(&self.paths.state()).ok()?;
+        Some(supervisor::Process {
+            pid: state.pid?,
+            start: state.pid_start,
+        })
     }
 
-    /// Records the pid of a kernel run without systemd, or forgets it.
-    fn store_pid(&self, pid: Option<u32>) -> Result<(), CoreError> {
+    /// Records the kernel process run without systemd (and when it
+    /// started), or forgets it.
+    fn store_process(&self, pid: Option<u32>) -> Result<(), CoreError> {
         let mut state = State::load_or_create(&self.paths.state())
             .map_err(|err| CoreError::io("cannot read state.toml", err))?;
         state.pid = pid;
+        state.pid_start = pid.and_then(supervisor::start_time);
         state
             .save(&self.paths.state())
             .map_err(|err| CoreError::io("cannot write state.toml", err))

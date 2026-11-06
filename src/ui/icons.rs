@@ -83,6 +83,7 @@ impl Icons {
             "\u{f0318}", // Connections: nf-md-lan_connect
             "\u{f09ed}", // Logs: nf-md-text_box_outline
             "\u{f0493}", // Settings: nf-md-cog
+            "\u{f046a}", // Subscriptions: nf-md-rss
         ]),
     };
 }

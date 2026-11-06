@@ -25,6 +25,11 @@ pub struct State {
     /// The kernel's process id, when it runs without systemd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    /// When that process started, in clock ticks since boot: a number the
+    /// next process to get the same id does not have, and which does not
+    /// depend on how far `execve` has come, as its command line does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid_start: Option<u64>,
 }
 
 impl State {
@@ -43,6 +48,7 @@ impl State {
                     secret: random_hex(32)?,
                     unit: format!("tabby-mihomo-{}", random_hex(4)?),
                     pid: None,
+                    pid_start: None,
                 };
                 state.save(path)?;
                 Ok(state)
@@ -64,7 +70,7 @@ fn free_port() -> io::Result<u16> {
 }
 
 /// `bytes` random bytes from the system, as lowercase hex.
-fn random_hex(bytes: usize) -> io::Result<String> {
+pub(super) fn random_hex(bytes: usize) -> io::Result<String> {
     let mut buffer = vec![0; bytes];
     File::open("/dev/urandom")?.read_exact(&mut buffer)?;
     Ok(buffer.iter().fold(String::new(), |mut hex, byte| {

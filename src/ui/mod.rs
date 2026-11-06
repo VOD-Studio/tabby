@@ -10,6 +10,7 @@ pub mod rules;
 pub mod scroll;
 pub mod settings;
 pub mod shadow;
+pub mod subscriptions;
 pub mod text;
 pub mod theme;
 
@@ -183,6 +184,7 @@ pub fn page_title(page: Page) -> &'static str {
         Page::Connections => "连接",
         Page::Logs => "日志",
         Page::Settings => "设置",
+        Page::Subscriptions => "订阅",
     }
 }
 
@@ -226,6 +228,7 @@ fn draw_page(frame: &mut Frame, area: Rect, app: &App) {
                 settings::render(frame, area, app, configs);
             }
         }
+        Page::Subscriptions => subscriptions::render(frame, area, app),
     }
 }
 

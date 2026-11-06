@@ -49,6 +49,11 @@ pub enum CoreEvent {
     Upgraded(Result<String, CoreError>),
 }
 
+/// A toast about what failed: `what`, then what the managed core said.
+pub(super) fn failure(what: &str, err: &CoreError) -> String {
+    format!("{what}：{}", core_reason(err))
+}
+
 impl App {
     /// Whether the connection is the managed core.
     pub fn is_managed(&self) -> bool {
@@ -133,6 +138,7 @@ impl App {
                 self.reconnect = None;
                 self.start();
                 self.load_page(self.page);
+                self.load_subscriptions();
             }
             // Nothing downloaded yet: look up what there is to download, and
             // ask before downloading it.

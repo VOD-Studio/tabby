@@ -331,6 +331,16 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 3. `feat(subscriptions): import, switch and update subscriptions`
    - 范围：§7.1（自动更新除外）、§7.2 的运行配置生成（覆盖块先只含必需的键）、订阅页。
    - 验收：导入 URL（名字取自 `content-disposition`，用量与到期时间显示正确）、导入文件、导入 base64 分享链接列表（节点在代理页的 provider 里，可以测速和选择）；切换后代理页和规则页变成新订阅的内容；更新失败时旧内容保留；当前订阅不能删除。
+   - 实现记录（2026-11-06）：
+     - 模块：`src/core/subscription.rs`（`subscriptions.toml` 的模型、`subscription-userinfo` / `content-disposition` 解析、分享链接计数、`mihomo -t` 输出里第一条错误）、`src/core/profiles.rs`（`ManagedCore::{import_url, import_file, update, switch, remove, subscriptions}`，一把 `tokio::sync::Mutex` 串行化所有改列表的操作）、`src/core/runtime.rs::strip`（`saphyr-parser` 只定位顶层键所在的行，按行删除，其余字节原样保留；覆盖 CRLF、`---`、锚点别名、`short-id: 0123`、注释）；界面在 `src/app/subscriptions.rs`、`src/ui/subscriptions.rs`。
+     - **偏离方案 §7.1 第 3 步**：实测 `mihomo -t` 不会打开 provider 文件——空文件、缺失文件、垃圾文本的包装配置都能通过。所以“是不是分享链接列表”由 tabby 自己判断：`link_count` 要求（整体 base64 解码后）至少有一行以已知协议（ss、ssr、vmess、vless、trojan、hysteria、hysteria2、hy2、tuic、anytls、socks、socks5）开头的链接；否则拒绝，并报第一次 `-t` 的错误。为此新增依赖 `base64`（0.22，本来就在 lockfile 里）。
+     - 导入顺序：下载 → `-t` 检查 → （失败且是链接列表则）生成包装并再 `-t` → 确认 `strip` 能处理（否则 `订阅格式不支持`）→ 写文件（先写 provider 文件，再写 profile，均为 0600 的临时文件加 `rename`）→ 写列表。任何一步失败都不留下半成品。第一个导入的订阅自动成为当前订阅并写出 `config.yaml`；之后的不会抢占。
+     - 切换：先生成新的 `config.yaml` 再写列表，随后 `PUT /configs?force=true`（`SubEvent::Reloaded`），成功后重新取 `/configs`、`/proxies` 并 `reload_visited`；没有复用 `Change::Reload`，免得弹出两条 toast。`重载配置` 在托管模式下的含义留给第 4 项。
+     - 下载订阅用的 reqwest 客户端 `no_proxy()`，UA `tabby/v<版本> clash-verge Platform/linux`；错误信息用 `without_url()`，订阅地址里的 token 不会出现在 toast 或日志里。文件订阅的原文件不见了：保留旧副本，报 `原文件已不存在：<路径>`。
+     - 已知局限：`mihomo -t` 会按配置里的 GEOIP / GEOSITE 规则下载 geo 数据，第一次导入这类订阅可能很慢，GitHub 不通时导入会失败（FlClash 的校验同理）。
+     - 订阅页是第 8 页（`8`）。`a` 打开页脚的输入框（与过滤框共用，提示符 `+`），地址以 `http(s)://` 开头按 URL，否则按文件路径（支持 `~/`）。外部控制器模式下页面显示 `连接的是外部控制器，订阅由它自己管理` 与 `P 切换到托管内核`。
+     - 顺带修了第 1 项留下的竞态：`execve` 进行中 `/proc/<pid>/cmdline` 可能是空的，刚启动的后备内核会被当成“不是内核”，启动被误报失败（并发测试时偶发）。现在 `state.toml` 记录 pid 与进程启动时间（`/proc/<pid>/stat` 第 22 项），以此识别内核，同时也能防 pid 复用。
+     - 手动验证（临时 `XDG_*`，MetaCubeX/mihomo v1.19.33，本地 `http.server` 提供订阅）：导入 URL，名字取自 `filename*=UTF-8''…`（`测试`），用量 `3.0 GB / 10.0 GB · 2030-01-01 到期`，请求的 UA 为 `tabby/v0.1.0 clash-verge Platform/linux`；导入 base64 链接列表，名字取 host，代理页出现 `node-a`、`node-b`（provider 节点），可测速、可选择；垃圾 HTML 被拒绝且不留文件；切换后规则页变成另一份订阅的规则；服务端改成 500 后按 `u`，toast `更新「测试」失败：HTTP 500 …`，文件的 md5 不变；当前订阅按 `d` 提示 `先切换到其他订阅`，其他订阅按 `d` 弹出确认。结束时停掉单元，`systemctl --user list-units 'tabby-mihomo-*'` 为空。没有验证：导入文件订阅的界面操作（单元测试覆盖）、真实机场。
 4. `feat(settings): persist managed core settings`
    - 范围：§7.3；§7.2 里来自 `settings.toml` 的覆盖键和 DNS 覆盖；端口项在托管模式下的提示；`重载配置` 在托管模式下的含义。
    - 验收：改 mixed-port、allow-lan、模式后停掉再启动内核，设置仍然生效；外部控制器模式下的行为不变（现有测试全部通过）。

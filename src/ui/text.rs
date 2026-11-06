@@ -52,6 +52,7 @@ pub fn core_title(err: &CoreError) -> String {
             Action::Restart => "无法重启内核",
             Action::Stop => "无法停止内核",
             Action::Install => "无法安装内核",
+            Action::Validate => "无法检查订阅",
         }
         .to_owned(),
         CoreError::Release(_) => "无法获取内核版本".to_owned(),
@@ -59,6 +60,12 @@ pub fn core_title(err: &CoreError) -> String {
         CoreError::Checksum(_) => "内核校验失败".to_owned(),
         CoreError::Download(_) => "内核下载失败".to_owned(),
         CoreError::Io { .. } => "内核的文件无法读写".to_owned(),
+        CoreError::Fetch(_) => "订阅下载失败".to_owned(),
+        CoreError::Invalid(_) => "订阅无法使用".to_owned(),
+        CoreError::UnsupportedProfile => "订阅格式不支持".to_owned(),
+        CoreError::NoSubscription => "找不到这个订阅".to_owned(),
+        CoreError::ActiveSubscription => "正在使用的订阅不能删除".to_owned(),
+        CoreError::SourceGone(_) => "订阅文件已不存在".to_owned(),
     }
 }
 
@@ -74,7 +81,9 @@ pub fn core_detail(err: &CoreError) -> Vec<String> {
         CoreError::StartFailed { log } => lines(log),
         CoreError::Command { message, .. }
         | CoreError::Checksum(message)
-        | CoreError::Download(message) => lines(message),
+        | CoreError::Download(message)
+        | CoreError::Fetch(message)
+        | CoreError::Invalid(message) => lines(message),
         CoreError::Release(message) => vec![
             message.clone(),
             "也可以在 config.toml 的 [core] 里用 binary 指定内核".to_owned(),
@@ -83,6 +92,15 @@ pub fn core_detail(err: &CoreError) -> Vec<String> {
             vec!["请在 config.toml 的 [core] 里用 binary 指定内核".to_owned()]
         }
         CoreError::Io { context, source } => vec![format!("{context}: {source}")],
+        CoreError::UnsupportedProfile => {
+            vec!["订阅的最外层必须是一个块状映射，不能是 {…}、多个文档或空文件".to_owned()]
+        }
+        CoreError::NoSubscription => vec!["列表里没有这个订阅".to_owned()],
+        CoreError::ActiveSubscription => vec!["先切换到其他订阅".to_owned()],
+        CoreError::SourceGone(path) => vec![
+            format!("原文件已不存在：{}", path.display()),
+            "沿用已导入的内容".to_owned(),
+        ],
     }
 }
 
