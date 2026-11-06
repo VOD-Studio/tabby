@@ -2115,7 +2115,7 @@ impl App {
     ) -> Self {
         let streams = Streams::new(&settings.url, settings.secret.as_deref(), outbox.clone());
         Self {
-            theme: settings.theme.into(),
+            theme: Theme::from(settings.theme).with_overrides(&settings.theme_overrides),
             icons: settings.icons.into(),
             settings,
             page: Page::Overview,
@@ -7113,6 +7113,32 @@ secret = "b-secret"
         // What is the user's stays.
         assert_eq!(app.page, Page::Proxies);
         assert_eq!((app.logs_view.level, app.proxies_view.sort), (level, sort));
+    }
+
+    #[tokio::test]
+    async fn theme_overrides_survive_a_profile_switch() {
+        use ratatui::style::Color;
+
+        let (tx, _rx) = mpsc::channel(64);
+        let text =
+            format!("{PROFILES}\n[theme_overrides]\naccent = \"#112233\"\nc1 = \"light-red\"\n");
+        let config: crate::config::Config = toml::from_str(&text).unwrap();
+        let overrides = crate::config::Overrides::default();
+        let settings = config.resolve(&overrides).unwrap();
+        let profiles = config.profiles(&overrides, &settings);
+        let client = ApiClient::new(&settings.url, settings.secret.as_deref()).unwrap();
+        let mut app = App::new(settings, client, tx, Size::new(120, 40), profiles);
+
+        let colors = |app: &App| (app.theme.accent, app.theme.c1, app.theme.muted);
+        let expected = (
+            Color::Rgb(0x11, 0x22, 0x33),
+            Color::LightRed,
+            Color::DarkGray,
+        );
+        assert_eq!(colors(&app), expected);
+        switch_to(&mut app, 1);
+        assert_eq!(app.settings.profile, "b");
+        assert_eq!(colors(&app), expected);
     }
 
     #[tokio::test]

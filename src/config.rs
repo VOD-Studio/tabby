@@ -10,7 +10,11 @@ use color_eyre::{
     eyre::{WrapErr, eyre},
 };
 use directories::ProjectDirs;
-use serde::Deserialize;
+use ratatui::style::Color;
+use serde::{
+    Deserialize, Deserializer,
+    de::{self, MapAccess, Visitor},
+};
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:9090";
 
@@ -43,12 +47,161 @@ pub enum IconSet {
     Nerd,
 }
 
+/// The `[theme_overrides]` table: single semantic colors (plan §7.1) laid
+/// over whichever theme is active. A key that is not there leaves the
+/// theme's own color.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ThemeOverrides {
+    pub fg: Option<Color>,
+    pub muted: Option<Color>,
+    /// The cursor row's background; see `Theme::with_overrides`.
+    pub surface: Option<Color>,
+    pub accent: Option<Color>,
+    pub success: Option<Color>,
+    pub warning: Option<Color>,
+    pub error: Option<Color>,
+    pub c1: Option<Color>,
+    pub c2: Option<Color>,
+    pub c3: Option<Color>,
+    pub c4: Option<Color>,
+}
+
+/// The keys of `[theme_overrides]`.
+const OVERRIDE_KEYS: [&str; 11] = [
+    "fg", "muted", "surface", "accent", "success", "warning", "error", "c1", "c2", "c3", "c4",
+];
+
+/// The 16 ANSI colors by the kebab-case form of ratatui's names: the
+/// terminal's own palette decides what each looks like.
+const ANSI_COLORS: [(&str, Color); 16] = [
+    ("black", Color::Black),
+    ("red", Color::Red),
+    ("green", Color::Green),
+    ("yellow", Color::Yellow),
+    ("blue", Color::Blue),
+    ("magenta", Color::Magenta),
+    ("cyan", Color::Cyan),
+    ("gray", Color::Gray),
+    ("dark-gray", Color::DarkGray),
+    ("light-red", Color::LightRed),
+    ("light-green", Color::LightGreen),
+    ("light-yellow", Color::LightYellow),
+    ("light-blue", Color::LightBlue),
+    ("light-magenta", Color::LightMagenta),
+    ("light-cyan", Color::LightCyan),
+    ("white", Color::White),
+];
+
+impl ThemeOverrides {
+    fn slot(&mut self, key: &str) -> Option<&mut Option<Color>> {
+        // Exhaustive, so a color added to the struct cannot be left out.
+        let Self {
+            fg,
+            muted,
+            surface,
+            accent,
+            success,
+            warning,
+            error,
+            c1,
+            c2,
+            c3,
+            c4,
+        } = self;
+        Some(match key {
+            "fg" => fg,
+            "muted" => muted,
+            "surface" => surface,
+            "accent" => accent,
+            "success" => success,
+            "warning" => warning,
+            "error" => error,
+            "c1" => c1,
+            "c2" => c2,
+            "c3" => c3,
+            "c4" => c4,
+            _ => return None,
+        })
+    }
+}
+
+/// `#rrggbb` (either case), one of the 16 ANSI names, or `reset` for the
+/// terminal's own default color.
+fn parse_color(text: &str) -> Option<Color> {
+    if let Some(hex) = text.strip_prefix('#') {
+        if hex.len() != 6 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        let rgb = u32::from_str_radix(hex, 16).ok()?;
+        let [_, red, green, blue] = rgb.to_be_bytes();
+        return Some(Color::Rgb(red, green, blue));
+    }
+    if text == "reset" {
+        return Some(Color::Reset);
+    }
+    ANSI_COLORS
+        .iter()
+        .find_map(|&(name, color)| (name == text).then_some(color))
+}
+
+impl<'de> Deserialize<'de> for ThemeOverrides {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Table;
+
+        impl<'de> Visitor<'de> for Table {
+            type Value = ThemeOverrides;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a table of colors")
+            }
+
+            // Hand-written so that every error can name the key: the
+            // position TOML reports for a table value is not the line.
+            fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let mut overrides = ThemeOverrides::default();
+                while let Some(key) = map.next_key::<String>()? {
+                    let value = map.next_value::<toml::Value>()?;
+                    let Some(slot) = overrides.slot(&key) else {
+                        return Err(de::Error::custom(format!(
+                            "unknown key `{key}` in [theme_overrides], expected one of {}",
+                            OVERRIDE_KEYS.join(", ")
+                        )));
+                    };
+                    let toml::Value::String(text) = &value else {
+                        return Err(de::Error::custom(format!(
+                            "[theme_overrides] `{key}` must be a string, found {}",
+                            value.type_str()
+                        )));
+                    };
+                    let color = parse_color(text).filter(|color| {
+                        // A background that is the terminal's own would hide
+                        // the cursor row.
+                        key != "surface" || *color != Color::Reset
+                    });
+                    let Some(color) = color else {
+                        let names = ANSI_COLORS.map(|(name, _)| name).join(", ");
+                        let reset = if key == "surface" { "" } else { ", reset" };
+                        return Err(de::Error::custom(format!(
+                            "[theme_overrides] `{key}`: invalid color `{text}`, expected #rrggbb or one of {names}{reset}"
+                        )));
+                    };
+                    *slot = Some(color);
+                }
+                Ok(overrides)
+            }
+        }
+
+        deserializer.deserialize_map(Table)
+    }
+}
+
 /// Contents of `config.toml`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
     default: Option<String>,
     theme: Option<ThemeName>,
+    theme_overrides: ThemeOverrides,
     icons: IconSet,
     delay: DelayConfig,
     profiles: BTreeMap<String, Profile>,
@@ -95,6 +248,7 @@ pub struct Settings {
     pub url: String,
     pub secret: Option<String>,
     pub theme: ThemeName,
+    pub theme_overrides: ThemeOverrides,
     pub icons: IconSet,
     pub delay_url: String,
     pub delay_timeout_ms: u32,
@@ -210,6 +364,7 @@ impl Config {
                 .or_else(|| profile.and_then(|p| p.secret.as_deref()))
                 .map(str::to_owned),
             theme: overrides.theme.or(self.theme).unwrap_or_default(),
+            theme_overrides: self.theme_overrides,
             icons: self.icons,
             delay_url: self
                 .delay
@@ -274,7 +429,7 @@ fn non_empty(value: Option<&String>) -> Option<&str> {
 mod tests {
     use super::*;
 
-    const FILE: &str = r#"
+    const FILE: &str = r##"
 default = "local"
 theme = "tokyo-night"
 icons = "nerd"
@@ -289,7 +444,18 @@ secret = "file-secret"
 
 [profiles.router]
 url = "http://router:9090"
-"#;
+
+[theme_overrides]
+accent = "#7aa2f7"
+"##;
+
+    /// What `[theme_overrides]` of [`FILE`] says.
+    fn file_overrides() -> ThemeOverrides {
+        ThemeOverrides {
+            accent: Some(Color::Rgb(0x7a, 0xa2, 0xf7)),
+            ..ThemeOverrides::default()
+        }
+    }
 
     fn file() -> Config {
         toml::from_str(FILE).unwrap()
@@ -305,6 +471,7 @@ url = "http://router:9090"
                 url: DEFAULT_URL.into(),
                 secret: None,
                 theme: ThemeName::Terminal,
+                theme_overrides: ThemeOverrides::default(),
                 icons: IconSet::Unicode,
                 delay_url: DEFAULT_DELAY_URL.into(),
                 delay_timeout_ms: DEFAULT_DELAY_TIMEOUT_MS,
@@ -322,6 +489,7 @@ url = "http://router:9090"
                 url: "http://local:9090".into(),
                 secret: Some("file-secret".into()),
                 theme: ThemeName::TokyoNight,
+                theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
                 delay_url: "http://delay.test/204".into(),
                 delay_timeout_ms: 2500,
@@ -345,6 +513,8 @@ url = "http://router:9090"
                 url: "http://cli:1".into(),
                 secret: Some("cli-secret".into()),
                 theme: ThemeName::CatppuccinMocha,
+                // Not tied to the theme they were written under.
+                theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
                 delay_url: "http://delay.test/204".into(),
                 delay_timeout_ms: 2500,
@@ -380,6 +550,114 @@ url = "http://router:9090"
         assert_eq!(icons(r#"icons = "nerd""#).unwrap(), IconSet::Nerd);
         let err = icons(r#"icons = "emoji""#).unwrap_err().to_string();
         assert!(err.contains("icons"), "{err}");
+    }
+
+    fn overrides_of(text: &str) -> Result<ThemeOverrides, String> {
+        toml::from_str::<Config>(text)
+            .map(|config| config.theme_overrides)
+            .map_err(|err| err.to_string())
+    }
+
+    #[test]
+    fn every_semantic_color_can_be_overridden_by_hex_or_ansi_name() {
+        let all = overrides_of(
+            r##"
+[theme_overrides]
+fg = "#010203"
+muted = "dark-gray"
+surface = "#0A0b0C"
+accent = "#7aa2f7"
+success = "light-green"
+warning = "yellow"
+error = "#FF0000"
+c1 = "light-magenta"
+c2 = "white"
+c3 = "black"
+c4 = "gray"
+"##,
+        )
+        .unwrap();
+        assert_eq!(
+            all,
+            ThemeOverrides {
+                fg: Some(Color::Rgb(1, 2, 3)),
+                muted: Some(Color::DarkGray),
+                surface: Some(Color::Rgb(0x0a, 0x0b, 0x0c)),
+                accent: Some(Color::Rgb(0x7a, 0xa2, 0xf7)),
+                success: Some(Color::LightGreen),
+                warning: Some(Color::Yellow),
+                error: Some(Color::Rgb(255, 0, 0)),
+                c1: Some(Color::LightMagenta),
+                c2: Some(Color::White),
+                c3: Some(Color::Black),
+                c4: Some(Color::Gray),
+            }
+        );
+        // Without the table, or with it empty, nothing is overridden.
+        assert_eq!(overrides_of("").unwrap(), ThemeOverrides::default());
+        assert_eq!(
+            overrides_of("[theme_overrides]").unwrap(),
+            ThemeOverrides::default()
+        );
+    }
+
+    #[test]
+    fn all_sixteen_ansi_names_parse_and_none_of_them_is_reset() {
+        assert_eq!(ANSI_COLORS.len(), 16);
+        for (name, color) in ANSI_COLORS {
+            assert_eq!(parse_color(name), Some(color), "{name}");
+            assert_ne!(color, Color::Reset, "{name}");
+        }
+        assert_eq!(parse_color("reset"), Some(Color::Reset));
+    }
+
+    #[test]
+    fn a_bad_color_value_is_an_error_naming_the_key() {
+        for value in [
+            "#7aa2f",     // too short
+            "#7aa2f7f",   // too long
+            "#7aa2fg",    // not hex
+            "#+aa2f7",    // `from_str_radix` would take the sign
+            "7aa2f7",     // no `#`
+            "#abc",       // no shorthand
+            "light-gray", // not one of the 16
+            "Light-Red",  // names are lowercase
+            "light_red",
+            "5",
+            "",
+        ] {
+            let err = overrides_of(&format!("[theme_overrides]\nerror = \"{value}\"\n"))
+                .expect_err(value);
+            assert!(err.contains("`error`"), "{value}: {err}");
+            assert!(err.contains("invalid color"), "{value}: {err}");
+        }
+        // Not even a string.
+        let err = overrides_of("[theme_overrides]\naccent = 5\n").unwrap_err();
+        assert!(err.contains("`accent` must be a string"), "{err}");
+    }
+
+    #[test]
+    fn an_unknown_key_is_an_error_naming_it_and_the_valid_ones() {
+        let err =
+            overrides_of("[theme_overrides]\naccent = \"red\"\nacent = \"blue\"\n").unwrap_err();
+        assert!(err.contains("`acent`"), "{err}");
+        for key in OVERRIDE_KEYS {
+            assert!(err.contains(key), "{key}: {err}");
+        }
+        // The key is what is wrong, whatever the value.
+        let err = overrides_of("[theme_overrides]\nstripe = \"nope\"\n").unwrap_err();
+        assert!(
+            err.contains("`stripe`") && err.contains("unknown key"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn reset_is_a_color_but_not_a_cursor_row_background() {
+        let fg = overrides_of("[theme_overrides]\nfg = \"reset\"\n").unwrap();
+        assert_eq!(fg.fg, Some(Color::Reset));
+        let err = overrides_of("[theme_overrides]\nsurface = \"reset\"\n").unwrap_err();
+        assert!(err.contains("`surface`"), "{err}");
     }
 
     fn offered(config: &Config, overrides: &Overrides) -> Profiles {

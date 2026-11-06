@@ -1,6 +1,6 @@
 use ratatui::style::{Color, Modifier, Style};
 
-use crate::config::ThemeName;
+use crate::config::{ThemeName, ThemeOverrides};
 
 /// Semantic colors. UI code refers to these roles, never to concrete colors.
 #[derive(Debug, Clone, Copy)]
@@ -82,6 +82,43 @@ impl Theme {
         stripe: Style::new().bg(Color::Rgb(0x27, 0x26, 0x39)),
     };
 
+    /// This theme with the colors `overrides` name replaced.
+    ///
+    /// `surface` is a background, not a color of text: it replaces the whole
+    /// style, so on the `terminal` theme it takes the place of the reverse
+    /// video (the cursor row then keeps its text colors). `stripe` has no
+    /// key and stays.
+    pub fn with_overrides(mut self, overrides: &ThemeOverrides) -> Self {
+        // Exhaustive, so a color added to the struct cannot be left out.
+        let ThemeOverrides {
+            fg,
+            muted,
+            surface,
+            accent,
+            success,
+            warning,
+            error,
+            c1,
+            c2,
+            c3,
+            c4,
+        } = *overrides;
+        self.fg = fg.unwrap_or(self.fg);
+        self.muted = muted.unwrap_or(self.muted);
+        self.accent = accent.unwrap_or(self.accent);
+        self.success = success.unwrap_or(self.success);
+        self.warning = warning.unwrap_or(self.warning);
+        self.error = error.unwrap_or(self.error);
+        self.c1 = c1.unwrap_or(self.c1);
+        self.c2 = c2.unwrap_or(self.c2);
+        self.c3 = c3.unwrap_or(self.c3);
+        self.c4 = c4.unwrap_or(self.c4);
+        if let Some(color) = surface {
+            self.surface = Style::new().bg(color);
+        }
+        self
+    }
+
     /// Color for a delay test result: under 200 ms good, up to 500 ms slow,
     /// beyond that bad.
     pub fn delay(&self, millis: u32) -> Color {
@@ -100,5 +137,98 @@ impl From<ThemeName> for Theme {
             ThemeName::TokyoNight => Self::TOKYO_NIGHT,
             ThemeName::CatppuccinMocha => Self::CATPPUCCIN_MOCHA,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const THEMES: [ThemeName; 3] = [
+        ThemeName::Terminal,
+        ThemeName::TokyoNight,
+        ThemeName::CatppuccinMocha,
+    ];
+
+    /// Every color of `theme`, then its two background styles.
+    fn parts(theme: &Theme) -> ([Color; 10], Style, Style) {
+        let Theme {
+            fg,
+            muted,
+            accent,
+            success,
+            warning,
+            error,
+            c1,
+            c2,
+            c3,
+            c4,
+            surface,
+            stripe,
+        } = *theme;
+        (
+            [fg, muted, accent, success, warning, error, c1, c2, c3, c4],
+            surface,
+            stripe,
+        )
+    }
+
+    /// Not any color a theme has.
+    const MARK: Color = Color::Rgb(1, 2, 3);
+
+    #[test]
+    fn an_override_changes_its_own_color_and_no_other_on_every_theme() {
+        // In the order of `parts`.
+        let each: [fn(&mut ThemeOverrides); 10] = [
+            |o| o.fg = Some(MARK),
+            |o| o.muted = Some(MARK),
+            |o| o.accent = Some(MARK),
+            |o| o.success = Some(MARK),
+            |o| o.warning = Some(MARK),
+            |o| o.error = Some(MARK),
+            |o| o.c1 = Some(MARK),
+            |o| o.c2 = Some(MARK),
+            |o| o.c3 = Some(MARK),
+            |o| o.c4 = Some(MARK),
+        ];
+        for name in THEMES {
+            let (colors, surface, stripe) = parts(&Theme::from(name));
+            let untouched = Theme::from(name).with_overrides(&ThemeOverrides::default());
+            assert_eq!(parts(&untouched), (colors, surface, stripe), "{name:?}");
+            for (index, set) in each.into_iter().enumerate() {
+                let mut overrides = ThemeOverrides::default();
+                set(&mut overrides);
+                let theme = Theme::from(name).with_overrides(&overrides);
+                let mut expected = colors;
+                expected[index] = MARK;
+                assert_eq!(
+                    parts(&theme),
+                    (expected, surface, stripe),
+                    "{name:?} color {index}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_surface_override_is_a_background_that_replaces_the_reverse_video() {
+        let overrides = ThemeOverrides {
+            surface: Some(MARK),
+            ..ThemeOverrides::default()
+        };
+        for name in THEMES {
+            let base = Theme::from(name);
+            let theme = base.with_overrides(&overrides);
+            assert_eq!(theme.surface, Style::new().bg(MARK), "{name:?}");
+            // Nothing else moves, the stripe included.
+            assert_eq!(theme.stripe, base.stripe, "{name:?}");
+            assert_eq!(parts(&theme).0, parts(&base).0, "{name:?}");
+        }
+        assert!(
+            Theme::from(ThemeName::Terminal)
+                .surface
+                .add_modifier
+                .contains(Modifier::REVERSED)
+        );
     }
 }
