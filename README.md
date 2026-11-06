@@ -1,6 +1,8 @@
 # tabby
 
-tabby 是 Clash / mihomo External Controller 的终端界面（TUI）客户端，基于 ratatui。它通过控制器的 REST 与 WebSocket 接口查看实时流量、切换代理模式与节点、测速、管理 Providers、查看规则与连接、订阅日志，并修改内核的常用设置，不需要浏览器。界面文字为中文。
+终端里的 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash.Meta）控制台。
+
+基于 [ratatui](https://ratatui.rs)，通过 External Controller 的 REST 与 WebSocket 接口工作：实时流量、代理切换与测速、Providers、规则、连接、日志和内核设置，无需浏览器。界面为中文，键盘与鼠标均可操作。
 
 ```text
 ◆ tabby  mihomo v1.19.33   RULE             ↑      0 B/s   ↓      0 B/s   ● test
@@ -20,326 +22,218 @@ tabby 是 Clash / mihomo External Controller 的终端界面（TUI）客户端�
 ││香港 02                 ││死节点 1                ││死节点 2                ││
 ││Direct · UDP           —││Socks5              失败││Http                   —││
 │╰────────────────────────╯╰────────────────────────╯╰────────────────────────╯│
-│╭────────────────────────╮╭────────────────────────╮╭────────────────────────╮│
-││DIRECT                  ││集合 直连 1             ││集合 直连 2             ││
-││Direct · UDP           —││Direct · UDP      250 ms││Direct · UDP      456 ms││
-│╰────────────────────────╯╰━━━━━━━━━━━━────────────╯╰━━━━━━━━━━━━━━━━━━━━━───╯│
 ╰──────────────────────────────────────────────────────────────────────────────╯
 ────────────────────────────────────────────────────────────────────────────────
 Enter 选组   t 测速   T 整组测速   s 排序   / 过滤   …   ? 帮助   q 退出
 ```
 
-上图是 80×24 终端里的代理页，连着一个本地 mihomo v1.19.33 测试实例（节点均为本地假节点）。宽度达到 100 列时，左侧会多出代理组列表。
+<sub>80×24 终端中的代理页，连接本地 mihomo 测试实例。宽度 ≥ 100 列时左侧显示代理组列表。</sub>
 
-## 支持的内核
+## 特性
 
-| 内核 | 支持情况 |
-|---|---|
-| mihomo（Clash.Meta） | 全部功能 |
-| 原版 Clash | 通用功能可用；mihomo 独有的功能显示为“需要 mihomo”或置灰 |
-
-内核类型由 `GET /version` 的 `meta` 字段判断：为 `true` 是 mihomo，否则按原版 Clash 处理。顶栏显示内核名与版本。原版 Clash 下受影响的位置：
-
-- 设置页：TUN、刷新 FakeIP、更新 GeoData、重启内核、升级内核的值显示为灰色的“需要 mihomo”，按 `Enter` 只弹出“需要 mihomo”的提示，不发请求。
-- 概览页：TUN 与内存卡片显示“需要 mihomo”（内存数据来自 mihomo 的 `/memory`）。
-- Providers 页：“规则集合”区块标题后标注“需要 mihomo”，不请求规则集合。
-- 代理页：`T`（整组测速）在底栏置灰，按下提示“整组测速需要 mihomo”；`t`（单节点测速）两种内核都能用。
-
-原版 Clash 下的这些行为由代码与单元测试（`tests/fixtures` 里的原版 Clash 样本）确认，没有连真实的原版 Clash 实测过。
+- **七个页面**：概览、代理、Providers、规则、连接、日志、设置。
+- **实时数据**：流量、内存、连接与日志走 WebSocket；断线自动退避重连。
+- **多配置**：在多个控制器之间一键切换。
+- **主题**：内置 7 套，支持自定义主题文件与逐色覆盖，主题弹窗实时预览。
+- **响应式**：自适应 50×15 以上的任意终端尺寸。
+- **纯 Rust**：单一二进制，TLS 使用 rustls，不依赖 OpenSSL。
 
 ## 安装
 
-需要 Rust 工具链。项目是 edition 2024，代码里还用了 let 链（`if let … && …`）等较新的特性，所以需要比 1.85 更新的版本。`Cargo.toml` 没有声明 `rust-version`；开发用的是 rustc 1.99.0，另外在 1.95.0 上确认过能编译，更旧的版本没有试过。TLS 用纯 Rust 的 rustls，不依赖系统的 OpenSSL。开发与测试环境是 Linux，其他平台没有验证过。
+需要 Rust 1.95 或更新版本（edition 2024）。开发与测试在 Linux 上进行，其他平台未验证。
 
 ```sh
-# 安装到 ~/.cargo/bin/tabby
-cargo install --path .
-
-# 或只编译，产物在 target/release/tabby
-cargo build --release
+cargo install --path .      # 安装到 ~/.cargo/bin/tabby
+cargo build --release       # 或只编译：target/release/tabby
 ```
 
 ## 使用
 
 ```sh
-tabby                                        # 连接 http://127.0.0.1:9090，无 secret
+tabby                                              # http://127.0.0.1:9090，无 secret
 tabby --url http://192.168.1.1:9090 --secret xxx
-tabby --profile router                       # 使用 config.toml 里的 [profiles.router]
+tabby --profile router                             # 使用 config.toml 中的 [profiles.router]
 TABBY_SECRET=xxx tabby --theme tokyo-night
 ```
 
 | 选项 | 环境变量 | 说明 | 默认值 |
 |---|---|---|---|
-| `--profile <PROFILE>` | `TABBY_PROFILE` | 使用 `config.toml` 里的哪个 profile | 配置里的 `default`；都没有就不用 profile |
-| `--url <URL>` | `TABBY_URL` | External Controller 地址，`http` 或 `https` | `http://127.0.0.1:9090` |
-| `--secret <SECRET>` | `TABBY_SECRET` | 控制器的 secret | 无 |
-| `--theme <THEME>` | `TABBY_THEME` | 内置主题名、主题目录里的主题名，或主题文件路径（相对当前目录），见“主题与图标” | 配置里的 `theme`，否则 `terminal` |
-| `-h`, `--help` | | 帮助 | |
-| `-V`, `--version` | | 版本 | |
+| `--profile` | `TABBY_PROFILE` | `config.toml` 中的 profile 名 | 配置里的 `default` |
+| `--url` | `TABBY_URL` | 控制器地址，`http` / `https`，可带路径前缀 | `http://127.0.0.1:9090` |
+| `--secret` | `TABBY_SECRET` | 控制器 secret | 无 |
+| `--theme` | `TABBY_THEME` | 主题名或主题文件路径 | 配置里的 `theme`，否则 `terminal` |
 
-**优先级**：命令行参数 > 环境变量 > `config.toml` > 内置默认值。
-
-- `--url` 和 `--secret` 优先于所选 profile 自带的 `url` / `secret`。
-- `--profile` 指定的 profile 不存在、`config.toml` 里的 `default` 指向不存在的 profile 时，启动报错退出。
-- `profile`、`url`、`secret`、`theme` 的环境变量设为空串等同于没设置。
-- 没有选中任何 profile 时，顶栏右侧的名字是 `default`。
-- `--url` / `--secret` 与对应环境变量只作用于启动时的那一次连接，见下文“切换配置”。
-- 命令行参数会出现在进程列表里；secret 更适合放在 `config.toml` 或环境变量里。
-- 控制器地址可以带路径前缀（例如反向代理下的 `http://host/clash`）。tabby 连接控制器时不使用 `HTTP_PROXY` 等系统代理变量，以免请求绕回被控制的内核。
+优先级：命令行 > 环境变量 > `config.toml` > 内置默认值；空字符串等同于未设置。命令行参数会出现在进程列表中，secret 建议放在环境变量或配置文件里。tabby 访问控制器时忽略 `HTTP_PROXY` 等系统代理变量，避免请求绕回被控制的内核。
 
 ## 配置
 
-配置文件是 `config.toml`，不存在时直接用默认值启动，不报错。位置由 [`directories`](https://docs.rs/directories) 决定，在 Linux 上：
-
-- `$XDG_CONFIG_HOME/tabby/config.toml`；
-- 未设置 `XDG_CONFIG_HOME` 时为 `~/.config/tabby/config.toml`。
-
-文件里有无法识别的内容（`icons` 写了未知值、profile 缺 `url`、`[theme_overrides]` 里有未知键或写不出的颜色等）时，tabby 在进入全屏前报错并以退出码 1 退出，信息里带出错的键。`theme` 指向的主题不存在、主题文件写错时同样报错退出，信息里带文件路径和出错的键。顶层、`[delay]`、`[profiles.*]` 里不认识的键会被忽略，不报错。
-
-完整示例：
+`config.toml` 位于 `$XDG_CONFIG_HOME/tabby/`（默认 `~/.config/tabby/`）。文件不存在时使用默认值；内容无法识别（未知的 `icons`、缺少 `url` 的 profile、非法颜色等）时，tabby 在进入全屏前报错退出，并指出出错的键。
 
 ```toml
-# 启动时使用的 profile；--profile / TABBY_PROFILE 优先
-default = "local"
+default = "local"            # 启动使用的 profile
+theme = "terminal"           # 内置主题名、themes/ 中的主题名，或主题文件路径
+icons = "unicode"            # unicode | nerd
+mouse = true                 # false 则不接管鼠标，保留终端原生选择
 
-# 内置主题名、themes/ 目录里的主题名，或主题文件路径（相对本文件所在目录）
-# 默认 terminal；--theme / TABBY_THEME 优先；按 C 选中的主题会写回这一行
-theme = "terminal"
+[delay]                      # 测速参数（以下为默认值）
+url = "https://www.gstatic.com/generate_204"
+timeout_ms = 5000
 
-# unicode（默认） | nerd；没有命令行或环境变量版本
-icons = "unicode"
-
-# 测速参数，下面是默认值
-[delay]
-url = "https://www.gstatic.com/generate_204"   # 经节点访问的测试地址
-timeout_ms = 5000                              # 毫秒，超过算失败
-
-# 每个 [profiles.<名字>] 是一个控制器；url 必填，secret 可省略
 [profiles.local]
 url = "http://127.0.0.1:9090"
-secret = "your-secret"
+secret = "your-secret"       # 明文保存，注意文件权限
 
 [profiles.router]
 url = "http://192.168.1.1:9090"
 
-# 可选：覆盖主题里的单个语义颜色，键名与写法见下表
-[theme_overrides]
-accent = "#7aa2f7"        # #rrggbb
-success = "light-green"   # 16 色 ANSI 颜色名
-fg = "reset"              # 终端自己的默认颜色
-surface = "#292e42"       # 光标行背景
-bg = "reset"              # 整页背景；reset 表示用终端自己的背景
+[theme_overrides]            # 覆盖当前主题中的单个颜色
+accent = "#7aa2f7"
+success = "light-green"
+bg = "reset"
 ```
 
-`[delay]` 的 `url` 和 `timeout_ms` 用于单节点测速（`t`）和整组测速（`T`）；`url` 写成空串等同于没写。profile 在切换弹窗里按名称排序。secret 以明文保存在文件里，注意文件权限。
+### 切换配置
 
-### `[theme_overrides]`
+`P` 打开 profile 弹窗。切换时以目标 profile 的 `url` 与 `secret` 重新连接，并丢弃旧连接上未完成的请求；当前页面、排序、日志级别、主题保持不变，其余状态重置。`--url` / `--secret` 只作用于启动时的连接，弹窗首行“启动参数指定”可切回。
 
-覆盖加在当前主题之上，对所有主题都生效，包括按 `C` 切换后的主题；没写的键保持主题自己的颜色。主题文件的 `[colors]` 用同一套键和写法。
+## 主题
 
-| 键 | 用途 |
+| 主题 | 说明 |
 |---|---|
-| `fg` | 正文 |
-| `muted` | 次要文字、边框、单位 |
-| `surface` | 光标所在行的背景 |
-| `stripe` | 表格隔行条纹的背景；`reset` 表示不要条纹 |
-| `bg` | 整页背景，弹窗也用它；`reset` 表示用终端自己的背景 |
-| `accent` | 焦点、选中项、当前标签、底栏里的按键名 |
-| `success` | 正常、已连接、开关为开、延迟 < 200 ms |
-| `warning` | 需要注意（如重连）、延迟 200–500 ms |
-| `error` | 失败、超时、错误、延迟 > 500 ms |
-| `c1` | 上传 |
-| `c2` | 下载 |
-| `c3` | 连接数 |
-| `c4` | 内存 |
+| `terminal`（默认） | 仅用 16 色 ANSI，跟随终端配色 |
+| `tokyo-night` `catppuccin-mocha` `gruvbox-dark` `nord` `dracula` | 真彩深色，使用终端背景 |
+| `catppuccin-latte` | 真彩浅色，自带背景，深色终端中同样清晰 |
 
-颜色值必须是字符串，有三种写法：
-
-- `#rrggbb`：十六进制，大小写不限；不支持 `#rgb` 简写。
-- 16 色 ANSI 名，只认小写：`black`、`red`、`green`、`yellow`、`blue`、`magenta`、`cyan`、`gray`、`dark-gray`、`light-red`、`light-green`、`light-yellow`、`light-blue`、`light-magenta`、`light-cyan`、`white`。具体显示什么颜色由终端的配色决定。
-- `reset`：终端自己的默认颜色，例如让真彩主题的正文跟随终端前景色。`surface` 不允许写 `reset`（光标行会看不见），会报错。
-
-不支持 256 色序号、`rgb(...)` 和粗体等修饰。`surface` 和 `stripe` 是背景色：在 `terminal` 主题下 `surface` 取代原来的反色，光标行的文字保留各自的颜色。设了 `bg` 时，没有自己背景色的格子都铺上 `bg`，没有自己文字颜色的格子用 `fg`。
-
-## 页面
-
-用 `1`–`7`、`Tab`、`Shift+Tab` 切换。
-
-| 页面 | 内容 |
-|---|---|
-| 1 概览 | 最近 60 秒的实时流量图，代理模式（`m` 切换），内核信息，上传 / 下载总量（自内核启动）、活动连接数、内存四张统计卡片（终端高度 ≥ 28 行才显示） |
-| 2 代理 | 代理组列表与节点卡片网格；选节点、单节点 / 整组测速、排序、过滤 |
-| 3 Providers | 代理集合与规则集合：类型、数量、更新时间、节点健康度；更新与健康检查 |
-| 4 规则 | 规则表：序号、类型、匹配内容、目标；过滤 |
-| 5 连接 | 实时连接表：主机、进程、规则 → 链路、上下行速率、总量、时长；详情、关闭、排序、暂停、过滤 |
-| 6 日志 | 内核日志实时流：按级别订阅、暂停、清空、过滤，最多保留 2000 条 |
-| 7 设置 | 基础（模式、局域网连接、内核日志级别、IPv6）、端口、TUN、维护（重载配置、刷新 FakeIP、更新 GeoData、重启与升级内核） |
-
-控制器连不上时，内容区顶部出现“正在重连”横幅（间隔 1、2、4、8、16 秒，之后每 30 秒一次），`r` 立即重试，`P` 换一个 profile。secret 错误时横幅会提示，同样可以用 `P` 换配置。
-
-## 按键
-
-`?` 打开帮助浮层：左列是全局按键，右列是当前页面的按键，与下表一致。弹窗（帮助、连接详情、确认、profile、主题、代理组下拉）是模态的，打开时其余按键不起作用，`Esc` 关闭；`Ctrl+C` 任何时候都退出，`q` 在弹窗里也退出，但在过滤框和端口输入框里只是普通字符。
-
-### 全局
-
-| 按键 | 作用 |
-|---|---|
-| `1`–`7` | 跳到第 N 页 |
-| `Tab` / `Shift+Tab` | 下一页 / 上一页 |
-| `r` | 刷新当前页（出错时重试） |
-| `m` | 循环切换代理模式：rule → global → direct |
-| `P` | 切换配置（profile） |
-| `C` | 切换主题 |
-| `?` | 打开 / 关闭帮助 |
-| `q` / `Ctrl+C` | 退出 |
-
-### 列表通用
-
-除概览页外，所有页面的列表都支持：
-
-| 按键 | 作用 |
-|---|---|
-| `j` / `k` / `↓` / `↑` | 上下移动 |
-| `g` / `G` | 顶部 / 底部（日志页：最早 / 最新并跟随） |
-| `Ctrl+d` / `Ctrl+u` | 翻半页 |
-| `/` | 过滤（代理、Providers、规则、连接、日志页） |
-| `Esc` | 清除过滤 |
-
-`/` 打开输入框，输入的是不区分大小写的子串；`Enter` 保留过滤并回到列表，`Esc` 清除。输入过程中按键都是文字（`Ctrl+C` 仍然退出）。各页过滤的对象：代理页是节点名，Providers 页是 provider 名，规则页是类型、匹配内容和目标，连接页是主机、目标 IP、进程、规则、规则内容和链路，日志页是日志内容。
-
-### 代理页
-
-| 按键 | 作用 |
-|---|---|
-| `Enter` | 节点上：选择该节点（只有 Selector 组可以，其他类型提示“该组为自动选择”）；分组面板里：进入节点区；窄屏（< 100 列）在顶部的组选择行上：展开代理组下拉 |
-| `h` / `l` / `←` / `→` | 同一行内左右移动；最左列按 `h` 回分组面板，分组面板按 `l` 进入节点区 |
-| `j` / `k` / `↓` / `↑` | 在节点网格里按行上下移动 |
-| `t` | 测当前节点延迟 |
-| `T` | 测整组延迟（仅 mihomo） |
-| `s` | 切换排序：默认顺序 → 延迟 → 名称 |
-
-`GLOBAL` 组只在 global 模式下显示，并排在第一位。
-
-### Providers 页
-
-| 按键 | 作用 |
-|---|---|
-| `u` | 更新光标所在的 provider（代理集合或规则集合） |
-| `U` | 更新全部（有过滤时只更新匹配的），需确认 |
-| `h` | 对光标所在的代理集合做健康检查（规则集合不支持，会提示） |
-
-### 连接页
-
-| 按键 | 作用 |
-|---|---|
-| `Enter` | 连接详情 |
-| `x` | 关闭选中的连接 |
-| `X` | 关闭全部（有过滤时只关匹配的），需确认 |
-| `s` | 切换排序列：主机、进程、上行、下行、总量、时长，循环 |
-| `S` | 反转排序方向 |
-| `p` | 暂停 / 恢复刷新 |
-
-### 日志页
-
-| 按键 | 作用 |
-|---|---|
-| `l` | 循环切换订阅级别：debug → info → warning → error |
-| `p` | 暂停 / 恢复 |
-| `c` | 清空日志 |
-
-### 设置页
-
-| 按键 | 作用 |
-|---|---|
-| `Enter` / `Space` | 切换开关或执行操作；端口行进入编辑 |
-| `Enter` / `Esc` | 编辑端口时提交 / 取消（端口范围 0–65535，0 表示关闭） |
-| `y` | 确认带 `!` 的操作 |
-| `n` / `Esc` | 取消 |
-
-带 `!` 的操作（启用 TUN、重载配置、更新 GeoData、重启内核、升级内核）会先弹出确认框，只有小写的 `y` 才会执行。
-
-## 切换配置
-
-按 `P` 打开切换弹窗，列出 `config.toml` 里的全部 profile（按名称排序），当前项前有 `✓`。`j` / `k` 移动，`Enter` 切换，`Esc` 或 `P` 关闭。切换时用目标 profile 自己的 `url` 和 `secret` 重新连接，旧连接上进行中的请求结果会被丢弃；当前页面、代理页排序、连接页排序、日志级别、主题和 `[delay]` 保留，其余状态（数据、过滤文字、光标、暂停状态等）重新开始。目标 URL 无法解析时不切换，并提示错误。
-
-`--url` / `--secret`（含环境变量）只作用于启动时的那一次连接，不会套用到切换后的 profile。启动连接受过这两项覆盖时，弹窗第一行是“启动参数指定”，切回它会恢复启动时的 url 和 secret；启动时没有选中任何 profile（既没有 `default` 也没有 `--profile`）时，第一行是“默认地址”。`config.toml` 里没有任何 profile 时，弹窗会显示配置文件路径和一个 `[profiles.local]` 示例。
-
-## 主题与图标
-
-| `theme` | 说明 |
-|---|---|
-| `terminal`（默认） | 只用 16 色 ANSI，颜色跟随终端自己的配色；光标行用终端默认的前景、背景整行反色，行内文字不保留各自的颜色（加粗保留） |
-| `tokyo-night` | 内置真彩色深色主题，终端需要支持 24 位色；背景用终端自己的 |
-| `catppuccin-mocha` | 同上 |
-| `gruvbox-dark` | 同上 |
-| `nord` | 同上 |
-| `dracula` | 同上 |
-| `catppuccin-latte` | 内置真彩色浅色主题，自带整页背景 `#eff1f5`，在深色终端里也能看清 |
-
-深色内置主题不设背景，默认终端背景本来就是深色；放在浅色终端里文字会看不清，这时用 `catppuccin-latte`、`terminal`，或用 `[theme_overrides]` 的 `bg` 补一个背景。
-
-### 切换主题
-
-按 `C` 打开主题弹窗，依次列出内置主题、主题目录里的主题，以及用路径指定、但不在主题目录里的当前主题；当前主题前有 `✓`。`j` / `k` 移动时整个界面立即换成光标所在的主题（预览），`Enter` 选用并把 `theme = "…"` 写回 `config.toml`，`Esc` 或 `C` 取消并恢复原来的主题。
-
-- 写回时只改 `theme` 这一行（原值后面的注释也保留），其余内容和注释不变；没有 `config.toml` 时会新建。写入失败时主题照样切换，提示里给出原因。
-- 启动时用了 `--theme` / `TABBY_THEME` 的话，下次启动仍以它为准，提示里会说明。
-- 每次打开弹窗都重新读取主题目录，所以改完主题文件，再按一次 `C` 就能看到新效果。
-- 写错的主题文件也会列出来，显示为灰色，后面是错误原因，不能选；名字和内置主题相同的文件同样不能选（内置主题优先）。
-- 切换配置（`P`）不影响当前主题。
+`C` 打开主题弹窗，移动光标即时预览，`Enter` 选用并写回 `config.toml` 的 `theme` 行（仅改这一行，保留注释），`Esc` 取消。
 
 ### 自定义主题
 
-主题文件放在 `config.toml` 旁边的 `themes/` 目录里（Linux 上是 `~/.config/tabby/themes/`），文件名去掉 `.toml` 就是主题名，可以写在 `theme =`、`--theme` 里，也会出现在 `C` 弹窗中。
+在 `themes/` 目录（与 `config.toml` 同级）放置 `<name>.toml`，文件名即主题名：
 
 ```toml
-# ~/.config/tabby/themes/midnight.toml
+extends = "tokyo-night"      # 可选，起点内置主题，默认 terminal
 
-# 可选：从哪个内置主题开始，只能写内置主题名；不写就是 terminal
-extends = "tokyo-night"
-
-# 要改的颜色，键和写法与 [theme_overrides] 相同；没写的沿用 extends 的主题
 [colors]
 accent = "#ff9e64"
 surface = "#2a2f45"
-stripe = "#20222f"
 bg = "#16161e"
 ```
 
-主题文件只认 `extends` 和 `[colors]` 两个键，其他键会报错。`theme =` 或 `--theme` 也可以直接写主题文件的路径：带 `/` 或以 `.toml` 结尾的值都当作路径，写在 `config.toml` 里时相对配置文件所在目录，写在命令行或环境变量里时相对当前目录，用 `C` 保存时会写成绝对路径。`[theme_overrides]` 总是叠在最上层，优先级是：内置主题 < 主题文件的 `[colors]` < `[theme_overrides]`。
+优先级：内置主题 < 主题文件 `[colors]` < `[theme_overrides]`。`theme` 与 `--theme` 也可直接写文件路径（含 `/` 或以 `.toml` 结尾）。
+
+### 颜色键
+
+`[colors]` 与 `[theme_overrides]` 使用同一套键：
+
+| 键 | 用途 |
+|---|---|
+| `fg` / `muted` | 正文 / 次要文字与边框 |
+| `bg` | 整页背景；`reset` 为终端背景 |
+| `surface` / `stripe` | 光标行背景 / 表格隔行条纹（`reset` 关闭条纹） |
+| `accent` | 焦点、选中项、按键名 |
+| `success` / `warning` / `error` | 正常、需注意、失败（同时用于延迟 <200 / 200–500 / >500 ms） |
+| `c1` `c2` `c3` `c4` | 上传、下载、连接数、内存 |
+
+取值为字符串：`#rrggbb`；16 色 ANSI 名（`red`、`light-green`、`dark-gray` 等，小写）；或 `reset`（终端默认色，`surface` 不允许）。
 
 ### 图标
 
-`icons = "unicode"`（默认）只使用通用的 Unicode 符号（`●`、`✓`、`◆` 等）。`icons = "nerd"` 改用 Nerd Font 图标：状态点、开关、✓ / ✗、暂停、警告、logo、上下行箭头，宽度达到 100 列时还在标签前加页面图标。需要终端字体已打上 Nerd Fonts v3 补丁，推荐 **Nerd Font Mono** 变体（图标严格占一格）。tabby 按“每个图标 1 列”排版；非 Mono 变体的字体可能把图标画成两格宽，溢出到右边一格，少数终端的字符宽度表还会把私用区字符当作宽字符，造成整行错位。遇到这种情况换 Mono 字体，或改回 `icons = "unicode"`。
+`icons = "nerd"` 使用 Nerd Font 图标，需终端字体打过 Nerd Fonts v3 补丁，推荐 **Nerd Font Mono** 变体（图标严格占一格）；显示错位时改回 `unicode`。
+
+## 页面
+
+| 页面 | 内容 |
+|---|---|
+| 1 概览 | 近 60 秒流量图、代理模式、内核信息，以及上传 / 下载 / 连接数 / 内存卡片（高度 ≥ 28 行） |
+| 2 代理 | 代理组与节点网格；选择节点、单节点 / 整组测速、排序、过滤 |
+| 3 Providers | 代理集合与规则集合；更新与健康检查 |
+| 4 规则 | 规则列表与过滤 |
+| 5 连接 | 实时连接表；详情、关闭、排序、暂停、过滤 |
+| 6 日志 | 内核日志流；按级别订阅、暂停、清空、过滤（保留 2000 条） |
+| 7 设置 | 模式、局域网连接、日志级别、IPv6、端口、TUN、重载配置、刷新 FakeIP、更新 GeoData、重启与升级内核 |
+
+控制器不可达时顶部出现重连横幅（1、2、4、8、16 秒，之后每 30 秒），`r` 立即重试，`P` 换配置；secret 错误同样会提示。
+
+## 按键
+
+`?` 打开帮助，内容为当前页面的实际按键。弹窗打开时按键只作用于弹窗，`Esc` 关闭；`Ctrl+C` 随时退出。过滤框与端口输入框内所有按键都是文字。
+
+**全局**
+
+| 按键 | 作用 |
+|---|---|
+| `1`–`7` / `Tab` / `Shift+Tab` | 跳转 / 下一页 / 上一页 |
+| `r` | 刷新当前页，出错时重试 |
+| `m` | 切换模式：rule → global → direct |
+| `P` / `C` | 切换配置 / 主题 |
+| `?` | 帮助 |
+| `q` / `Ctrl+C` | 退出 |
+
+**列表**
+
+| 按键 | 作用 |
+|---|---|
+| `j` `k` `↓` `↑` | 上下移动 |
+| `g` / `G` | 顶部 / 底部（日志页：最早 / 最新并跟随） |
+| `Ctrl+d` / `Ctrl+u` | 翻半页 |
+| `/` | 过滤（不区分大小写的子串）；`Enter` 保留，`Esc` 清除 |
+
+**页面**
+
+| 页面 | 按键 |
+|---|---|
+| 代理 | `Enter` 选节点 · `h` `l` 左右移动 · `t` 测当前节点 · `T` 测整组（仅 mihomo）· `s` 排序（默认 → 延迟 → 名称） |
+| Providers | `u` 更新当前项 · `U` 更新全部（需确认）· `h` 健康检查（代理集合） |
+| 连接 | `Enter` 详情 · `x` 关闭所选 · `X` 关闭全部（需确认）· `s` 切换排序列 · `S` 反转 · `p` 暂停 |
+| 日志 | `l` 切换订阅级别 · `p` 暂停 · `c` 清空 |
+| 设置 | `Enter` / `Space` 切换或执行（端口行进入编辑）· `y` / `n` 确认 / 取消带 `!` 的操作 |
+
+有过滤条件时，`U` 与 `X` 只作用于匹配项。
+
+## 鼠标
+
+默认启用，`mouse = false` 可关闭。
+
+| 操作 | 效果 |
+|---|---|
+| 左键单击 | 选中；标签页跳转；表头列排序；模式标签切换代理模式 |
+| 左键双击 | 激活（同一行 400 ms 内连按两次），等同 `Enter` |
+| 滚轮 | 滚动指针下的列表；弹窗打开时滚动弹窗 |
+
+## 内核支持
+
+| 内核 | 支持情况 |
+|---|---|
+| mihomo | 全部功能 |
+| 原版 Clash | 通用功能可用；mihomo 独有项（TUN、内存、规则集合、整组测速、FakeIP 刷新、GeoData、重启与升级内核）显示“需要 mihomo”或置灰，不发请求 |
+
+内核类型由 `GET /version` 的 `meta` 字段判断。原版 Clash 的行为由 `tests/fixtures` 中的样本与单元测试覆盖，未连接真实实例验证。
 
 ## 终端尺寸
 
 | 条件 | 变化 |
 |---|---|
-| 宽度 < 100 列 | 代理页的分组列表折叠成顶部的组选择行（`Enter` 展开下拉）；标签栏只显示数字 |
-| 宽度 < 70 列 | 连接表隐藏“进程”和“总量”列；帮助浮层改为单列，放不下时可用 `j` / `k` 滚动 |
-| 高度 < 28 行 | 概览页隐藏统计卡片 |
-| 宽度 < 50 列或高度 < 15 行 | 只显示“终端尺寸过小”和当前尺寸，恢复后继续使用；这期间按键照常生效 |
-
-此外，顶栏和底栏在窄屏下按优先级省略次要内容（顶栏先去掉 profile 名、`tabby` 字样、内核版本，底栏从末尾丢弃提示并用 `…` 代替，`? 帮助` 与 `q 退出` 始终保留）。
+| 宽 < 100 列 | 代理组折叠为顶部选择行；标签栏只显示数字 |
+| 宽 < 70 列 | 连接表隐藏“进程”“总量”列；帮助改为单列 |
+| 高 < 28 行 | 概览页隐藏统计卡片 |
+| 宽 < 50 列或高 < 15 行 | 仅提示“终端尺寸过小”，恢复后继续使用 |
 
 ## 日志
 
-终端归 TUI 使用，tabby 自己的日志写到文件：
+终端归 TUI 所有，tabby 自身日志写入 `$XDG_STATE_HOME/tabby/tabby.log`（默认 `~/.local/state/tabby/tabby.log`），追加写入，不轮转；panic 也记录于此。级别由 `RUST_LOG` 控制，默认 `info`：
 
-- `$XDG_STATE_HOME/tabby/tabby.log`；
-- 未设置 `XDG_STATE_HOME` 时为 `~/.local/state/tabby/tabby.log`；
-- 没有 state 目录的平台退回到本地数据目录。
+```sh
+RUST_LOG=tabby=debug tabby
+```
 
-文件以追加方式写入，不轮转也不清理。默认级别是 `info`，用标准的 `RUST_LOG` 调整，例如 `RUST_LOG=tabby=debug tabby`。panic 信息也会写进这个文件。这与“日志”页不同：那一页显示的是内核的日志。
+这与“日志”页不同，后者显示的是内核日志。
 
 ## 开发
 
 ```sh
 cargo build
 cargo clippy --all-targets -- -D warnings
-cargo test
+XDG_CONFIG_HOME="$(mktemp -d)" cargo test
 ```
 
-设计、决策与各里程碑的实现记录见 [`docs/plans/2026-11-05-tabby-tui.md`](docs/plans/2026-11-05-tabby-tui.md)。
+测试请使用临时 `XDG_CONFIG_HOME`，避免触碰真实配置。设计与决策记录见 [`docs/plans/2026-11-05-tabby-tui.md`](docs/plans/2026-11-05-tabby-tui.md)。
