@@ -31,7 +31,8 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
             ("Ctrl+d / Ctrl+u", "翻半页"),
         ],
         Page::Proxies => &[
-            ("Enter", "选择节点"),
+            ("Enter", "分组面板：进入节点区"),
+            ("Enter", "节点：选择节点"),
             ("t", "测当前节点"),
             ("T", "测整组（mihomo）"),
             ("s", "切换排序"),
