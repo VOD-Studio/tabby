@@ -8,7 +8,7 @@ use super::{
     App, Change, Confirm, Msg, Outbox, Overlay, Patch, Port, Reconnect, Setting, Stage, ToastKind,
 };
 use crate::{
-    core::{CoreError, Graphical, ManagedCore, Persist, Release, Step, Upgrade},
+    core::{CoreError, Graphical, ManagedCore, Persist, Release, Step, SystemProxy, Upgrade},
     ui::text::core_reason,
 };
 
@@ -70,6 +70,13 @@ pub enum CoreEvent {
     LoginStart(LoginStart),
     /// The `登录时启动` row ended: whether it is on now.
     LoginStarted(Result<bool, CoreError>),
+    /// Whether the system proxy points at the kernel, as tabby left it.
+    SystemProxy(SystemProxy),
+    /// The `系统代理` row ended: whether it is on now.
+    SystemProxySet(Result<bool, CoreError>),
+    /// The system proxy was left pointing at this port when the kernel went
+    /// away without tabby (plan R6).
+    ProxyDangling(u16),
 }
 
 /// A toast about what failed: `what`, then what the managed core said.
@@ -118,6 +125,11 @@ impl App {
         self.core_phase = Some(CorePhase::Starting(Step::Starting));
         self.dirty = true;
         self.spawn_core(|core, outbox| async move {
+            // Before the kernel is started again: a proxy that points at a
+            // kernel that is not running is only told while it is not.
+            if let Some(port) = core.system_proxy_dangling().await {
+                outbox.send(Msg::Core(CoreEvent::ProxyDangling(port))).await;
+            }
             // A step the full channel cannot take is only a hint lost.
             let result = core
                 .ensure_running(|step| outbox.try_send(Msg::Core(CoreEvent::Step(step))))
@@ -165,6 +177,7 @@ impl App {
                 self.say_tun_dropped();
                 self.check_authority();
                 self.check_login_start();
+                self.check_system_proxy();
             }
             // Nothing downloaded yet: look up what there is to download, and
             // ask before downloading it.
@@ -203,24 +216,11 @@ impl App {
             CoreEvent::Authority(_) | CoreEvent::Setcap(_) | CoreEvent::Authorized(_) => {
                 self.on_authorization(event);
             }
-            CoreEvent::LoginStart(state) => self.login_start = Some(state),
-            CoreEvent::LoginStarted(result) => {
-                self.changing.remove(&Setting::LoginStart);
-                match result {
-                    Ok(on) => {
-                        if let Some(state) = &mut self.login_start {
-                            state.enabled = on;
-                        }
-                        let text = if on {
-                            "内核会在登录时启动"
-                        } else {
-                            "内核不再在登录时启动"
-                        };
-                        self.toast(ToastKind::Success, text.to_owned());
-                    }
-                    Err(err) => self.toast(ToastKind::Error, failure("设置失败", &err)),
-                }
-            }
+            CoreEvent::SystemProxy(_)
+            | CoreEvent::SystemProxySet(_)
+            | CoreEvent::ProxyDangling(_)
+            | CoreEvent::LoginStart(_)
+            | CoreEvent::LoginStarted(_) => self.on_session(event),
             CoreEvent::Regenerated(Ok(())) => {
                 // The reload itself is the one every other kernel has.
                 self.changing.remove(&Setting::Reload);
@@ -303,7 +303,18 @@ impl App {
             return;
         }
         self.changing.insert(Setting::StopCore, Stage::Sending);
-        self.spawn_core(|core, _| async move { CoreEvent::Stopped(core.stop().await) });
+        self.spawn_core(|core, outbox| async move {
+            // The proxy of the desktop must not be left pointing at a kernel
+            // that is about to be gone; failing to put it back does not keep
+            // the kernel from stopping, and the row shows it still on.
+            if let Err(err) = core.restore_system_proxy().await {
+                tracing::warn!("cannot put the system proxy back: {err}");
+            }
+            outbox
+                .send(Msg::Core(CoreEvent::SystemProxy(core.system_proxy())))
+                .await;
+            CoreEvent::Stopped(core.stop().await)
+        });
     }
 
     /// `重启内核` on the managed core: through its supervisor, so that the
@@ -387,6 +398,61 @@ impl App {
         }
     }
 
+    /// What the session has of the kernel: whether it starts at login and
+    /// whether the desktop's proxy follows it.
+    fn on_session(&mut self, event: CoreEvent) {
+        match event {
+            CoreEvent::LoginStart(state) => self.login_start = Some(state),
+            CoreEvent::LoginStarted(result) => {
+                let on = self.switched(Setting::LoginStart, result, [
+                    "内核不再在登录时启动",
+                    "内核会在登录时启动",
+                ]);
+                if let (Some(on), Some(state)) = (on, &mut self.login_start) {
+                    state.enabled = on;
+                }
+            }
+            CoreEvent::SystemProxy(state) => self.system_proxy = Some(state),
+            CoreEvent::SystemProxySet(result) => {
+                let on = self.switched(Setting::SystemProxy, result, [
+                    "系统代理已恢复",
+                    "系统代理已指向内核",
+                ]);
+                if let (Some(on), Some(state)) = (on, &mut self.system_proxy) {
+                    state.enabled = on;
+                }
+            }
+            CoreEvent::ProxyDangling(port) => self.toast(
+                ToastKind::Error,
+                format!(
+                    "上次内核退出时系统代理没有恢复，仍指向 127.0.0.1:{port}；内核已重新启动，不需要时在设置页关闭系统代理"
+                ),
+            ),
+            _ => {}
+        }
+    }
+
+    /// The end of a switch: the row is free again, and `texts` (off, on)
+    /// say what came of it. `Some(on)` when it went through.
+    fn switched(
+        &mut self,
+        setting: Setting,
+        result: Result<bool, CoreError>,
+        texts: [&str; 2],
+    ) -> Option<bool> {
+        self.changing.remove(&setting);
+        match result {
+            Ok(on) => {
+                self.toast(ToastKind::Success, texts[usize::from(on)].to_owned());
+                Some(on)
+            }
+            Err(err) => {
+                self.toast(ToastKind::Error, failure("设置失败", &err));
+                None
+            }
+        }
+    }
+
     /// What came of the capabilities TUN needs: what `getcap` says, what
     /// the dialog of the desktop (or `sudo`) did, and the restart after it.
     fn on_authorization(&mut self, event: CoreEvent) {
@@ -441,6 +507,37 @@ impl App {
         });
     }
 
+    /// Asks whether the system proxy points at the kernel.
+    pub(super) fn check_system_proxy(&self) {
+        self.spawn_core(|core, _| async move { CoreEvent::SystemProxy(core.system_proxy()) });
+    }
+
+    /// `系统代理`: points the desktop's proxy at the kernel's Mixed port, or
+    /// puts it back.
+    pub(super) fn toggle_system_proxy(&mut self) {
+        let Some(state) = self.system_proxy else {
+            return;
+        };
+        if self.changing.contains_key(&Setting::SystemProxy) {
+            return;
+        }
+        let Some(Ok(configs)) = &self.configs else {
+            return;
+        };
+        let on = !state.enabled;
+        let port = Port::Mixed.of(configs).filter(|port| *port > 0);
+        // Putting it back needs no port.
+        let Some(port) = port.or((!on).then_some(0)) else {
+            self.toast(ToastKind::Error, "Mixed 端口没有启用".to_owned());
+            return;
+        };
+        self.changing.insert(Setting::SystemProxy, Stage::Sending);
+        self.dirty = true;
+        self.spawn_core(move |core, _| async move {
+            CoreEvent::SystemProxySet(core.set_system_proxy(on, port).await.map(|()| on))
+        });
+    }
+
     /// Asks the kernel's file what it may do.
     pub(super) fn check_authority(&self) {
         self.spawn_core(|core, _| async move { CoreEvent::Authority(core.tun_authorized().await) });
@@ -476,6 +573,15 @@ impl App {
         };
         if let Err(err) = core.persist(change) {
             self.toast(ToastKind::Error, failure("已生效，但没能保存", &err));
+        }
+        // The desktop was pointed at the port it was; it follows the kernel.
+        if let Patch::Port(Port::Mixed, number) = patch
+            && self.system_proxy.is_some_and(|state| state.enabled)
+        {
+            let on = number > 0;
+            self.spawn_core(move |core, _| async move {
+                CoreEvent::SystemProxySet(core.set_system_proxy(on, number).await.map(|()| on))
+            });
         }
     }
 

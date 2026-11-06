@@ -222,6 +222,9 @@ fn value(
         Gate::SelfManaged => return vec![Span::styled("由你自己管理", muted)],
         Gate::MixedOnly => return vec![Span::styled("托管内核只用 Mixed 端口", muted)],
         Gate::NeedsSystemd => return vec![Span::styled("需要 systemd", muted)],
+        Gate::NoDesktopProxy => {
+            return vec![Span::styled("当前桌面不支持系统代理", muted)];
+        }
     }
     let fg = Style::new().fg(theme.fg);
     match setting {
@@ -253,6 +256,10 @@ fn value(
             }
             spans
         }
+        Setting::SystemProxy => match app.system_proxy {
+            Some(state) => vec![switch(app, state.enabled)],
+            None => vec![Span::styled(NO_VALUE, muted)],
+        },
         Setting::LoginStart => match app.login_start {
             Some(state) => vec![switch(app, state.enabled)],
             None => vec![Span::styled(NO_VALUE, muted)],
@@ -353,7 +360,7 @@ mod tests {
         let (indices, titles) = headings(&Setting::ALL);
         assert_eq!(indices, (0..Setting::ALL.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护", "托管内核"]);
-        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 4].to_vec();
+        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 5].to_vec();
         let (indices, titles) = headings(&external);
         assert_eq!(indices, (0..external.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护"]);

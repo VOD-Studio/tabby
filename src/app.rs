@@ -26,7 +26,7 @@ use crate::{
         stream::{Event as StreamEvent, Stream, Streams},
     },
     config::{self, Origin, Profiles, Settings},
-    core::{ManagedCore, Release},
+    core::{ManagedCore, Release, SystemProxy},
     format::natural_cmp,
     themes::{self, Entry, Picker},
     ui::{
@@ -1818,13 +1818,15 @@ pub enum Setting {
     UpgradeCore,
     /// Starts the managed core when the user logs in.
     LoginStart,
+    /// Points the desktop's proxy at the managed core.
+    SystemProxy,
     /// Stops the managed core.
     StopCore,
 }
 
 impl Setting {
     /// Top to bottom, as the page lists them.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 20] = [
         Self::Mode,
         Self::AllowLan,
         Self::LogLevel,
@@ -1843,6 +1845,7 @@ impl Setting {
         Self::CoreBinary,
         Self::UpgradeCore,
         Self::LoginStart,
+        Self::SystemProxy,
         Self::StopCore,
     ];
 
@@ -1855,7 +1858,11 @@ impl Setting {
             Self::Reload | Self::FlushFakeIp | Self::UpdateGeo | Self::Restart | Self::Upgrade => {
                 "维护"
             }
-            Self::CoreBinary | Self::UpgradeCore | Self::LoginStart | Self::StopCore => "托管内核",
+            Self::CoreBinary
+            | Self::UpgradeCore
+            | Self::LoginStart
+            | Self::SystemProxy
+            | Self::StopCore => "托管内核",
         }
     }
 
@@ -1873,6 +1880,7 @@ impl Setting {
             Self::Restart => "重启内核",
             Self::StopCore => "停止内核",
             Self::LoginStart => "登录时启动",
+            Self::SystemProxy => "系统代理",
             Self::CoreBinary => "内核",
             Self::Upgrade | Self::UpgradeCore => "升级内核",
         }
@@ -1906,7 +1914,11 @@ impl Setting {
     fn managed_only(self) -> bool {
         matches!(
             self,
-            Self::CoreBinary | Self::UpgradeCore | Self::LoginStart | Self::StopCore
+            Self::CoreBinary
+                | Self::UpgradeCore
+                | Self::LoginStart
+                | Self::SystemProxy
+                | Self::StopCore
         )
     }
 
@@ -1932,6 +1944,8 @@ pub enum Gate {
     MixedOnly,
     /// The login start is a unit of the systemd user manager.
     NeedsSystemd,
+    /// The desktop has no system proxy tabby can set.
+    NoDesktopProxy,
 }
 
 /// A change to the running configuration, sent as `PATCH /configs`.
@@ -2202,6 +2216,9 @@ pub struct App {
     /// Whether the managed kernel starts at login, as last looked; `None`
     /// until it was.
     pub login_start: Option<LoginStart>,
+    /// Whether the system proxy points at the managed kernel, as last
+    /// looked; `None` until it was.
+    pub system_proxy: Option<SystemProxy>,
     /// The managed core, while `sudo` has to be run on the terminal, which
     /// only the main loop can give.
     suspend: Option<std::sync::Arc<ManagedCore>>,
@@ -2345,6 +2362,7 @@ impl App {
             core_phase,
             tun_authorized: None,
             login_start: None,
+            system_proxy: None,
             suspend: None,
             profile_cursor: profiles.current,
             profiles,
@@ -3425,6 +3443,11 @@ impl App {
         {
             return Gate::NeedsSystemd;
         }
+        if setting == Setting::SystemProxy
+            && self.system_proxy.is_some_and(|state| !state.supported)
+        {
+            return Gate::NoDesktopProxy;
+        }
         // One port is enough for a kernel the user does not run by hand.
         if self.is_managed() && matches!(setting, Setting::Port(port) if port != Port::Mixed) {
             return Gate::MixedOnly;
@@ -3444,6 +3467,7 @@ impl App {
             | Setting::StopCore
             | Setting::CoreBinary
             | Setting::LoginStart
+            | Setting::SystemProxy
             | Setting::UpgradeCore => true,
         };
         match (reported, clash) {
@@ -3478,6 +3502,7 @@ impl App {
             | Setting::StopCore
             | Setting::CoreBinary
             | Setting::LoginStart
+            | Setting::SystemProxy
             | Setting::UpgradeCore => None,
             Setting::AllowLan => Some(Change::Patch(Patch::AllowLan(flip(configs.allow_lan)))),
             Setting::LogLevel => Some(Change::Patch(Patch::LogLevel(next_kernel_log_level(
@@ -3514,6 +3539,10 @@ impl App {
                 self.toast(ToastKind::Error, "需要 mihomo".to_owned());
                 return;
             }
+            Gate::NoDesktopProxy => {
+                self.toast(ToastKind::Error, "当前桌面不支持系统代理".to_owned());
+                return;
+            }
             Gate::NeedsSystemd => {
                 self.toast(ToastKind::Error, "登录时启动需要 systemd".to_owned());
                 return;
@@ -3526,6 +3555,7 @@ impl App {
         match (setting, change) {
             (Setting::StopCore, _) => self.ask_stop_core(),
             (Setting::LoginStart, _) => self.toggle_login_start(),
+            (Setting::SystemProxy, _) => self.toggle_system_proxy(),
             // The kernel needs the capabilities before it can run a TUN.
             (Setting::Tun, Some(change @ Change::Patch(Patch::Tun(true)))) if self.is_managed() => {
                 self.ask_enable_tun(change);
@@ -9188,6 +9218,7 @@ secret = "b-secret"
                     Setting::CoreBinary
                         | Setting::UpgradeCore
                         | Setting::LoginStart
+                        | Setting::SystemProxy
                         | Setting::StopCore
                 )
             })
@@ -10508,6 +10539,161 @@ secret = "b-secret"
         assert!(toasted(&app, "登录时启动需要 systemd"), "{:?}", app.toasts);
         assert!(!app.is_changing(Setting::LoginStart));
         assert!(!dir.join("units").exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_system_proxy_row_points_the_desktop_at_the_mixed_port_and_back() {
+        let dir = testing::scratch("app-sysproxy");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = testing::on_desktop(testing::core_at(&dir, port, &recorder, true), "GNOME");
+        let (mut app, mut rx) = managed_settings_on(Arc::new(core), Setting::SystemProxy).await;
+        pump_until(&mut app, &mut rx, |app| app.system_proxy.is_some()).await;
+        assert!(
+            draw(&app)
+                .lines()
+                .any(|line| line.contains("系统代理") && line.contains('关'))
+        );
+
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| {
+            !app.is_changing(Setting::SystemProxy)
+        })
+        .await;
+
+        // The Mixed port the kernel reports, not a number of tabby's own.
+        let gsettings = recorder.runs("gsettings");
+        assert!(
+            gsettings.contains(&"set org.gnome.system.proxy.http port 17890".to_owned()),
+            "{gsettings:?}"
+        );
+        assert!(gsettings.iter().any(|run| run.ends_with("mode 'manual'")));
+        assert!(app.system_proxy.is_some_and(|state| state.enabled));
+        assert!(toasted(&app, "系统代理已指向内核"), "{:?}", app.toasts);
+        assert!(
+            draw(&app)
+                .lines()
+                .any(|line| line.contains("系统代理") && line.contains('开'))
+        );
+
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| {
+            !app.is_changing(Setting::SystemProxy)
+        })
+        .await;
+        assert!(app.system_proxy.is_some_and(|state| !state.enabled));
+        assert!(toasted(&app, "系统代理已恢复"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_system_proxy_row_is_greyed_on_a_desktop_without_one() {
+        let dir = testing::scratch("app-sysproxy-grey");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = testing::on_desktop(testing::core_at(&dir, port, &recorder, true), "Hyprland");
+        let (mut app, mut rx) = managed_settings_on(Arc::new(core), Setting::SystemProxy).await;
+        pump_until(&mut app, &mut rx, |app| app.system_proxy.is_some()).await;
+        let screen = draw(&app);
+        assert!(
+            screen
+                .lines()
+                .any(|line| line.contains("系统代理") && line.contains("当前桌面不支持系统代理")),
+            "{screen}"
+        );
+
+        key_press(&mut app, KeyCode::Enter);
+
+        assert!(toasted(&app, "当前桌面不支持系统代理"), "{:?}", app.toasts);
+        assert_eq!(recorder.runs("gsettings"), Vec::<String>::new());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn stopping_the_kernel_puts_the_system_proxy_back_first() {
+        let dir = testing::scratch("app-sysproxy-stop");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::on_desktop(
+            testing::core_at(&dir, port, &recorder, true),
+            "KDE",
+        ));
+        core.set_system_proxy(true, 17890).await.unwrap();
+        let (mut app, mut rx) = managed_settings_on(Arc::clone(&core), Setting::StopCore).await;
+        pump_until(&mut app, &mut rx, |app| {
+            app.system_proxy.is_some_and(|state| state.enabled)
+        })
+        .await;
+
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Char('y'));
+        pump_until(&mut app, &mut rx, |app| {
+            matches!(app.core_phase, Some(CorePhase::Stopped))
+        })
+        .await;
+
+        assert!(!core.system_proxy().enabled);
+        let calls = recorder.calls();
+        let last_write = calls
+            .iter()
+            .rposition(|cmd| cmd.program == "kwriteconfig6")
+            .unwrap();
+        let stop = calls
+            .iter()
+            .position(|cmd| {
+                cmd.program == "systemctl" && cmd.args.get(1).map(String::as_str) == Some("stop")
+            })
+            .unwrap();
+        assert!(
+            last_write < stop,
+            "the proxy is put back before the kernel goes"
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_new_mixed_port_takes_the_system_proxy_along() {
+        let dir = testing::scratch("app-sysproxy-port");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::on_desktop(
+            testing::core_at(&dir, port, &recorder, true),
+            "GNOME",
+        ));
+        core.set_system_proxy(true, 17890).await.unwrap();
+        let (mut app, mut rx) = managed_settings_on(core, Setting::SystemProxy).await;
+        pump_until(&mut app, &mut rx, |app| {
+            app.system_proxy.is_some_and(|state| state.enabled)
+        })
+        .await;
+
+        app.persist_patch(Patch::Port(Port::Mixed, 18000));
+        pump_until(&mut app, &mut rx, |_| {
+            recorder
+                .runs("gsettings")
+                .contains(&"set org.gnome.system.proxy.http port 18000".to_owned())
+        })
+        .await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_proxy_left_on_by_a_kernel_that_went_away_is_said_when_tabby_starts() {
+        let dir = testing::scratch("app-sysproxy-dangling");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, false, "");
+        let core = Arc::new(testing::on_desktop(
+            testing::core_at(&dir, port, &recorder, true),
+            "GNOME",
+        ));
+        core.set_system_proxy(true, 17890).await.unwrap();
+        let (mut app, mut rx) = managed_app(core);
+
+        app.start();
+        pump_until(&mut app, &mut rx, |app| toasted(app, "系统代理没有恢复")).await;
+
+        assert!(toasted(&app, "127.0.0.1:17890"), "{:?}", app.toasts);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -164,6 +164,8 @@ fn core_in(
     core.mountinfo = dir.join("mountinfo");
     // Nor the units of whoever runs them.
     core.unit_dir = Some(dir.join("units"));
+    // Nor the desktop of whoever runs them.
+    core.desktop = None;
     core.timing = Timing {
         ready: Duration::from_secs(3),
         poll: Duration::from_millis(20),
@@ -267,6 +269,12 @@ pub(crate) fn systemd(port: u16, delay: Duration) -> Arc<Recorder> {
         }
         _ => answer(0, ""),
     })
+}
+
+/// `core` on the desktop that `XDG_CURRENT_DESKTOP` of `current` names.
+pub(crate) fn on_desktop(mut core: ManagedCore, current: &str) -> ManagedCore {
+    core.desktop = super::sysproxy::Desktop::detect(current);
+    core
 }
 
 /// What `systemctl --user` was asked, without the `--user`, one string each.

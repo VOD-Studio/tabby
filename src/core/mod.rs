@@ -15,6 +15,7 @@ mod settings;
 mod state;
 mod subscription;
 mod supervisor;
+mod sysproxy;
 
 use std::{
     env, io,
@@ -38,6 +39,7 @@ pub use settings::Persist;
 use state::State;
 pub use subscription::{Kind, Store, Subscription};
 use supervisor::Mode;
+pub use sysproxy::SystemProxy;
 
 /// How long a kernel just started has to answer on its controller.
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -85,6 +87,11 @@ impl Paths {
     fn bin(&self) -> PathBuf {
         self.root.join("bin").join("mihomo")
     }
+    /// What the system proxy was before tabby pointed it at the kernel.
+    fn system_proxy(&self) -> PathBuf {
+        self.root.join("system-proxy.toml")
+    }
+
     /// The kernel's output when it runs without systemd.
     fn log(&self) -> PathBuf {
         self.root.join("core.log")
@@ -116,6 +123,7 @@ pub enum Action {
     Validate,
     Authorize,
     Autostart,
+    SystemProxy,
 }
 
 impl std::fmt::Display for Action {
@@ -128,6 +136,7 @@ impl std::fmt::Display for Action {
             Self::Validate => "check the subscription",
             Self::Authorize => "authorize the kernel",
             Self::Autostart => "set up the start at login",
+            Self::SystemProxy => "set the system proxy",
         })
     }
 }
@@ -177,6 +186,9 @@ pub enum CoreError {
     /// in.
     #[error("the start at login needs the systemd user manager")]
     NeedsSystemd,
+    /// The desktop has no system proxy tabby knows how to set.
+    #[error("the desktop has no system proxy tabby can set")]
+    NoDesktopProxy,
     /// The release list could not be read.
     #[error("cannot look up the latest kernel: {0}")]
     Release(String),
@@ -249,6 +261,8 @@ pub struct ManagedCore {
     mountinfo: PathBuf,
     /// Where the systemd user manager keeps the units of the user.
     unit_dir: Option<PathBuf>,
+    /// The desktop whose system proxy tabby can set, if it is one.
+    desktop: Option<sysproxy::Desktop>,
 }
 
 impl ManagedCore {
@@ -303,6 +317,9 @@ impl ManagedCore {
             delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
             tun_dropped: AtomicBool::new(false),
             mountinfo: PathBuf::from("/proc/self/mountinfo"),
+            desktop: std::env::var("XDG_CURRENT_DESKTOP")
+                .ok()
+                .and_then(|current| sysproxy::Desktop::detect(&current)),
             unit_dir: directories::BaseDirs::new()
                 .map(|dirs| dirs.config_dir().join("systemd").join("user")),
             timing: Timing {

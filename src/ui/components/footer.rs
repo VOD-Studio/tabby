@@ -224,7 +224,11 @@ fn settings_hints(app: &App) -> Vec<Hint> {
         Setting::Mode => "切换模式",
         Setting::LogLevel => "切换级别",
         Setting::Port(_) => "修改端口",
-        Setting::AllowLan | Setting::Ipv6 | Setting::Tun | Setting::LoginStart => "切换",
+        Setting::AllowLan
+        | Setting::Ipv6
+        | Setting::Tun
+        | Setting::LoginStart
+        | Setting::SystemProxy => "切换",
         Setting::Reload
         | Setting::FlushFakeIp
         | Setting::UpdateGeo
