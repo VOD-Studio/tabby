@@ -12,7 +12,7 @@ use tui_input::Input;
 use super::{App, Confirm, CorePhase, Msg, Overlay, ToastKind, managed::failure};
 use crate::{
     api::error::ApiError,
-    core::{CoreError, Kind, ManagedCore, Outcome, Store, Subscription},
+    core::{CoreError, Fault, Kind, ManagedCore, Outcome, Store, Subscription},
     ui::{scroll::Scroll, text::reason},
 };
 
@@ -25,7 +25,8 @@ const AUTO_RETRY: Duration = Duration::from_mins(30);
 /// What is being done to subscriptions, for the answer to say what it was.
 #[derive(Debug)]
 pub enum Work {
-    Import,
+    /// Importing what was typed: `source`, an address or a path.
+    Import(String),
     /// Reading subscription `id` again.
     Update(String),
     /// Making subscription `id` the one in use.
@@ -65,6 +66,9 @@ pub struct SubscriptionsView {
     /// The address or path being typed to import a subscription, while one
     /// is; it has the keyboard.
     pub adding: Option<Input>,
+    /// The address or path of an encrypted subscription, while the box asks
+    /// for the age key to open it with.
+    pub key_for: Option<String>,
     /// Subscriptions being updated or switched to.
     pub busy: HashSet<String>,
     /// An import is under way.
@@ -158,6 +162,11 @@ impl App {
         self.page == super::Page::Subscriptions && self.subscriptions_view.adding.is_some()
     }
 
+    /// Whether the box at the foot of the screen takes an age key.
+    pub fn asking_age_key(&self) -> bool {
+        self.adding_subscription() && self.subscriptions_view.key_for.is_some()
+    }
+
     /// The managed core, while the pages are talking to it.
     fn subscriptions_core(&self) -> Option<std::sync::Arc<ManagedCore>> {
         match self.core_phase {
@@ -205,6 +214,7 @@ impl App {
         };
         self.dirty = true;
         let text = input.value().trim().to_owned();
+        let key_for = self.subscriptions_view.key_for.take();
         if text.is_empty() {
             return;
         }
@@ -213,18 +223,41 @@ impl App {
             return;
         }
         self.subscriptions_view.importing = true;
-        let is_url = text.starts_with("http://") || text.starts_with("https://");
+        // What was typed is the key when the box was asking for one.
+        let (source, key) = match key_for {
+            Some(source) => (source, Some(text)),
+            None => (text, None),
+        };
+        let is_url = source.starts_with("http://") || source.starts_with("https://");
         self.spawn_subscription(move |core| async move {
             let result = if is_url {
-                core.import_url(&text).await
+                core.import_url(&source, key.as_deref()).await
             } else {
-                core.import_file(&path_of(&text)).await
+                core.import_file(&path_of(&source), key.as_deref()).await
             };
             SubEvent::Done {
-                work: Work::Import,
+                work: Work::Import(source),
                 result,
             }
         });
+    }
+
+    /// The import of `source` failed for want of a key that opens it: the
+    /// box asks for one, and the import goes on with it. `true` when it
+    /// does.
+    fn ask_age_key(&mut self, source: &str, err: &CoreError) -> bool {
+        match err {
+            CoreError::AgeKeyNeeded => {}
+            CoreError::Age(Fault::NotAKey | Fault::WrongKey) => {
+                self.toast(ToastKind::Error, failure("导入失败", err));
+            }
+            _ => return false,
+        }
+        let view = &mut self.subscriptions_view;
+        view.key_for = Some(source.to_owned());
+        view.adding = Some(Input::default());
+        view.typing = false;
+        true
     }
 
     /// `Enter`: makes the subscription under the cursor the one in use.
@@ -414,7 +447,7 @@ impl App {
     fn finish_subscription(&mut self, work: &Work, result: Result<Outcome, CoreError>) {
         let view = &mut self.subscriptions_view;
         match work {
-            Work::Import => view.importing = false,
+            Work::Import(_) => view.importing = false,
             Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) => {
                 view.busy.remove(id);
             }
@@ -423,8 +456,13 @@ impl App {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(err) => {
+                if let Work::Import(source) = work
+                    && self.ask_age_key(source, &err)
+                {
+                    return;
+                }
                 let what = match work {
-                    Work::Import => "导入失败".to_owned(),
+                    Work::Import(_) => "导入失败".to_owned(),
                     Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) => {
                         let name = self
                             .subscriptions_view
@@ -448,7 +486,7 @@ impl App {
         let name = outcome.name;
         self.subscriptions_view.replace(outcome.store);
         let text = match work {
-            Work::Import => {
+            Work::Import(_) => {
                 // The new subscription is the last of the list.
                 let last = self.subscriptions_view.visible().len().saturating_sub(1);
                 self.subscriptions_view.cursor = last;

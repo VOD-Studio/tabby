@@ -393,5 +393,12 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 9. `feat(subscriptions): decrypt age-encrypted subscriptions`
    - 范围：§7.1 第 1 步；订阅页导入时输入密钥，密钥存进 `subscriptions.toml`（0600）。
    - 验收：用 `age-keygen` 生成的密钥加密的测试订阅可以导入和更新；密钥错误时报错且不留下半成品文件。
+   - 实现记录（2026-11-06）：
+     - `src/core/encrypted.rs`：`is_encrypted`（二进制以 `age-encryption.org/v1` 开头，ASCII 封装以 `-----BEGIN AGE ENCRYPTED FILE-----` 开头，前面的空白不算；方案只写了前者，`age -a` 的输出很常见，`age` 的 `armor` 特性几乎免费，所以两种都收）、`key_line`（取密钥那一行：整份 `age-keygen` 输出连同 `# created`/`# public key` 注释粘进来也行；公钥 `age1…` 不是私钥）、`decrypt`（`age::decrypt`，错误分成 `Fault::{NotAKey, WrongKey, Damaged}`）。只支持 X25519 私钥，不支持口令（scrypt）加密和 SSH 密钥，那些不在方案里。依赖 `age 0.12.1`（特性 `armor`），没有引入 OpenSSL。
+     - 流水线（`src/core/profiles.rs`）：下载和读文件改成取字节（`response.bytes()`、`fs::read`），因为密文不是 UTF-8；`plain()` 在 `prepare`/`commit` **之前**解密，所以密钥不对时什么文件都没写（测试比较失败前后核心目录里的所有文件）。解密出来的内容照常走 `-t` 检查和分享链接包装；校验不过同样拒绝。`import_url`/`import_file` 多一个 `age_key: Option<&str>` 参数；订阅记录 `age_key`（可选，写进 `subscriptions.toml`，该文件本来就是 0600），`update` 用记下的密钥，所以自动更新不会再问。更新时内容不再加密了就把密钥清掉；服务端换了密钥则更新失败，旧内容原样保留。
+     - 订阅页：导入遇到加密订阅（`AgeKeyNeeded`）时，底栏的输入框变成密钥输入：提示 `订阅已加密：输入 age 私钥`，输入的字符显示成 `*`（不明文显示私钥），`Enter 解密导入`、`Esc` 取消（取消不留任何东西）。密钥不对（`WrongKey`/`NotAKey`）弹 `导入失败：age 密钥打不开这份订阅` 等并重新问一次，不用重新输入地址。重试会重新下载一次订阅（密钥没有和下载分开）。
+     - **已知局限**：密钥以明文存在 `subscriptions.toml`（0600），与 `[core]` 的数据目录同权限，没有加密存放；更换密钥要删除订阅重新导入（订阅页没有改密钥的入口）。
+     - 测试：两种格式、错误/不是密钥/被截断的文件各自的 `Fault`、整份密钥文件取密钥；导入时无密钥 / 别人的密钥 / 不是密钥都不留文件，用对的密钥才导入且内核拿到的是明文、`subscriptions.toml` 是 0600；更新用已存的密钥（含 ASCII 封装）、换密钥后更新失败且旧内容保留、不再加密后清掉密钥；加密文件导入；解密后不是订阅时拒绝；订阅页的提示、遮盖、错密钥重问、`Esc` 取消。
+     - 手动验证：本机没装 `age`，用 `go install filippo.io/age/cmd/...` 装了参考实现的 `age` 和 `age-keygen`，用它们生成密钥并加密 `second.yaml`（二进制和 `-a` 两种），本地 `python3 -m http.server` 提供：订阅页输入地址 → 出现密钥提示，输入显示成 `*`；先输另一把密钥 → 报错并再问，`profiles/` 里没有文件、`subscriptions.toml` 不存在；再输正确密钥 → 导入，`profiles/<id>.yaml` 是明文，`subscriptions.toml` 权限 0600 且带 `age_key`；ASCII 封装的同样能导入；`u` 更新不再问密钥，服务端收到请求，toast `已更新`。
 10. `docs: record M7 managed core decisions`
     - README 增加托管内核一节（启用方式、数据目录、TUN 授权、自启、局限）；AGENTS.md 更新项目概述、目录表和数据目录约定；本文件状态改为已完成。

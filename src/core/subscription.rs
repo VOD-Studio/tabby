@@ -57,6 +57,10 @@ pub struct Subscription {
     pub updated_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<Usage>,
+    /// The age secret key the subscription is encrypted to; kept with the
+    /// rest of the list, which only its owner can read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub age_key: Option<String>,
 }
 
 fn yes() -> bool {
@@ -388,6 +392,7 @@ mod tests {
             interval_hours: hours,
             updated_at,
             usage: None,
+            age_key: None,
         }
     }
 
@@ -447,6 +452,7 @@ mod tests {
                         total: 3,
                         expire: 4,
                     }),
+                    age_key: Some("AGE-SECRET-KEY-1QQQ".to_owned()),
                 },
                 Subscription {
                     id: "b".to_owned(),
@@ -457,6 +463,7 @@ mod tests {
                     interval_hours: DEFAULT_INTERVAL_HOURS,
                     updated_at: 0,
                     usage: None,
+                    age_key: None,
                 },
             ],
         };

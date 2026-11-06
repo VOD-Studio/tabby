@@ -365,6 +365,7 @@ mod tests {
             interval_hours: hours,
             updated_at: 0,
             usage: None,
+            age_key: None,
         };
         assert_eq!(auto_label(&sub(Kind::Url, true, 24)), "24h");
         assert_eq!(auto_label(&sub(Kind::Url, true, 0)), "1h");

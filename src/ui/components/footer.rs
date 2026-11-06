@@ -388,7 +388,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
     // The same box takes the address or path of a subscription to import.
     let adding = app.adding_subscription();
-    let (prompt, hint) = if adding {
+    let secret = app.asking_age_key();
+    let (prompt, hint) = if secret {
+        ("* ", "  Enter 解密导入   Esc 取消")
+    } else if adding {
         ("+ ", "  Enter 导入   Esc 取消")
     } else {
         ("/ ", "  Enter 确定   Esc 清除")
@@ -408,9 +411,13 @@ fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
             skipped += ch.width().unwrap_or(0);
             skip
         })
+        // A key is not shown as it is typed.
+        .map(|ch| if secret { '*' } else { ch })
         .collect();
 
-    let text = if adding && visible.is_empty() {
+    let text = if secret && visible.is_empty() {
+        Span::styled("订阅已加密：输入 age 私钥", Style::new().fg(theme.muted))
+    } else if adding && visible.is_empty() {
         Span::styled("订阅地址或文件路径", Style::new().fg(theme.muted))
     } else {
         Span::styled(visible, Style::new().fg(theme.fg))

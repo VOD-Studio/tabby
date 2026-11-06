@@ -5,6 +5,7 @@
 //! decisions made here can be tested without systemd.
 
 mod autostart;
+mod encrypted;
 mod files;
 mod install;
 mod privilege;
@@ -28,6 +29,7 @@ use color_eyre::{Result, eyre::WrapErr};
 use tokio::sync::OnceCell;
 
 use crate::api::{client::ApiClient, error::ApiError, models::CoreKind};
+pub use encrypted::Fault;
 use install::Target;
 pub use install::{Release, Upgrade};
 pub use privilege::Graphical;
@@ -189,6 +191,12 @@ pub enum CoreError {
     /// The desktop has no system proxy tabby knows how to set.
     #[error("the desktop has no system proxy tabby can set")]
     NoDesktopProxy,
+    /// The subscription is encrypted with age, and no key was given for it.
+    #[error("the subscription is encrypted and needs an age key")]
+    AgeKeyNeeded,
+    /// The age key does not open the subscription.
+    #[error("the age key cannot read the subscription: {0:?}")]
+    Age(Fault),
     /// The release list could not be read.
     #[error("cannot look up the latest kernel: {0}")]
     Release(String),

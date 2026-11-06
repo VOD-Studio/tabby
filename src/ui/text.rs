@@ -3,7 +3,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::{
     api::error::ApiError,
-    core::{Action, CoreError, Step},
+    core::{Action, CoreError, Fault, Step},
 };
 
 /// One-line, localized summary of a failed request, for toasts and error pages.
@@ -71,6 +71,10 @@ pub fn core_title(err: &CoreError) -> String {
         CoreError::SourceGone(_) => "订阅文件已不存在".to_owned(),
         CoreError::NeedsSystemd => "登录时启动需要 systemd".to_owned(),
         CoreError::NoDesktopProxy => "当前桌面不支持系统代理".to_owned(),
+        CoreError::AgeKeyNeeded => "订阅已加密，需要 age 密钥".to_owned(),
+        CoreError::Age(Fault::NotAKey) => "不是 age 私钥".to_owned(),
+        CoreError::Age(Fault::WrongKey) => "age 密钥打不开这份订阅".to_owned(),
+        CoreError::Age(Fault::Damaged) => "加密的订阅已损坏".to_owned(),
     }
 }
 
@@ -108,6 +112,12 @@ pub fn core_detail(err: &CoreError) -> Vec<String> {
         ],
         CoreError::NeedsSystemd => vec!["需要 systemd".to_owned()],
         CoreError::NoDesktopProxy => vec!["支持 GNOME、MATE、Cinnamon 和 KDE".to_owned()],
+        CoreError::AgeKeyNeeded => vec!["订阅已加密，需要 age 密钥".to_owned()],
+        CoreError::Age(Fault::NotAKey) => {
+            vec!["不是 age 私钥（以 AGE-SECRET-KEY-1 开头）".to_owned()]
+        }
+        CoreError::Age(Fault::WrongKey) => vec!["age 密钥打不开这份订阅".to_owned()],
+        CoreError::Age(Fault::Damaged) => vec!["文件被截断，或不是 age 格式".to_owned()],
     }
 }
 

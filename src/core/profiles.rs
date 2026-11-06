@@ -10,7 +10,7 @@ use jiff::Timestamp;
 use serde_json::json;
 
 use super::{
-    Action, CoreError, ManagedCore,
+    Action, CoreError, ManagedCore, encrypted,
     files::write_private,
     install,
     runner::Cmd,
@@ -38,7 +38,8 @@ pub struct Outcome {
 
 /// A subscription as its source delivered it.
 struct Fetched {
-    text: String,
+    /// What it said: text, or an age file.
+    bytes: Vec<u8>,
     /// What the server calls it.
     name: Option<String>,
     usage: Option<Usage>,
@@ -106,8 +107,8 @@ impl ManagedCore {
         };
         let name = header("content-disposition").and_then(|value| parse_filename(&value));
         let usage = header("subscription-userinfo").and_then(|value| parse_usage(&value));
-        let text = response.text().await.map_err(failed)?;
-        Ok(Fetched { text, name, usage })
+        let bytes = response.bytes().await.map_err(failed)?.to_vec();
+        Ok(Fetched { bytes, name, usage })
     }
 
     /// Runs the kernel's own check on the config in `file`: `None` when it
@@ -216,9 +217,13 @@ impl ManagedCore {
         kind: Kind,
         source: String,
         fetched: Fetched,
+        age_key: Option<&str>,
     ) -> Result<Outcome, CoreError> {
         let id = random_hex(4).map_err(|err| CoreError::io("cannot make an id", err))?;
-        let prepared = self.prepare(&id, &name, &fetched.text).await?;
+        // Before anything is written: a key that does not open it leaves
+        // nothing behind.
+        let (text, age_key) = plain(&fetched.bytes, age_key)?;
+        let prepared = self.prepare(&id, &name, &text).await?;
         self.commit(&id, &prepared)?;
         let mut store = self.subscriptions()?;
         store.subscriptions.push(Subscription {
@@ -230,6 +235,7 @@ impl ManagedCore {
             interval_hours: DEFAULT_INTERVAL_HOURS,
             updated_at: now(),
             usage: fetched.usage,
+            age_key,
         });
         let reload = store.active.is_none();
         if reload {
@@ -244,8 +250,9 @@ impl ManagedCore {
         })
     }
 
-    /// Imports the subscription at `url`.
-    pub async fn import_url(&self, url: &str) -> Result<Outcome, CoreError> {
+    /// Imports the subscription at `url`; `age_key` is what opens it when
+    /// it is encrypted with age.
+    pub async fn import_url(&self, url: &str, age_key: Option<&str>) -> Result<Outcome, CoreError> {
         let parsed = reqwest::Url::parse(url)
             .ok()
             .filter(|parsed| matches!(parsed.scheme(), "http" | "https"))
@@ -257,20 +264,26 @@ impl ManagedCore {
             .clone()
             .or_else(|| parsed.host_str().map(str::to_owned))
             .unwrap_or_else(|| "subscription".to_owned());
-        self.add(name, Kind::Url, url.to_owned(), fetched).await
+        self.add(name, Kind::Url, url.to_owned(), fetched, age_key)
+            .await
     }
 
-    /// Imports the subscription in the file at `path`.
-    pub async fn import_file(&self, path: &Path) -> Result<Outcome, CoreError> {
+    /// Imports the subscription in the file at `path`; `age_key` is what
+    /// opens it when it is encrypted with age.
+    pub async fn import_file(
+        &self,
+        path: &Path,
+        age_key: Option<&str>,
+    ) -> Result<Outcome, CoreError> {
         let _guard = self.lock.lock().await;
         let path = std::path::absolute(path).unwrap_or_else(|_| path.to_owned());
-        let text = read_source(&path)?;
+        let bytes = read_source(&path)?;
         let name = path.file_stem().map_or_else(
             || "subscription".to_owned(),
             |stem| stem.to_string_lossy().into_owned(),
         );
         let fetched = Fetched {
-            text,
+            bytes,
             name: None,
             usage: None,
         };
@@ -279,6 +292,7 @@ impl ManagedCore {
             Kind::File,
             path.to_string_lossy().into_owned(),
             fetched,
+            age_key,
         )
         .await
     }
@@ -292,15 +306,18 @@ impl ManagedCore {
         let fetched = match sub.kind {
             Kind::Url => self.fetch(&sub.source).await?,
             Kind::File => Fetched {
-                text: read_source(Path::new(&sub.source))?,
+                bytes: read_source(Path::new(&sub.source))?,
                 name: None,
                 usage: None,
             },
         };
-        let prepared = self.prepare(id, &sub.name, &fetched.text).await?;
+        let (text, age_key) = plain(&fetched.bytes, sub.age_key.as_deref())?;
+        let prepared = self.prepare(id, &sub.name, &text).await?;
         self.commit(id, &prepared)?;
         if let Some(entry) = store.get_mut(id) {
             entry.updated_at = now();
+            // No longer encrypted: the key has nothing to open.
+            entry.age_key = age_key;
             if sub.kind == Kind::Url {
                 entry.usage = fetched.usage;
             }
@@ -387,10 +404,21 @@ impl ManagedCore {
     }
 }
 
-/// The text of the file a subscription is read from; a file that is gone
+/// The text `bytes` hold, and the key that opened it: an age file is read
+/// with `key` (as the user typed it), anything else is text as it is.
+fn plain(bytes: &[u8], key: Option<&str>) -> Result<(String, Option<String>), CoreError> {
+    if !encrypted::is_encrypted(bytes) {
+        return Ok((String::from_utf8_lossy(bytes).into_owned(), None));
+    }
+    let key = encrypted::key_line(key.ok_or(CoreError::AgeKeyNeeded)?).map_err(CoreError::Age)?;
+    let opened = encrypted::decrypt(bytes, &key).map_err(CoreError::Age)?;
+    Ok((String::from_utf8_lossy(&opened).into_owned(), Some(key)))
+}
+
+/// What the file a subscription is read from holds; a file that is gone
 /// is not an error of the subscription, which keeps its last copy.
-fn read_source(path: &Path) -> Result<String, CoreError> {
-    fs::read_to_string(path).map_err(|err| {
+fn read_source(path: &Path) -> Result<Vec<u8>, CoreError> {
+    fs::read(path).map_err(|err| {
         if err.kind() == io::ErrorKind::NotFound {
             CoreError::SourceGone(path.to_owned())
         } else {
@@ -516,7 +544,7 @@ mod tests {
         )
         .await;
 
-        let outcome = core.import_url(&url(&server)).await.unwrap();
+        let outcome = core.import_url(&url(&server), None).await.unwrap();
 
         assert!(outcome.reload && outcome.name == "机场");
         let sub = &outcome.store.subscriptions[0];
@@ -578,11 +606,11 @@ mod tests {
     async fn a_second_import_does_not_take_the_place_of_the_one_running() {
         let (core, _, dir) = core("sub-second");
         let server = serve(SUB, &[]).await;
-        let first = core.import_url(&url(&server)).await.unwrap();
+        let first = core.import_url(&url(&server), None).await.unwrap();
         // No name from the server: the host's.
         assert_eq!(first.name, "127.0.0.1");
 
-        let second = core.import_url(&url(&server)).await.unwrap();
+        let second = core.import_url(&url(&server), None).await.unwrap();
 
         assert!(!second.reload);
         assert_eq!(second.store.subscriptions.len(), 2);
@@ -604,7 +632,7 @@ mod tests {
         )
         .await;
 
-        let outcome = core.import_url(&url(&server)).await.unwrap();
+        let outcome = core.import_url(&url(&server), None).await.unwrap();
 
         let id = &outcome.store.subscriptions[0].id;
         // The links as they came, where the kernel may read them.
@@ -635,7 +663,7 @@ mod tests {
         // would pass its check: tabby has to look itself.
         for body in ["<html>login page</html>", "aGVsbG8gd29ybGQ=", ""] {
             let server = serve(body, &[]).await;
-            let err = core.import_url(&url(&server)).await.unwrap_err();
+            let err = core.import_url(&url(&server), None).await.unwrap_err();
             assert!(
                 matches!(&err, CoreError::Invalid(said) if said == "yaml: unmarshal errors: not a config"),
                 "{body:?}: {err:?}"
@@ -654,7 +682,7 @@ mod tests {
         // The kernel reads it; tabby cannot take the keys it sets out of it.
         let server = serve("{proxies: [], rules: [\"MATCH,DIRECT\"]}", &[]).await;
 
-        let err = core.import_url(&url(&server)).await.unwrap_err();
+        let err = core.import_url(&url(&server), None).await.unwrap_err();
 
         assert!(matches!(err, CoreError::UnsupportedProfile), "{err:?}");
         assert_eq!(core.subscriptions().unwrap(), Store::default());
@@ -666,7 +694,7 @@ mod tests {
     async fn a_download_that_fails_says_why_without_the_address_that_has_a_token_in_it() {
         let (core, _, dir) = core("sub-down");
         let refused = format!("http://127.0.0.1:{}/sub?token=SECRET", free_port());
-        let err = core.import_url(&refused).await.unwrap_err();
+        let err = core.import_url(&refused, None).await.unwrap_err();
         assert!(
             matches!(&err, CoreError::Fetch(message) if !message.contains("SECRET")),
             "{err:?}"
@@ -677,13 +705,16 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let err = core.import_url(&url(&server)).await.unwrap_err();
+        let err = core.import_url(&url(&server), None).await.unwrap_err();
         assert!(
             matches!(&err, CoreError::Fetch(message) if message.contains("503")),
             "{err:?}"
         );
 
-        let err = core.import_url("ftp://example.test/sub").await.unwrap_err();
+        let err = core
+            .import_url("ftp://example.test/sub", None)
+            .await
+            .unwrap_err();
         assert!(matches!(err, CoreError::Fetch(_)), "{err:?}");
         assert_eq!(core.subscriptions().unwrap(), Store::default());
         fs::remove_dir_all(dir).unwrap();
@@ -693,14 +724,14 @@ mod tests {
     async fn an_update_replaces_the_content_and_reloads_only_what_runs() {
         let (core, _, dir) = core("sub-update");
         let server = serve(SUB, &[("subscription-userinfo", "download=5")]).await;
-        let first = core.import_url(&url(&server)).await.unwrap();
+        let first = core.import_url(&url(&server), None).await.unwrap();
         let running = first.store.subscriptions[0].id.clone();
-        let spare = core.import_file(&dir.join("mihomo")).await;
+        let spare = core.import_file(&dir.join("mihomo"), None).await;
         // (The test kernel script is not a config.)
         assert!(matches!(spare, Err(CoreError::Invalid(_))));
         let other = dir.join("other.yaml");
         fs::write(&other, OTHER).unwrap();
-        let spare = core.import_file(&other).await.unwrap();
+        let spare = core.import_file(&other, None).await.unwrap();
         let spare_id = spare.store.subscriptions[1].id.clone();
 
         server.reset().await;
@@ -742,7 +773,7 @@ mod tests {
     async fn a_failed_update_keeps_what_was_there() {
         let (core, _, dir) = core("sub-update-fail");
         let server = serve(SUB, &[]).await;
-        let imported = core.import_url(&url(&server)).await.unwrap();
+        let imported = core.import_url(&url(&server), None).await.unwrap();
         let id = imported.store.subscriptions[0].id.clone();
         let before = (config_of(&dir), core.subscriptions().unwrap());
 
@@ -772,7 +803,7 @@ mod tests {
         let (core, _, dir) = core("sub-file");
         let file = dir.join("mine.txt");
         fs::write(&file, SUB).unwrap();
-        let imported = core.import_file(&file).await.unwrap();
+        let imported = core.import_file(&file, None).await.unwrap();
         let id = imported.store.subscriptions[0].id.clone();
         assert_eq!(imported.name, "mine");
         assert_eq!(imported.store.subscriptions[0].kind, Kind::File);
@@ -806,8 +837,8 @@ mod tests {
         let (a, b) = (dir.join("a.yaml"), dir.join("b.yaml"));
         fs::write(&a, SUB).unwrap();
         fs::write(&b, OTHER).unwrap();
-        let first = core.import_file(&a).await.unwrap();
-        let second = core.import_file(&b).await.unwrap();
+        let first = core.import_file(&a, None).await.unwrap();
+        let second = core.import_file(&b, None).await.unwrap();
         let (id_a, id_b) = (
             second.store.subscriptions[0].id.clone(),
             second.store.subscriptions[1].id.clone(),
@@ -851,10 +882,183 @@ mod tests {
         let file = dir.join("a.yaml");
         fs::write(&file, SUB).unwrap();
 
-        let err = core.import_file(&file).await.unwrap_err();
+        let err = core.import_file(&file, None).await.unwrap_err();
 
         assert!(matches!(err, CoreError::NoBinary { path: None }), "{err:?}");
         assert_eq!(core.subscriptions().unwrap(), Store::default());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A key pair as `age-keygen` writes it: the secret line, the recipient.
+    fn age_pair() -> (String, age::x25519::Identity) {
+        use age::secrecy::ExposeSecret;
+        let identity = age::x25519::Identity::generate();
+        (identity.to_string().expose_secret().to_owned(), identity)
+    }
+
+    async fn serve_bytes(body: Vec<u8>) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sub"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(body))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// Every file the core keeps, as a list of paths, to say that a failed
+    /// import left none of it behind.
+    fn everything_in(dir: &Path) -> Vec<String> {
+        let mut found = vec![];
+        let mut pending = vec![dir.to_owned()];
+        while let Some(next) = pending.pop() {
+            for entry in fs::read_dir(&next).into_iter().flatten().flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else {
+                    found.push(path.strip_prefix(dir).unwrap().display().to_string());
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_subscription_needs_its_key_and_is_read_with_it_once_given() {
+        let (core, _, dir) = core("sub-age");
+        let (key, identity) = age_pair();
+        let server =
+            serve_bytes(age::encrypt(&identity.to_public(), SUB.as_bytes()).unwrap()).await;
+        let before = everything_in(&dir);
+
+        // No key, then somebody else's, then something that is no key at all.
+        let err = core.import_url(&url(&server), None).await.unwrap_err();
+        assert!(matches!(err, CoreError::AgeKeyNeeded), "{err:?}");
+        let (other, _) = age_pair();
+        let err = core
+            .import_url(&url(&server), Some(&other))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::Age(crate::core::Fault::WrongKey)),
+            "{err:?}"
+        );
+        let err = core
+            .import_url(&url(&server), Some("hunter2"))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, CoreError::Age(crate::core::Fault::NotAKey)),
+            "{err:?}"
+        );
+        // None of those left a file, or an entry, or a config to run.
+        assert_eq!(everything_in(&dir), before);
+
+        let imported = core
+            .import_url(&url(&server), Some(&format!("{key}\n")))
+            .await
+            .unwrap();
+
+        let sub = &imported.store.subscriptions[0];
+        assert_eq!(sub.age_key.as_deref(), Some(key.as_str()));
+        // The kernel is given what was inside, not the ciphertext.
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("core/profiles/{}.yaml", sub.id))).unwrap(),
+            SUB
+        );
+        assert!(config_of(&dir).contains("1.2.3.4"));
+        let stored = dir.join("core/subscriptions.toml");
+        assert!(fs::read_to_string(&stored).unwrap().contains(&key));
+        assert_eq!(
+            fs::metadata(&stored).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_update_of_an_encrypted_subscription_uses_the_key_kept_with_it() {
+        let (core, _, dir) = core("sub-age-update");
+        let (key, identity) = age_pair();
+        let server =
+            serve_bytes(age::encrypt(&identity.to_public(), SUB.as_bytes()).unwrap()).await;
+        let imported = core.import_url(&url(&server), Some(&key)).await.unwrap();
+        let id = imported.store.subscriptions[0].id.clone();
+
+        // The next one is armored, as `age -a` writes it.
+        server.reset().await;
+        let armored = age::encrypt_and_armor(&identity.to_public(), OTHER.as_bytes()).unwrap();
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(armored))
+            .mount(&server)
+            .await;
+        core.update(&id).await.unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("core/profiles/{id}.yaml"))).unwrap(),
+            OTHER
+        );
+
+        // Then the key is changed on the server's side: nothing is lost.
+        let (_, newer) = age_pair();
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(age::encrypt(&newer.to_public(), SUB.as_bytes()).unwrap()),
+            )
+            .mount(&server)
+            .await;
+        let err = core.update(&id).await.unwrap_err();
+        assert!(
+            matches!(err, CoreError::Age(crate::core::Fault::WrongKey)),
+            "{err:?}"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("core/profiles/{id}.yaml"))).unwrap(),
+            OTHER
+        );
+
+        // And when it stops being encrypted, the key is not kept for nothing.
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SUB))
+            .mount(&server)
+            .await;
+        let updated = core.update(&id).await.unwrap();
+        assert_eq!(updated.store.subscriptions[0].age_key, None);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_file_is_imported_and_what_is_inside_must_still_be_a_subscription() {
+        let (core, _, dir) = core("sub-age-file");
+        let (key, identity) = age_pair();
+        let good = dir.join("good.yaml.age");
+        fs::write(
+            &good,
+            age::encrypt(&identity.to_public(), SUB.as_bytes()).unwrap(),
+        )
+        .unwrap();
+        let junk = dir.join("junk.age");
+        fs::write(
+            &junk,
+            age::encrypt(&identity.to_public(), b"<html>hi</html>").unwrap(),
+        )
+        .unwrap();
+        let before = everything_in(&dir);
+
+        let err = core.import_file(&junk, Some(&key)).await.unwrap_err();
+        assert!(matches!(err, CoreError::Invalid(_)), "{err:?}");
+        assert_eq!(everything_in(&dir), before);
+
+        let imported = core.import_file(&good, Some(&key)).await.unwrap();
+        assert_eq!(
+            imported.store.subscriptions[0].age_key.as_deref(),
+            Some(key.as_str())
+        );
+        assert!(config_of(&dir).contains("1.2.3.4"));
         fs::remove_dir_all(dir).unwrap();
     }
 }

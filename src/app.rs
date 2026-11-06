@@ -3213,6 +3213,7 @@ impl App {
             Page::Settings => self.settings_view.editing = None,
             Page::Subscriptions => {
                 self.subscriptions_view.adding = None;
+                self.subscriptions_view.key_for = None;
                 self.set_typing(false);
             }
             _ => self.set_typing(false),
@@ -3317,6 +3318,7 @@ impl App {
             Page::Settings => self.settings_view.editing = None,
             Page::Subscriptions => {
                 // The box of an import first, then the filter.
+                self.subscriptions_view.key_for = None;
                 if self.subscriptions_view.adding.take().is_none() {
                     self.subscriptions_view.clear_filter();
                 }
@@ -9606,12 +9608,12 @@ secret = "b-secret"
         let port = testing::free_port();
         let recorder = updating_systemd(port, true, "");
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
-        core.import_url(&format!("{}/sub?token=SECRET", server.uri()))
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None)
             .await
             .unwrap();
         let file = dir.join("local.yaml");
         std::fs::write(&file, SUB_YAML).unwrap();
-        core.import_file(&file).await.unwrap();
+        core.import_file(&file, None).await.unwrap();
         let (mut app, mut rx) = managed_app(core);
         app.start();
         pump_until(&mut app, &mut rx, core_up).await;
@@ -9970,7 +9972,7 @@ secret = "b-secret"
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
         let file = dir.join("a.yaml");
         std::fs::write(&file, SUB_YAML).unwrap();
-        core.import_file(&file).await.unwrap();
+        core.import_file(&file, None).await.unwrap();
         let (mut app, mut rx) = managed_settings_on(Arc::clone(&core), Setting::Reload).await;
         let config = dir.join("core/home/config.yaml");
         std::fs::write(&config, "stale").unwrap();
@@ -10324,12 +10326,12 @@ secret = "b-secret"
         let port = testing::free_port();
         let recorder = updating_systemd(port, true, "");
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
-        core.import_url(&format!("{}/sub?token=SECRET", server.uri()))
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None)
             .await
             .unwrap();
         let file = dir.join("local.yaml");
         std::fs::write(&file, SUB_YAML).unwrap();
-        core.import_file(&file).await.unwrap();
+        core.import_file(&file, None).await.unwrap();
         age_subscriptions(&dir, 25);
         let imported = requests_for(&server).await;
         let (mut app, mut rx) = managed_app(core);
@@ -10382,7 +10384,7 @@ secret = "b-secret"
         let port = testing::free_port();
         let recorder = updating_systemd(port, true, "");
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
-        core.import_url(&format!("{}/sub?token=SECRET", server.uri()))
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None)
             .await
             .unwrap();
         age_subscriptions(&dir, 25);
@@ -10694,6 +10696,76 @@ secret = "b-secret"
         pump_until(&mut app, &mut rx, |app| toasted(app, "系统代理没有恢复")).await;
 
         assert!(toasted(&app, "127.0.0.1:17890"), "{:?}", app.toasts);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_subscription_asks_for_its_key_hidden_and_goes_on_with_it() {
+        use age::secrecy::ExposeSecret;
+        use wiremock::{
+            Mock, ResponseTemplate,
+            matchers::{method, path},
+        };
+        let plain = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, _) = subscriptions_app("subs-age", &plain).await;
+        let identity = age::x25519::Identity::generate();
+        let key = identity.to_string().expose_secret().to_owned();
+        let encrypted = wiremock::MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/sub"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_bytes(
+                    age::encrypt(&identity.to_public(), SUB_YAML.as_bytes()).unwrap(),
+                ),
+            )
+            .mount(&encrypted)
+            .await;
+
+        key_press(&mut app, KeyCode::Char('a'));
+        type_text(&mut app, &format!("{}/sub", encrypted.uri()));
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, App::asking_age_key).await;
+        assert!(!app.subscriptions_view.importing);
+        assert!(draw(&app).contains("订阅已加密：输入 age 私钥"));
+
+        // A key that opens nothing says so and asks again; it is never shown.
+        let wrong = age::x25519::Identity::generate();
+        type_text(&mut app, wrong.to_string().expose_secret());
+        let screen = draw(&app);
+        assert!(!screen.contains("AGE-SECRET-KEY"), "{screen}");
+        assert!(screen.contains("*****"), "{screen}");
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, App::asking_age_key).await;
+        assert!(
+            toasted(&app, "导入失败：age 密钥打不开这份订阅"),
+            "{:?}",
+            app.toasts
+        );
+        assert_eq!(app.subscriptions_view.visible().len(), 2);
+
+        type_text(&mut app, &key);
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| !app.subscriptions_view.importing).await;
+
+        assert!(!app.asking_age_key());
+        assert_eq!(app.subscriptions_view.visible().len(), 3);
+        assert_eq!(
+            app.subscriptions_view
+                .selected()
+                .unwrap()
+                .age_key
+                .as_deref(),
+            Some(key.as_str())
+        );
+
+        // Esc at the question drops the import.
+        key_press(&mut app, KeyCode::Char('a'));
+        type_text(&mut app, &format!("{}/sub", encrypted.uri()));
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, App::asking_age_key).await;
+        key_press(&mut app, KeyCode::Esc);
+        assert!(!app.asking_age_key() && !app.typing());
+        assert_eq!(app.subscriptions_view.visible().len(), 3);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
