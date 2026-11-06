@@ -206,6 +206,9 @@ fn draw_lines(frame: &mut Frame, inner: Rect, app: &App, rows: &[ProviderRow<'_>
             ..inner
         };
         frame.render_widget(line, rect);
+        if let Item::Row(index) = *item {
+            app.hits.add(rect, Target::Provider(rows[index].target()));
+        }
         if *item == Item::Row(cursor) {
             theme.paint_cursor(frame.buffer_mut(), rect);
         }

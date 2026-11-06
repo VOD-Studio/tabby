@@ -206,6 +206,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let columns = columns(inner, shown(app.size));
     let cursor = view.cursor.min(visible.len() - 1);
     let window = view.scroll.window(cursor, visible.len(), capacity(area));
+    // The header is the table's first row.
+    for (offset, index) in window.clone().enumerate() {
+        let y = inner.y + 1 + u16::try_from(offset).unwrap_or(0);
+        app.hits.add(
+            Rect::new(inner.x, y, inner.width, 1),
+            Target::Connection(visible[index].connection.id.clone()),
+        );
+    }
 
     let header = Row::new(
         columns

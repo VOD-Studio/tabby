@@ -131,6 +131,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
             }
         };
         frame.render_widget(line, rect);
+        if let Item::Row(row) = items[index] {
+            app.hits.add(rect, Target::Setting(Setting::ALL[row]));
+        }
         if items[index] == Item::Row(cursor) {
             theme.paint_cursor(frame.buffer_mut(), rect);
         }

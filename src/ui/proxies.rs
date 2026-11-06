@@ -181,6 +181,7 @@ fn render_picker_row(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies
         width,
         Style::new().fg(name).add_modifier(Modifier::BOLD),
     ));
+    app.hits.add(area, Target::GroupPicker);
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
     if focused {
         theme.paint_cursor(frame.buffer_mut(), area);
@@ -232,6 +233,8 @@ pub fn render_picker(frame: &mut Frame, body: Rect, app: &App) {
                 Modifier::empty()
             });
         spans.extend(summary(app, proxies, groups[index], width, name));
+        app.hits
+            .add(area, Target::PickerItem(groups[index].name.clone()));
         frame.render_widget(Paragraph::new(Line::from(spans)), area);
         if index == cursor {
             theme.paint_cursor(frame.buffer_mut(), area);
@@ -344,6 +347,8 @@ fn render_groups(
             height: GROUP_ROWS,
             ..inner
         };
+        app.hits
+            .add(rect, Target::Group(groups[index].name.clone()));
         let is_selected = index == selected;
         let lines = group_item(
             app,
@@ -512,6 +517,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
                 current: group.now.as_deref() == Some(name),
                 cursor: focused && index == cursor,
             };
+            app.hits.add(rect, Target::Node(name.to_owned()));
             render_card(frame, rect, app, &card);
         }
     }

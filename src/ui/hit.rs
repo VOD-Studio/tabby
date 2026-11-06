@@ -2,7 +2,7 @@ use std::cell::RefCell;
 
 use ratatui::layout::{Position, Rect};
 
-use crate::app::{Page, Pane};
+use crate::app::{Page, Pane, ProviderRef, Setting};
 
 /// What a place on the screen stands for when the mouse acts on it.
 ///
@@ -21,12 +21,47 @@ pub enum Target {
     Backdrop,
     /// A popup's own face: a click there goes nowhere.
     Popup,
+    /// The group a row of the proxies page's group list is for.
+    Group(String),
+    /// The narrow proxies page's group picker row.
+    GroupPicker,
+    /// A row of the picker's drop-down, by group.
+    PickerItem(String),
+    /// A node card.
+    Node(String),
+    /// A row of the connections table, by connection id.
+    Connection(String),
+    /// A row of the rules table, by its number.
+    Rule(usize),
+    Provider(ProviderRef),
+    Setting(Setting),
+    /// A row of the profile popup, by index.
+    Profile(usize),
+    /// A row of the theme picker, by index.
+    Theme(usize),
 }
 
 impl Target {
     /// Whether the wheel scrolls it.
     fn scrolls(&self) -> bool {
         matches!(self, Self::Pane(_) | Self::List)
+    }
+
+    /// Whether a second press in quick succession acts on it, as `Enter`
+    /// does, instead of only picking it.
+    pub fn activatable(&self) -> bool {
+        matches!(
+            self,
+            Self::Group(_)
+                | Self::PickerItem(_)
+                | Self::Node(_)
+                | Self::Connection(_)
+                | Self::Rule(_)
+                | Self::Provider(_)
+                | Self::Setting(_)
+                | Self::Profile(_)
+                | Self::Theme(_)
+        )
     }
 }
 

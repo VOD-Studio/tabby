@@ -11,7 +11,7 @@ use crate::{
     app::App,
     config::{Choice, Origin},
     format::truncate,
-    ui::{components::popup, text::wrap},
+    ui::{components::popup, hit::Target, text::wrap},
 };
 
 /// Widest the popup gets, borders included.
@@ -66,6 +66,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             height: 1,
             ..inner
         };
+        app.hits.add(rect, Target::Profile(index));
         frame.render_widget(Line::from(spans), rect);
         if index == app.profile_cursor {
             theme.paint_cursor(frame.buffer_mut(), rect);

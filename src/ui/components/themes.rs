@@ -10,7 +10,7 @@ use crate::{
     app::App,
     format::truncate,
     themes::{Entry, Source},
-    ui::components::popup,
+    ui::{components::popup, hit::Target},
 };
 
 /// Widest the popup gets, borders included.
@@ -60,6 +60,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             height: 1,
             ..inner
         };
+        app.hits.add(rect, Target::Theme(index));
         frame.render_widget(Line::from(spans), rect);
         if index == picker.cursor {
             theme.paint_cursor(frame.buffer_mut(), rect);

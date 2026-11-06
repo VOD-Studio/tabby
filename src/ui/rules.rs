@@ -269,6 +269,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
     let widths = columns(inner, narrow, rows.len());
     let cursor = view.cursor.min(visible.len() - 1);
     let window = view.scroll.window(cursor, visible.len(), capacity(area));
+    // The header is the table's first row.
+    for (offset, index) in window.clone().enumerate() {
+        let y = inner.y + 1 + u16::try_from(offset).unwrap_or(0);
+        app.hits.add(
+            Rect::new(inner.x, y, inner.width, 1),
+            Target::Rule(visible[index].number),
+        );
+    }
 
     let heading = Style::new().fg(theme.muted).add_modifier(Modifier::BOLD);
     let labels = [number_label(narrow), "类型", "匹配内容", "目标"];

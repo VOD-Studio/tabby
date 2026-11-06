@@ -1296,6 +1296,9 @@ pub enum Action {
     Dismiss,
     /// A left click on something the last frame drew.
     Pick(Target),
+    /// Two quick left clicks on the same row: picks it, then does what
+    /// `Enter` does there.
+    Activate(Target),
     /// A turn of the wheel over something that scrolls: one step of
     /// `Up` or `Down`.
     Wheel(Target, Move),
@@ -1515,6 +1518,9 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
         _ => None,
     }
 }
+
+/// Two presses on the same row within this long are a double click.
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// How long a toast stays on screen.
 const TOAST_TTL: Duration = Duration::from_secs(3);
@@ -2108,6 +2114,8 @@ pub struct App {
     pub size: Size,
     /// What the last frame drew that the mouse can act on.
     pub hits: Hits,
+    /// The last left press that landed on something, and when.
+    last_click: Option<(Target, Instant)>,
     dirty: bool,
 }
 
@@ -2192,6 +2200,7 @@ impl App {
             should_quit: false,
             size,
             hits: Hits::default(),
+            last_click: None,
             dirty: false,
         }
     }
@@ -2313,6 +2322,15 @@ impl App {
             Action::Pick(Target::Backdrop) if self.overlay.is_some() => {
                 self.update(Action::Dismiss);
             }
+            Action::Pick(target) => {
+                self.pick(&target);
+            }
+            // Two quick clicks are a click and `Enter`.
+            Action::Activate(target) => {
+                if self.pick(&target) {
+                    self.update(Action::Confirm);
+                }
+            }
             _ if self.overlay == Some(Overlay::Confirm) => self.answer(&action),
             _ if self.overlay == Some(Overlay::Profiles) => self.pick_profile(&action),
             _ if self.overlay == Some(Overlay::Themes) => self.pick_theme(&action),
@@ -2342,7 +2360,6 @@ impl App {
             }
             // Overlays are modal: everything else waits until they close.
             _ if self.overlay.is_some() => {}
-            Action::Pick(target) => self.pick(&target),
             Action::Wheel(target, movement) => self.wheel(&target, movement),
             Action::Profiles => {
                 self.profile_cursor = self.profiles.current;
@@ -2723,12 +2740,10 @@ impl App {
     ///
     /// The wheel moves what a popup lists wherever the pointer is, as the
     /// keys do; without a popup, it moves the list under the pointer.
-    pub fn mouse_action(&self, event: MouseEvent) -> Option<Action> {
+    pub fn mouse_action(&mut self, event: MouseEvent, now: Instant) -> Option<Action> {
         let position = Position::new(event.column, event.row);
         let movement = match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => {
-                return self.hits.at(position).map(Action::Pick);
-            }
+            MouseEventKind::Down(MouseButton::Left) => return self.click(position, now),
             MouseEventKind::ScrollUp => Move::Up,
             MouseEventKind::ScrollDown => Move::Down,
             _ => return None,
@@ -2740,16 +2755,139 @@ impl App {
         Some(Action::Wheel(target, movement))
     }
 
-    /// A click on `target`. An input box that has the keyboard lets go of it
-    /// first, as `Enter` (a filter) or `Esc` (a port, whose value is not
-    /// sent) would make it.
-    fn pick(&mut self, target: &Target) {
+    /// A left press at `position`: a pick, or an activation when it is the
+    /// second one on the same row within [`DOUBLE_CLICK`] of the first.
+    fn click(&mut self, position: Position, now: Instant) -> Option<Action> {
+        let target = self.hits.at(position)?;
+        let again = matches!(
+            &self.last_click,
+            Some((last, at)) if *last == target && now.saturating_duration_since(*at) <= DOUBLE_CLICK
+        );
+        if again && target.activatable() {
+            // A third press starts over.
+            self.last_click = None;
+            return Some(Action::Activate(target));
+        }
+        self.last_click = Some((target.clone(), now));
+        Some(Action::Pick(target))
+    }
+
+    /// A click on `target`: puts the cursor on it, or opens what it opens.
+    /// An input box that has the keyboard lets go of it first, as `Enter`
+    /// (a filter) or `Esc` (a port, whose value is not sent) would make it.
+    ///
+    /// Returns whether it took: what was drawn can be a tick old, and
+    /// something that is no longer there is ignored, not replaced by what
+    /// the cursor was on.
+    fn pick(&mut self, target: &Target) -> bool {
+        self.dirty = true;
+        if self.overlay.is_some() {
+            return self.pick_in_popup(target);
+        }
         self.release_input();
         match target {
-            Target::Tab(page) => self.set_page(*page),
-            Target::Pane(_) | Target::List | Target::Backdrop | Target::Popup => {}
+            Target::Tab(page) => {
+                self.set_page(*page);
+                true
+            }
+            Target::Group(name) => {
+                let Some(index) = self.visible_groups().position(|group| group.name == *name)
+                else {
+                    return false;
+                };
+                let view = &mut self.proxies_view;
+                view.focus = Pane::Groups;
+                if view.group != index {
+                    view.group = index;
+                    view.node = None;
+                }
+                true
+            }
+            Target::GroupPicker => {
+                self.proxies_view.focus = Pane::Groups;
+                self.confirm();
+                true
+            }
+            Target::Node(name) => {
+                let Some(index) = self.visible_nodes().iter().position(|node| node == name) else {
+                    return false;
+                };
+                self.proxies_view.focus = Pane::Nodes;
+                self.proxies_view.node = Some(index);
+                true
+            }
+            Target::Connection(id) => {
+                let view = &mut self.connections_view;
+                let Some(index) = view
+                    .visible()
+                    .iter()
+                    .position(|row| row.connection.id == *id)
+                else {
+                    return false;
+                };
+                view.cursor = index;
+                true
+            }
+            Target::Rule(number) => {
+                let view = &mut self.rules_view;
+                let Some(index) = view.visible().iter().position(|row| row.number == *number)
+                else {
+                    return false;
+                };
+                view.cursor = index;
+                true
+            }
+            Target::Provider(provider) => {
+                let view = &mut self.providers_view;
+                let Some(index) = view.rows().iter().position(|row| row.target() == *provider)
+                else {
+                    return false;
+                };
+                view.cursor = index;
+                true
+            }
+            Target::Setting(setting) => {
+                let Some(index) = Setting::ALL.iter().position(|each| each == setting) else {
+                    return false;
+                };
+                self.settings_view.cursor = index;
+                true
+            }
+            Target::Pane(_)
+            | Target::List
+            | Target::Backdrop
+            | Target::Popup
+            | Target::PickerItem(_)
+            | Target::Profile(_)
+            | Target::Theme(_) => false,
         }
-        self.dirty = true;
+    }
+
+    /// A click on a row of the popup that is open: its cursor goes there,
+    /// and the theme picker previews the theme.
+    fn pick_in_popup(&mut self, target: &Target) -> bool {
+        match (self.overlay, target) {
+            (Some(Overlay::Profiles), &Target::Profile(index))
+                if index < self.profiles.choices.len() =>
+            {
+                self.profile_cursor = index;
+                true
+            }
+            (Some(Overlay::Themes), &Target::Theme(index)) if index < self.themes.entries.len() => {
+                self.themes.cursor = index;
+                self.preview_theme();
+                true
+            }
+            (Some(Overlay::Groups), Target::PickerItem(name)) => {
+                let Some(index) = self.visible_groups().position(|group| group.name == *name)
+                else {
+                    return false;
+                };
+                self.proxies_view.picker = index;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// A wheel step over `target`: the list moves a row, and a pane of the
@@ -3183,13 +3321,7 @@ impl App {
                 let len = self.themes.entries.len();
                 let half = (len / 2).max(1);
                 self.themes.cursor = movement.apply(self.themes.cursor, len, half);
-                // A theme that cannot be used shows the one in use.
-                self.theme = match self.themes.entries.get(self.themes.cursor) {
-                    Some(Entry {
-                        theme: Ok(theme), ..
-                    }) => theme.with(&self.settings.theme_overrides),
-                    _ => self.themes.before.unwrap_or(self.theme),
-                };
+                self.preview_theme();
                 self.dirty = true;
             }
             Action::Confirm => self.choose_theme(),
@@ -3201,6 +3333,17 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Shows the theme under the picker's cursor on the whole screen. A
+    /// theme that cannot be used shows the one in use.
+    fn preview_theme(&mut self) {
+        self.theme = match self.themes.entries.get(self.themes.cursor) {
+            Some(Entry {
+                theme: Ok(theme), ..
+            }) => theme.with(&self.settings.theme_overrides),
+            _ => self.themes.before.unwrap_or(self.theme),
+        };
     }
 
     /// `Enter` in the theme picker: keeps the theme under the cursor and
@@ -7730,20 +7873,47 @@ secret = "b-secret"
         screen_text(app, app.size.width, app.size.height)
     }
 
-    fn mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+    /// A moment that is a second later than the one every earlier call
+    /// returned: presses made with it are never a double click.
+    fn later() -> Instant {
+        use std::sync::{
+            LazyLock,
+            atomic::{AtomicU64, Ordering},
+        };
+        static START: LazyLock<Instant> = LazyLock::new(Instant::now);
+        static SECONDS: AtomicU64 = AtomicU64::new(0);
+        *START + Duration::from_secs(SECONDS.fetch_add(1, Ordering::Relaxed))
+    }
+
+    fn mouse_at(app: &mut App, kind: MouseEventKind, column: u16, row: u16, now: Instant) {
         let event = MouseEvent {
             kind,
             column,
             row,
             modifiers: KeyModifiers::NONE,
         };
-        if let Some(action) = app.mouse_action(event) {
+        if let Some(action) = app.mouse_action(event, now) {
             app.update(action);
         }
     }
 
+    fn mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+        mouse_at(app, kind, column, row, later());
+    }
+
     fn click(app: &mut App, column: u16, row: u16) {
         mouse(app, MouseEventKind::Down(MouseButton::Left), column, row);
+    }
+
+    /// A left press at `now`.
+    fn press_at(app: &mut App, column: u16, row: u16, now: Instant) {
+        mouse_at(
+            app,
+            MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            now,
+        );
     }
 
     /// The column `needle` starts at on screen row `row` of `screen`.
@@ -7898,22 +8068,26 @@ secret = "b-secret"
             modifiers: KeyModifiers::NONE,
         };
         draw(&app);
+        let now = Instant::now();
         assert_eq!(
-            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left))),
+            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left)), now),
             None
         );
-        assert_eq!(app.mouse_action(event(MouseEventKind::ScrollDown)), None);
+        assert_eq!(
+            app.mouse_action(event(MouseEventKind::ScrollDown), now),
+            None
+        );
         // What an earlier, larger frame registered is forgotten.
         app.update(Action::Resize(Size::new(120, 30)));
         draw(&app);
         assert!(
-            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left)))
+            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left)), now)
                 .is_some()
         );
         app.update(Action::Resize(Size::new(49, 30)));
         draw(&app);
         assert_eq!(
-            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left))),
+            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left)), now),
             None
         );
     }
@@ -7982,5 +8156,310 @@ secret = "b-secret"
         draw(&app);
         mouse(&mut app, MouseEventKind::ScrollDown, 10, 3);
         assert_eq!(app.proxies_view.group, 0);
+    }
+
+    /// The first place `needle` shows on `screen` in the columns `cols`, as
+    /// (column, row).
+    fn locate(screen: &str, needle: &str, cols: std::ops::Range<u16>) -> (u16, u16) {
+        use unicode_width::UnicodeWidthStr;
+        for (row, line) in screen.lines().enumerate() {
+            for (at, _) in line.match_indices(needle) {
+                let column = u16::try_from(line[..at].width()).unwrap();
+                if cols.contains(&column) {
+                    return (column, u16::try_from(row).unwrap());
+                }
+            }
+        }
+        panic!("{needle} not in columns {cols:?} of\n{screen}");
+    }
+
+    /// Two presses 100 ms apart.
+    fn double_click(app: &mut App, column: u16, row: u16) {
+        let first = later();
+        press_at(app, column, row, first);
+        press_at(app, column, row, first + Duration::from_millis(100));
+    }
+
+    /// The proxies page of the fixture at `size`, with the channel the
+    /// requests it makes report on.
+    fn proxies_page_with_requests(size: Size) -> (App, mpsc::Receiver<Envelope>) {
+        let proxies: Proxies =
+            serde_json::from_str(include_str!("../tests/fixtures/mihomo_proxies.json")).unwrap();
+        let (mut app, rx) = app_without_controller();
+        app.proxies = Some(Ok(proxies));
+        app.page = Page::Proxies;
+        app.size = size;
+        (app, rx)
+    }
+
+    /// The (group, node) of every selection the app asked the kernel for.
+    async fn selections(app: App, mut rx: mpsc::Receiver<Envelope>) -> Vec<(String, String)> {
+        drop(app);
+        let mut selected = vec![];
+        while let Some(Envelope { msg, .. }) = rx.recv().await {
+            if let Msg::Selected { group, node, .. } = msg {
+                selected.push((group, node));
+            }
+        }
+        selected
+    }
+
+    #[tokio::test]
+    async fn a_click_picks_a_group_and_a_card_and_a_second_one_acts_like_enter() {
+        let (mut app, rx) = proxies_page_with_requests(Size::new(100, 30));
+        let screen = draw(&app);
+        // The group list.
+        let (x, y) = locate(&screen, "负载均衡", 0..28);
+        click(&mut app, x, y);
+        let balance = app
+            .visible_groups()
+            .position(|group| group.name == "负载均衡")
+            .unwrap();
+        assert_eq!(
+            (app.proxies_view.group, app.proxies_view.focus),
+            (balance, Pane::Groups)
+        );
+        // Two quick ones go into the node area, as `Enter` does.
+        double_click(&mut app, x, y);
+        assert_eq!(app.proxies_view.focus, Pane::Nodes);
+
+        // A group of eight nodes: a click puts the cursor on a card and
+        // the focus on the grid; two select the node.
+        let (x, y) = locate(&draw(&app), "节点选择", 0..28);
+        click(&mut app, x, y);
+        assert_eq!(app.proxies_view.focus, Pane::Groups);
+        let screen = draw(&app);
+        let (x, y) = locate(&screen, "dead", 28..100);
+        click(&mut app, x, y);
+        assert_eq!(app.proxies_view.focus, Pane::Nodes);
+        assert_eq!(app.visible_nodes()[app.node_cursor()], "dead");
+        double_click(&mut app, x, y);
+        assert_eq!(
+            selections(app, rx).await,
+            [("节点选择".to_owned(), "dead".to_owned())]
+        );
+    }
+
+    #[tokio::test]
+    async fn a_click_on_a_card_of_a_narrow_page_puts_the_cursor_on_it() {
+        let (mut app, _rx) = proxies_page_with_requests(Size::new(60, 20));
+        let screen = draw(&app);
+        let (x, y) = locate(&screen, "香港 01", 0..60);
+        click(&mut app, x, y);
+        assert_eq!(app.proxies_view.focus, Pane::Nodes);
+        assert_eq!(app.visible_nodes()[app.node_cursor()], "香港 01");
+    }
+
+    #[tokio::test]
+    async fn the_group_picker_opens_on_a_click_and_picks_on_two() {
+        for size in [Size::new(99, 30), Size::new(60, 20)] {
+            let (mut app, _rx) = proxies_page_with_requests(size);
+            draw(&app);
+            // One click on the picker row opens the drop-down.
+            click(&mut app, 2, 3);
+            assert_eq!(app.overlay, Some(Overlay::Groups), "{size:?}");
+            let (x, y) = locate(&draw(&app), "负载均衡", 0..size.width);
+            let balance = app
+                .visible_groups()
+                .position(|group| group.name == "负载均衡")
+                .unwrap();
+            // A click on an item only moves its cursor.
+            click(&mut app, x, y);
+            assert_eq!(app.proxies_view.picker, balance, "{size:?}");
+            assert_eq!(app.overlay, Some(Overlay::Groups));
+            assert_eq!(app.proxies_view.group, 0);
+            // Two choose it.
+            double_click(&mut app, x, y);
+            assert_eq!(app.overlay, None);
+            assert_eq!(app.proxies_view.group, balance, "{size:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_click_on_a_row_of_the_table_puts_the_cursor_on_that_rule() {
+        for size in [Size::new(100, 30), Size::new(60, 20)] {
+            let mut app = rules_page(40, size);
+            draw(&app);
+            // Below the tabs, the panel's border and the table's header.
+            click(&mut app, 10, 5 + 5);
+            assert_eq!(app.rules_view.cursor, 5, "{size:?}");
+            // Scrolled to the end, the first row in view is not rule 0; a
+            // click on the header is on no rule.
+            key_press(&mut app, KeyCode::Char('G'));
+            draw(&app);
+            let rows = usize::from(size.height) - 8;
+            click(&mut app, 10, 4);
+            assert_eq!(app.rules_view.cursor, 39);
+            click(&mut app, 10, 5);
+            assert_eq!(app.rules_view.cursor, 40 - rows, "{size:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_connection_clicked_is_the_one_selected_even_after_the_table_reorders() {
+        for size in [Size::new(100, 30), Size::new(60, 20)] {
+            let (mut app, _rx) = app_without_controller();
+            app.page = Page::Connections;
+            app.size = size;
+            feed(
+                &mut app,
+                vec![
+                    flow("a", "1", 0, 0),
+                    flow("b", "2", 0, 0),
+                    flow("c", "3", 0, 0),
+                ],
+            );
+            // Newest first.
+            assert_eq!(table_ids(&app), ["c", "b", "a"]);
+            draw(&app);
+            // A newer one arrives before the click does: the second row is
+            // now `c`, but `b` is what was on screen where the click is.
+            feed(
+                &mut app,
+                vec![
+                    flow("a", "1", 0, 0),
+                    flow("b", "2", 0, 0),
+                    flow("c", "3", 0, 0),
+                    flow("d", "4", 0, 0),
+                ],
+            );
+            click(&mut app, 10, 5 + 1);
+            assert_eq!(
+                app.connections_view
+                    .selected_connection()
+                    .unwrap()
+                    .connection
+                    .id,
+                "b"
+            );
+            // Gone by then: ignored, and what was selected stays.
+            feed(&mut app, vec![flow("c", "3", 0, 0), flow("d", "4", 0, 0)]);
+            let before = app.connections_view.cursor;
+            // `a`, the third row of the frame the click was made on.
+            click(&mut app, 10, 5 + 2);
+            assert_eq!(app.connections_view.cursor, before, "{size:?}");
+            // Two clicks open the details, as `Enter` does.
+            draw(&app);
+            double_click(&mut app, 10, 5);
+            assert_eq!(app.overlay, Some(Overlay::Connection));
+            assert_eq!(
+                app.connections_view
+                    .detail
+                    .as_ref()
+                    .unwrap()
+                    .row
+                    .connection
+                    .id,
+                "d"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_click_picks_a_provider_and_a_setting_and_two_toggle_the_setting() {
+        let (mut app, _rx) = providers_app(&["p1", "p2"], &["r1"]);
+        let screen = draw(&app);
+        let (x, y) = locate(&screen, "r1", 0..40);
+        click(&mut app, x, y);
+        assert_eq!(app.providers_view.cursor, 2);
+        let (x, y) = locate(&screen, "p2", 0..40);
+        click(&mut app, x, y);
+        assert_eq!(app.providers_view.cursor, 1);
+        // `Enter` does nothing on a provider, and so do two clicks.
+        double_click(&mut app, x, y);
+        assert_eq!(app.providers_view.cursor, 1);
+        assert!(app.overlay.is_none());
+
+        for size in [Size::new(100, 30), Size::new(60, 20)] {
+            let (mut app, rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+            app.size = size;
+            let (x, y) = locate(&draw(&app), "IPv6", 0..size.width);
+            click(&mut app, x, y);
+            assert_eq!(app.settings_view.selected(), Setting::Ipv6);
+            assert!(!app.is_changing(Setting::Ipv6));
+            double_click(&mut app, x, y);
+            assert!(app.is_changing(Setting::Ipv6), "{size:?}");
+            assert_eq!(requests_made(app, rx).await, (0, 0, 0, 1));
+        }
+
+        // What asks first still asks: two clicks open the dialog, they do
+        // not restart the kernel.
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        let (x, y) = locate(&draw(&app), "重启内核", 0..100);
+        double_click(&mut app, x, y);
+        assert_eq!(app.overlay, Some(Overlay::Confirm));
+        assert!(!app.is_changing(Setting::Restart));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn two_presses_are_a_double_click_only_on_one_row_and_within_400_ms() {
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        let screen = draw(&app);
+        let (x, y) = locate(&screen, "IPv6", 0..100);
+        let (other_x, other_y) = locate(&screen, "局域网连接", 0..100);
+        let start = later();
+        let at = |millis| start + Duration::from_millis(millis);
+        press_at(&mut app, x, y, at(0));
+        // Too late: another pick.
+        press_at(&mut app, x, y, at(401));
+        assert!(!app.is_changing(Setting::Ipv6));
+        // Another row in between: not the same one twice.
+        press_at(&mut app, other_x, other_y, at(450));
+        press_at(&mut app, x, y, at(500));
+        assert!(!app.is_changing(Setting::Ipv6));
+        // In time, on the same row.
+        press_at(&mut app, x, y, at(900));
+        assert!(app.is_changing(Setting::Ipv6));
+        assert_eq!(app.settings_view.selected(), Setting::Ipv6);
+        // The third press of a streak is a first one: no second change (it
+        // would be refused while the first is in progress, so look at what
+        // is sent).
+        press_at(&mut app, x, y, at(950));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 1));
+
+        // Tabs only switch pages, two clicks or not: `Enter` on the page
+        // they open would act on its first row.
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        let (x, y) = locate(&draw(&app), "7 设置", 0..100);
+        double_click(&mut app, x, y);
+        assert_eq!(app.page, Page::Settings);
+        assert!(!app.is_changing(Setting::Mode));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn the_profile_and_theme_popups_take_clicks_on_their_rows() {
+        let (mut app, _rx) = profiles_app(&crate::config::Overrides::default());
+        key_press(&mut app, KeyCode::Char('P'));
+        let (x, y) = locate(&draw(&app), "127.0.0.1:2", 0..120);
+        click(&mut app, x, y);
+        assert_eq!(app.profile_cursor, 1);
+        assert_eq!(app.overlay, Some(Overlay::Profiles));
+        double_click(&mut app, x, y);
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.settings.profile, "b");
+
+        let (mut app, _rx) = app_without_controller();
+        let before = app.theme;
+        key_press(&mut app, KeyCode::Char('C'));
+        let (x, y) = locate(&draw(&app), "nord", 0..120);
+        // One click previews it.
+        click(&mut app, x, y);
+        let nord = app
+            .themes
+            .entries
+            .iter()
+            .position(|entry| entry.id == "nord")
+            .unwrap();
+        assert_eq!(app.themes.cursor, nord);
+        assert_ne!(app.theme, before);
+        assert_eq!(app.overlay, Some(Overlay::Themes));
+        assert_eq!(app.settings.theme, "terminal");
+        // Two take it.
+        draw(&app);
+        double_click(&mut app, x, y);
+        assert_eq!(app.overlay, None);
+        assert_eq!(app.settings.theme, "nord");
     }
 }

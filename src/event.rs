@@ -49,7 +49,7 @@ pub async fn run(
                 let Some(event) = event else { break };
                 let event = event?;
                 let action = match event {
-                    Event::Mouse(mouse) => app.mouse_action(mouse),
+                    Event::Mouse(mouse) => app.mouse_action(mouse, Instant::now()),
                     other => action_for(&other, app.page, app.typing()),
                 };
                 if let Some(action) = action {
