@@ -7332,6 +7332,50 @@ secret = "b-secret"
         );
     }
 
+    /// With the `terminal` theme, the cursor is reverse video in the default
+    /// colors on every cell of it: a span inverted in a color of its own
+    /// becomes a background of that color, and the row a patchwork.
+    #[test]
+    fn the_reversed_cursor_is_one_pair_of_colors() {
+        use ratatui::style::{Color, Modifier};
+        // Below the header, whose mode pill is reverse video in the accent.
+        let check = |app: &App, at: &str| {
+            let Size { width, height } = app.size;
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+            terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let mut reversed = 0;
+            for y in 1..height {
+                for x in 0..width {
+                    let cell = &buffer[(x, y)];
+                    if cell.modifier.contains(Modifier::REVERSED) {
+                        reversed += 1;
+                        assert_eq!(
+                            (cell.fg, cell.bg),
+                            (Color::Reset, Color::Reset),
+                            "{at}: ({x}, {y}) {:?}",
+                            cell.symbol()
+                        );
+                    }
+                }
+            }
+            assert!(reversed > 0, "{at}: no cursor drawn");
+        };
+
+        // The group list: muted type, `→ node` and the delay in the rows.
+        let mut app = proxies_page(100);
+        check(&app, "group list");
+        key_press(&mut app, KeyCode::Char('j'));
+        check(&app, "URLTest group");
+
+        let mut app = proxies_page(99);
+        check(&app, "picker row");
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Char('j'));
+        check(&app, "drop-down");
+    }
+
     #[test]
     fn the_help_scrolls_no_further_than_its_last_row() {
         let (mut app, _rx) = app_without_controller();

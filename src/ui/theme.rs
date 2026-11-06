@@ -1,3 +1,5 @@
+use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 
 use crate::config::{ThemeName, ThemeOverrides};
@@ -26,7 +28,9 @@ pub struct Theme {
     /// Memory, everywhere it is shown.
     pub c4: Color,
     /// Cursor row background. A style rather than a color: the `terminal`
-    /// theme has no background of its own to pick and inverts instead.
+    /// theme has no background of its own to pick and inverts instead. It
+    /// goes on top of a drawn row, through [`Theme::paint_cursor`] or a
+    /// table's row highlight, never under it.
     pub surface: Style,
     /// Background of every other table row. Between the page background and
     /// `surface`, so the cursor row still stands out. The `terminal` theme
@@ -48,7 +52,12 @@ impl Theme {
         c2: Color::Cyan,
         c3: Color::LightRed,
         c4: Color::LightCyan,
-        surface: Style::new().add_modifier(Modifier::REVERSED),
+        // Default colors, so every cell of the row inverts to the same two:
+        // left with their own, the row's colors would turn into backgrounds.
+        surface: Style::new()
+            .fg(Color::Reset)
+            .bg(Color::Reset)
+            .add_modifier(Modifier::REVERSED),
         stripe: Style::new(),
     };
 
@@ -117,6 +126,16 @@ impl Theme {
             self.surface = Style::new().bg(color);
         }
         self
+    }
+
+    /// Gives `area` of `buf`, already drawn, the cursor's look.
+    ///
+    /// Laid on top rather than under, so the `terminal` theme's reverse video
+    /// turns the whole area into one pair of colors: under the text it would
+    /// invert each span's own color into a background of its own. The other
+    /// themes only change the background, and the text keeps its colors.
+    pub fn paint_cursor(&self, buf: &mut Buffer, area: Rect) {
+        buf.set_style(area, self.surface);
     }
 
     /// Color for a delay test result: under 200 ms good, up to 500 ms slow,

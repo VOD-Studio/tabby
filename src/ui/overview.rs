@@ -59,7 +59,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     render_traffic(frame, chart, app);
     let [mode, kernel] =
         Layout::vertical([Constraint::Length(MODE_PANEL_HEIGHT), Constraint::Fill(1)]).areas(side);
-    render_mode(frame, mode, app.theme, configs);
+    render_mode(frame, mode, app, configs);
     render_kernel(frame, kernel, app, configs);
     if let Some(cards) = cards {
         render_cards(frame, cards, app);
@@ -192,7 +192,8 @@ fn y_axis(peak: u64) -> YAxis {
     YAxis { bound, labels }
 }
 
-fn render_mode(frame: &mut Frame, area: Rect, theme: Theme, configs: &Configs) {
+fn render_mode(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
+    let theme = app.theme;
     let block = panel(
         theme,
         area.width,
@@ -208,39 +209,40 @@ fn render_mode(frame: &mut Frame, area: Rect, theme: Theme, configs: &Configs) {
         .spacing(1)
         .split(inner);
     for (mode, slot) in Mode::ALL.into_iter().zip(slots.iter()) {
-        render_pill(frame, *slot, theme, mode, current == Some(mode));
+        let mark = (current == Some(mode)).then_some(app.icons.dot);
+        render_pill(frame, *slot, theme, mode, mark);
     }
 }
 
-/// One mode as a three-row pill: filled in accent when it is the current one,
-/// outlined in muted otherwise.
-fn render_pill(frame: &mut Frame, area: Rect, theme: Theme, mode: Mode, current: bool) {
-    let (style, label_area) = if current {
-        // Reversed, so the fill is accent in any palette.
-        let style = Style::new()
-            .fg(theme.accent)
-            .add_modifier(Modifier::BOLD | Modifier::REVERSED);
-        frame.render_widget(Block::new().style(style), area);
-        (style, area)
-    } else {
-        let block = Block::bordered()
-            .border_type(BorderType::Rounded)
-            .border_style(Style::new().fg(theme.muted));
-        let inner = block.inner(area);
-        frame.render_widget(block, area);
-        (Style::new().fg(theme.muted), inner)
+/// One mode as a three-row rounded pill. The current one (`mark` given) has
+/// its border and bold label in accent, the mark before the label when the
+/// pill is wide enough; the others are outlined and labelled in muted.
+fn render_pill(frame: &mut Frame, area: Rect, theme: Theme, mode: Mode, mark: Option<&str>) {
+    let (color, label) = match mark {
+        Some(mark) => {
+            let style = Style::new().fg(theme.accent).add_modifier(Modifier::BOLD);
+            let label = mode.label();
+            // Two borders, the mark and a space.
+            let line = if usize::from(area.width) >= label.width() + 4 {
+                Line::from(vec![Span::raw(format!("{mark} ")), Span::raw(label)])
+            } else {
+                Line::from(label)
+            };
+            (theme.accent, line.style(style))
+        }
+        None => (theme.muted, Line::styled(mode.label(), theme.muted)),
     };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(color));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
     let row = Rect {
-        y: label_area.y + label_area.height / 2,
-        height: label_area.height.min(1),
-        ..label_area
+        y: inner.y + inner.height / 2,
+        height: inner.height.min(1),
+        ..inner
     };
-    frame.render_widget(
-        Paragraph::new(mode.label())
-            .style(style)
-            .alignment(Alignment::Center),
-        row,
-    );
+    frame.render_widget(Paragraph::new(label).alignment(Alignment::Center), row);
 }
 
 /// The kernel panel: version and the settings people look up most.

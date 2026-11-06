@@ -190,29 +190,23 @@ fn draw_lines(frame: &mut Frame, inner: Rect, app: &App, rows: &[ProviderRow<'_>
                 view.rules.as_ref(),
                 filter,
             ),
-            Item::Row(index) => {
-                let line = match rows[index] {
-                    ProviderRow::Proxy(provider) => proxy_line(app, provider, &proxy_layout, &now),
-                    ProviderRow::Rule(provider) => rule_line(app, provider, &rule_layout, &now),
-                };
-                if index == cursor {
-                    line.style(theme.surface)
-                } else {
-                    line
-                }
-            }
+            Item::Row(index) => match rows[index] {
+                ProviderRow::Proxy(provider) => proxy_line(app, provider, &proxy_layout, &now),
+                ProviderRow::Rule(provider) => rule_line(app, provider, &rule_layout, &now),
+            },
             Item::Note(note) => note_line(app, note),
             Item::Gap => Line::raw(""),
         };
         let y = inner.y + u16::try_from(line_index).unwrap_or(u16::MAX);
-        frame.render_widget(
-            line,
-            Rect {
-                y,
-                height: 1,
-                ..inner
-            },
-        );
+        let rect = Rect {
+            y,
+            height: 1,
+            ..inner
+        };
+        frame.render_widget(line, rect);
+        if *item == Item::Row(cursor) {
+            theme.paint_cursor(frame.buffer_mut(), rect);
+        }
     }
 }
 

@@ -123,14 +123,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
                     let x = inner.x + u16::try_from(caret).unwrap_or(u16::MAX);
                     frame.set_cursor_position((x, y));
                 }
-                if row == cursor {
-                    line.style(theme.surface)
-                } else {
-                    line
-                }
+                line
             }
         };
         frame.render_widget(line, rect);
+        if items[index] == Item::Row(cursor) {
+            theme.paint_cursor(frame.buffer_mut(), rect);
+        }
     }
 }
 

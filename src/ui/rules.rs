@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Cell, Row, Table},
+    widgets::{Block, BorderType, Cell, Row, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -290,10 +290,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
             }),
     );
     // Only the rows in view are built: a kernel can have thousands of rules.
+    let start = window.start;
     let body = window.map(|index| {
-        let style = if index == cursor {
-            theme.surface
-        } else if index % 2 == 1 {
+        let style = if index % 2 == 1 {
             theme.stripe
         } else {
             Style::new()
@@ -301,11 +300,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
         Row::new(cells(&theme, visible[index], &needle, widths)).style(style)
     });
     let constraints = widths.map(|width| Constraint::Length(u16::try_from(width).unwrap_or(0)));
-    frame.render_widget(
+    // The highlight goes on after the cells, as `Theme::paint_cursor` does.
+    frame.render_stateful_widget(
         Table::new(body, constraints)
             .header(header)
-            .column_spacing(SPACING),
+            .column_spacing(SPACING)
+            .row_highlight_style(theme.surface),
         inner,
+        &mut TableState::new().with_selected(cursor - start),
     );
 }
 

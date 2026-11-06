@@ -160,10 +160,10 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies) {
 fn render_picker_row(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, group: &Proxy) {
     let theme = app.theme;
     let focused = app.proxies_view.focus == Pane::Groups;
-    let (mark, name, row) = if focused {
-        (theme.accent, theme.accent, theme.surface)
+    let (mark, name) = if focused {
+        (theme.accent, theme.accent)
     } else {
-        (theme.muted, theme.fg, Style::new())
+        (theme.muted, theme.fg)
     };
     let mut spans = vec![Span::styled(
         "▾ ",
@@ -177,7 +177,10 @@ fn render_picker_row(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies
         width,
         Style::new().fg(name).add_modifier(Modifier::BOLD),
     ));
-    frame.render_widget(Paragraph::new(Line::from(spans)).style(row), area);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+    if focused {
+        theme.paint_cursor(frame.buffer_mut(), area);
+    }
 }
 
 /// The picker's drop-down over the page `body`: every group the page lists,
@@ -224,12 +227,10 @@ pub fn render_picker(frame: &mut Frame, body: Rect, app: &App) {
                 Modifier::empty()
             });
         spans.extend(summary(app, proxies, groups[index], width, name));
-        let style = if index == cursor {
-            theme.surface
-        } else {
-            Style::new()
-        };
-        frame.render_widget(Paragraph::new(Line::from(spans)).style(style), area);
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        if index == cursor {
+            theme.paint_cursor(frame.buffer_mut(), area);
+        }
     }
 }
 
@@ -346,12 +347,18 @@ fn render_groups(
             usize::from(rect.width),
             is_selected,
         );
-        let style = if is_selected {
-            theme.surface
-        } else {
-            Style::new()
-        };
-        frame.render_widget(Paragraph::new(lines).style(style), rect);
+        frame.render_widget(Paragraph::new(lines), rect);
+        if is_selected {
+            theme.paint_cursor(frame.buffer_mut(), rect);
+            // The accent bar stays one: reverse video would swap its halves.
+            let bar = Rect { width: 1, ..rect };
+            frame.buffer_mut().set_style(
+                bar,
+                Style::new()
+                    .fg(theme.accent)
+                    .remove_modifier(Modifier::REVERSED),
+            );
+        }
     }
 }
 
@@ -516,17 +523,17 @@ struct Card<'a> {
 
 fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
     let theme = app.theme;
-    let border = Style::new().fg(if card.current {
-        theme.accent
+    // The cursor is a heavy accent frame: a change of shape, so it shows in
+    // any palette, and it leaves the body's own colors (the delay above all)
+    // as they are. The node in use is told by its accent name and the ✓.
+    let (border_type, border) = if card.cursor {
+        (BorderType::Thick, Style::new().fg(theme.accent))
     } else {
-        theme.muted
-    });
-    let mut block = Block::bordered()
-        .border_type(BorderType::Rounded)
+        (BorderType::Rounded, Style::new().fg(theme.muted))
+    };
+    let block = Block::bordered()
+        .border_type(border_type)
         .border_style(border);
-    if card.cursor {
-        block = block.style(theme.surface);
-    }
     let inner = block.inner(rect);
     frame.render_widget(block, rect);
     let width = usize::from(inner.width);
@@ -534,15 +541,13 @@ fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
     let mark = if card.current { app.icons.check } else { " " };
     let name = truncate(card.name, width.saturating_sub(2));
     let padding = width.saturating_sub(name.width() + 1);
+    let name_style = match (card.current, card.cursor) {
+        (true, _) => Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
+        (false, true) => Style::new().fg(theme.fg).add_modifier(Modifier::BOLD),
+        (false, false) => Style::new().fg(theme.fg),
+    };
     let title = Line::from(vec![
-        Span::styled(
-            name,
-            Style::new().fg(theme.fg).add_modifier(if card.current {
-                Modifier::BOLD
-            } else {
-                Modifier::empty()
-            }),
-        ),
+        Span::styled(name, name_style),
         Span::raw(" ".repeat(padding)),
         Span::styled(
             mark,
@@ -602,11 +607,17 @@ fn render_card(frame: &mut Frame, rect: Rect, app: &App, card: &Card) {
         Some(Delay::Millis(ms)) => theme.delay(ms),
         _ => theme.muted,
     };
+    let symbols = border_type.to_border_set();
     let bottom = Line::from(vec![
-        Span::styled("╰", border),
+        Span::styled(symbols.bottom_left, border),
         Span::styled("━".repeat(filled), Style::new().fg(bar_color)),
-        Span::styled("─".repeat(bar_width - filled.min(bar_width)), border),
-        Span::styled("╯", border),
+        Span::styled(
+            symbols
+                .horizontal_bottom
+                .repeat(bar_width - filled.min(bar_width)),
+            border,
+        ),
+        Span::styled(symbols.bottom_right, border),
     ]);
     let bottom_row = Rect {
         y: rect.bottom().saturating_sub(1),

@@ -61,18 +61,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         };
         let mut spans = vec![marker];
         spans.extend(describe(choice, room, name_width, app));
-        let line = Line::from(spans);
-        let line = if index == app.profile_cursor {
-            line.style(theme.surface)
-        } else {
-            line
-        };
         let rect = Rect {
             y: inner.y + u16::try_from(row).unwrap_or(u16::MAX),
             height: 1,
             ..inner
         };
-        frame.render_widget(line, rect);
+        frame.render_widget(Line::from(spans), rect);
+        if index == app.profile_cursor {
+            theme.paint_cursor(frame.buffer_mut(), rect);
+        }
     }
 }
 

@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Constraint, Layout, Rect, Size},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Cell, Paragraph, Row, Table},
+    widgets::{Block, BorderType, Cell, Paragraph, Row, Table, TableState},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -211,10 +211,9 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .map(|&(column, width)| Cell::from(heading(app, view.sort, column, width))),
     );
     // Only the rows in view are built: the kernel can have thousands open.
+    let start = window.start;
     let body = window.map(|index| {
-        let style = if index == cursor {
-            theme.surface
-        } else if index % 2 == 1 {
+        let style = if index % 2 == 1 {
             theme.stripe
         } else {
             Style::new()
@@ -227,11 +226,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let widths = columns
         .iter()
         .map(|&(_, width)| Constraint::Length(u16::try_from(width).unwrap_or(u16::MAX)));
-    frame.render_widget(
+    // The highlight goes on after the cells, as `Theme::paint_cursor` does.
+    frame.render_stateful_widget(
         Table::new(body, widths)
             .header(header)
-            .column_spacing(SPACING),
+            .column_spacing(SPACING)
+            .row_highlight_style(theme.surface),
         inner,
+        &mut TableState::new().with_selected(cursor - start),
     );
 }
 
