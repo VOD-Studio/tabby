@@ -14,8 +14,9 @@ pub mod theme;
 
 use ratatui::{
     Frame,
+    buffer::Buffer,
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::Line,
     widgets::{Paragraph, Wrap},
 };
@@ -23,6 +24,7 @@ use ratatui::{
 use crate::{
     api::error::ApiError,
     app::{App, Overlay, Page},
+    ui::theme::Theme,
 };
 
 /// Below this many columns the proxies page folds its group list into a
@@ -82,8 +84,31 @@ pub fn regions(screen: Rect, reconnecting: bool) -> Regions {
 pub fn draw(frame: &mut Frame, app: &App) {
     if too_small(frame.area()) {
         draw_too_small(frame, app);
+    } else {
+        draw_screen(frame, app);
+    }
+    fill_background(frame.buffer_mut(), &app.theme);
+}
+
+/// Gives every cell left on the terminal's own colors the theme's
+/// background, and its body text color: the terminal's own text color need
+/// not be readable on a background the theme brings. After everything
+/// else, so that what popups wipe gets them too.
+fn fill_background(buffer: &mut Buffer, theme: &Theme) {
+    if theme.bg == Color::Reset {
         return;
     }
+    for cell in &mut buffer.content {
+        if cell.bg == Color::Reset {
+            cell.bg = theme.bg;
+        }
+        if cell.fg == Color::Reset {
+            cell.fg = theme.fg;
+        }
+    }
+}
+
+fn draw_screen(frame: &mut Frame, app: &App) {
     let regions = regions(frame.area(), app.reconnect.is_some());
     components::header::render(frame, regions.header, app);
     components::tabs::render(frame, regions.tabs, app);

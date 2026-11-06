@@ -2115,7 +2115,7 @@ impl App {
     ) -> Self {
         let streams = Streams::new(&settings.url, settings.secret.as_deref(), outbox.clone());
         Self {
-            theme: Theme::from(settings.theme).with_overrides(&settings.theme_overrides),
+            theme: Theme::from(settings.theme).with(&settings.theme_overrides),
             icons: settings.icons.into(),
             settings,
             page: Page::Overview,
