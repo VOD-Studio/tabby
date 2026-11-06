@@ -3,6 +3,7 @@ mod app;
 mod config;
 mod event;
 mod format;
+mod themes;
 mod ui;
 
 use std::panic;
@@ -37,6 +38,7 @@ async fn main() -> Result<()> {
     let path = config::path();
     let file = Config::load(path.as_deref())?;
     let settings = file.resolve(&cli.overrides)?;
+    let theme = themes::load(&settings.theme, config::themes_dir().as_deref())?;
     let profiles = Profiles {
         path,
         ..file.profiles(&cli.overrides, &settings)
@@ -44,6 +46,7 @@ async fn main() -> Result<()> {
     tracing::info!(
         profile = %settings.profile,
         url = %settings.url,
+        theme = %settings.theme,
         "starting tabby {}",
         env!("CARGO_PKG_VERSION"),
     );
@@ -53,7 +56,7 @@ async fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = match terminal.size() {
         Ok(size) => {
-            let mut app = App::new(settings, client, msg_tx, size, profiles);
+            let mut app = App::new(settings, theme, client, msg_tx, size, profiles);
             app.start();
             event::run(&mut terminal, &mut app, msg_rx).await
         }

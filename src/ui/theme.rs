@@ -248,16 +248,6 @@ impl From<ThemeName> for Theme {
 mod tests {
     use super::*;
 
-    const THEMES: [ThemeName; 7] = [
-        ThemeName::Terminal,
-        ThemeName::TokyoNight,
-        ThemeName::CatppuccinMocha,
-        ThemeName::CatppuccinLatte,
-        ThemeName::GruvboxDark,
-        ThemeName::Nord,
-        ThemeName::Dracula,
-    ];
-
     /// Every color of `theme`, then its two background styles.
     fn parts(theme: &Theme) -> ([Color; 11], Style, Style) {
         let Theme {
@@ -303,7 +293,7 @@ mod tests {
             |o| o.c4 = Some(MARK),
             |o| o.bg = Some(MARK),
         ];
-        for name in THEMES {
+        for name in ThemeName::ALL {
             let (colors, surface, stripe) = parts(&Theme::from(name));
             let untouched = Theme::from(name).with(&Palette::default());
             assert_eq!(parts(&untouched), (colors, surface, stripe), "{name:?}");
@@ -328,7 +318,7 @@ mod tests {
             surface: Some(MARK),
             ..Palette::default()
         };
-        for name in THEMES {
+        for name in ThemeName::ALL {
             let base = Theme::from(name);
             let theme = base.with(&palette);
             assert_eq!(theme.surface, Style::new().bg(MARK), "{name:?}");

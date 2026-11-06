@@ -2094,20 +2094,26 @@ pub struct App {
 }
 
 impl App {
+    /// An app drawn with `theme` (`[theme_overrides]` of `settings` not
+    /// applied yet).
     pub fn new(
         settings: Settings,
+        theme: Theme,
         client: ApiClient,
         msg_tx: mpsc::Sender<Envelope>,
         size: Size,
         profiles: Profiles,
     ) -> Self {
-        Self::connect(settings, client, Outbox::new(0, msg_tx), size, profiles)
+        let theme = theme.with(&settings.theme_overrides);
+        let outbox = Outbox::new(0, msg_tx);
+        Self::connect(settings, theme, client, outbox, size, profiles)
     }
 
     /// An app on the controller of `settings`, nothing loaded yet, its
     /// background work reporting to `outbox`.
     fn connect(
         settings: Settings,
+        theme: Theme,
         client: ApiClient,
         outbox: Outbox,
         size: Size,
@@ -2115,7 +2121,7 @@ impl App {
     ) -> Self {
         let streams = Streams::new(&settings.url, settings.secret.as_deref(), outbox.clone());
         Self {
-            theme: Theme::from(settings.theme).with(&settings.theme_overrides),
+            theme,
             icons: settings.icons.into(),
             settings,
             page: Page::Overview,
@@ -3084,7 +3090,14 @@ impl App {
         };
         let mut profiles = std::mem::take(&mut self.profiles);
         profiles.current = index;
-        let mut app = Self::connect(settings, client, self.outbox.next(), self.size, profiles);
+        let mut app = Self::connect(
+            settings,
+            self.theme,
+            client,
+            self.outbox.next(),
+            self.size,
+            profiles,
+        );
         app.proxies_view.sort = self.proxies_view.sort;
         app.connections_view.sort = self.connections_view.sort;
         app.logs_view.level = self.logs_view.level;
@@ -4206,15 +4219,15 @@ mod tests {
         let settings = crate::config::Config::default()
             .resolve(&overrides)
             .unwrap();
-        let client = ApiClient::new(&settings.url, None).unwrap();
-        let app = App::new(
-            settings,
-            client,
-            tx,
-            Size::new(120, 40),
-            Profiles::default(),
-        );
+        let app = launch(settings, tx, Profiles::default());
         (app, rx)
+    }
+
+    /// An app on the controller of `settings`, as `main` starts one.
+    fn launch(settings: Settings, tx: mpsc::Sender<Envelope>, profiles: Profiles) -> App {
+        let client = ApiClient::new(&settings.url, settings.secret.as_deref()).unwrap();
+        let theme = crate::themes::load(&settings.theme, None).unwrap();
+        App::new(settings, theme, client, tx, Size::new(120, 40), profiles)
     }
 
     fn app_with(proxies: Proxies) -> App {
@@ -6935,8 +6948,7 @@ secret = "b-secret"
         let config: crate::config::Config = toml::from_str(PROFILES).unwrap();
         let settings = config.resolve(overrides).unwrap();
         let profiles = config.profiles(overrides, &settings);
-        let client = ApiClient::new(&settings.url, settings.secret.as_deref()).unwrap();
-        let app = App::new(settings, client, tx, Size::new(120, 40), profiles);
+        let app = launch(settings, tx, profiles);
         (app, rx)
     }
 
@@ -7126,8 +7138,7 @@ secret = "b-secret"
         let overrides = crate::config::Overrides::default();
         let settings = config.resolve(&overrides).unwrap();
         let profiles = config.profiles(&overrides, &settings);
-        let client = ApiClient::new(&settings.url, settings.secret.as_deref()).unwrap();
-        let mut app = App::new(settings, client, tx, Size::new(120, 40), profiles);
+        let mut app = launch(settings, tx, profiles);
 
         let colors = |app: &App| (app.theme.accent, app.theme.c1, app.theme.muted);
         let expected = (

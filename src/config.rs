@@ -1,10 +1,10 @@
 use std::{
     collections::BTreeMap,
     fs, io,
-    path::{Path, PathBuf},
+    path::{self, Path, PathBuf},
 };
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 use color_eyre::{
     Result,
     eyre::{WrapErr, eyre},
@@ -24,8 +24,8 @@ pub const DEFAULT_DELAY_TIMEOUT_MS: u32 = 5000;
 /// Name shown for the connection when no profile is selected.
 const FALLBACK_PROFILE: &str = "default";
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
+/// A theme built into tabby. User themes are files; see `crate::themes`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThemeName {
     #[default]
     Terminal,
@@ -35,6 +35,41 @@ pub enum ThemeName {
     GruvboxDark,
     Nord,
     Dracula,
+}
+
+impl ThemeName {
+    /// Every built-in theme, in the order the theme picker lists them.
+    pub const ALL: [Self; 7] = [
+        Self::Terminal,
+        Self::TokyoNight,
+        Self::CatppuccinMocha,
+        Self::CatppuccinLatte,
+        Self::GruvboxDark,
+        Self::Nord,
+        Self::Dracula,
+    ];
+
+    /// What `theme =` and `--theme` call it.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Terminal => "terminal",
+            Self::TokyoNight => "tokyo-night",
+            Self::CatppuccinMocha => "catppuccin-mocha",
+            Self::CatppuccinLatte => "catppuccin-latte",
+            Self::GruvboxDark => "gruvbox-dark",
+            Self::Nord => "nord",
+            Self::Dracula => "dracula",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|name| name.id() == id)
+    }
+
+    /// Every id, comma-separated, for error messages.
+    pub fn ids() -> String {
+        Self::ALL.map(Self::id).join(", ")
+    }
 }
 
 /// The `icons` setting: which symbols the UI draws (plan §7.2).
@@ -48,9 +83,9 @@ pub enum IconSet {
     Nerd,
 }
 
-/// Single semantic colors (plan §7.1) laid over whichever theme is active:
-/// the `[theme_overrides]` table. A key that is not there leaves the
-/// theme's own color.
+/// Single semantic colors (plan §7.1) laid over a theme: the `[colors]`
+/// table of a theme file, and `[theme_overrides]` over whichever theme is
+/// active. A key that is not there leaves the color underneath.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Palette {
     pub fg: Option<Color>,
@@ -193,12 +228,16 @@ fn parse_color(text: &str) -> Option<Color> {
 #[serde(default)]
 pub struct Config {
     default: Option<String>,
-    theme: Option<ThemeName>,
+    theme: Option<String>,
     #[serde(deserialize_with = "theme_overrides")]
     theme_overrides: Palette,
     icons: IconSet,
     delay: DelayConfig,
     profiles: BTreeMap<String, Profile>,
+    /// The directory the file was read from: a relative theme path in it
+    /// is relative to there.
+    #[serde(skip)]
+    dir: Option<PathBuf>,
 }
 
 /// Reads `[theme_overrides]`, naming the key in every error: the position
@@ -237,9 +276,10 @@ pub struct Overrides {
     /// External Controller secret
     #[arg(long, env = "TABBY_SECRET", hide_env_values = true)]
     pub secret: Option<String>,
-    /// Color theme
-    #[arg(long, env = "TABBY_THEME", value_enum)]
-    pub theme: Option<ThemeName>,
+    /// Color theme: a built-in name, the name of a file in the themes
+    /// directory, or the path of a theme file
+    #[arg(long, env = "TABBY_THEME")]
+    pub theme: Option<String>,
 }
 
 /// The connection and look tabby will use, after applying all overrides.
@@ -248,7 +288,9 @@ pub struct Settings {
     pub profile: String,
     pub url: String,
     pub secret: Option<String>,
-    pub theme: ThemeName,
+    /// The theme as `theme =` names it: a built-in name, a theme in the
+    /// themes directory, or the absolute path of a theme file.
+    pub theme: String,
     pub theme_overrides: Palette,
     pub icons: IconSet,
     pub delay_url: String,
@@ -315,6 +357,37 @@ pub fn path() -> Option<PathBuf> {
     ProjectDirs::from("", "", "tabby").map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
+/// Where user themes live, next to `config.toml`; `None` when the home
+/// directory is unknown.
+pub fn themes_dir() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "tabby").map(|dirs| dirs.config_dir().join("themes"))
+}
+
+/// Whether the theme `id` is the path of a file rather than a name.
+pub fn is_theme_path(id: &str) -> bool {
+    id.contains('/') || id.contains(path::MAIN_SEPARATOR) || is_toml(Path::new(id))
+}
+
+/// Whether `path` names a `.toml` file, in any case.
+pub fn is_toml(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("toml"))
+}
+
+/// `id` as [`Settings::theme`] keeps it: a name as it is, a path made
+/// absolute against `base` (the current directory when `None`), so it
+/// means the same wherever it is saved.
+fn theme_id(id: &str, base: Option<&Path>) -> String {
+    if !is_theme_path(id) {
+        return id.to_owned();
+    }
+    let joined = base.map_or_else(|| PathBuf::from(id), |base| base.join(id));
+    path::absolute(&joined)
+        .unwrap_or(joined)
+        .to_string_lossy()
+        .into_owned()
+}
+
 impl Config {
     /// Loads `config.toml` from `path`.
     ///
@@ -326,6 +399,10 @@ impl Config {
         };
         match fs::read_to_string(path) {
             Ok(text) => toml::from_str(&text)
+                .map(|config| Self {
+                    dir: path.parent().map(Path::to_owned),
+                    ..config
+                })
                 .wrap_err_with(|| format!("invalid config file {}", path.display())),
             Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(Self::default()),
             Err(err) => {
@@ -351,10 +428,19 @@ impl Config {
     ///
     /// The profile is `overrides.profile`, else the file's `default`, else none;
     /// an explicit `url` / `secret` override beats the profile's own value.
-    /// An empty override (`TABBY_SECRET=`) counts as unset.
+    /// An empty override (`TABBY_SECRET=`) counts as unset. A theme path is
+    /// made absolute: against the current directory when it is an
+    /// override, against the file's directory when the file names it.
     pub fn resolve(&self, overrides: &Overrides) -> Result<Settings> {
         let chosen = self.chosen(overrides)?;
         let profile = chosen.map(|(_, profile)| profile);
+        let theme = match non_empty(overrides.theme.as_ref()) {
+            Some(id) => theme_id(id, None),
+            None => self.theme.as_deref().map_or_else(
+                || ThemeName::default().id().to_owned(),
+                |id| theme_id(id, self.dir.as_deref()),
+            ),
+        };
         Ok(Settings {
             profile: chosen.map_or(FALLBACK_PROFILE, |(name, _)| name).to_owned(),
             url: non_empty(overrides.url.as_ref())
@@ -364,7 +450,7 @@ impl Config {
             secret: non_empty(overrides.secret.as_ref())
                 .or_else(|| profile.and_then(|p| p.secret.as_deref()))
                 .map(str::to_owned),
-            theme: overrides.theme.or(self.theme).unwrap_or_default(),
+            theme,
             theme_overrides: self.theme_overrides,
             icons: self.icons,
             delay_url: self
@@ -471,7 +557,7 @@ accent = "#7aa2f7"
                 profile: "default".into(),
                 url: DEFAULT_URL.into(),
                 secret: None,
-                theme: ThemeName::Terminal,
+                theme: "terminal".into(),
                 theme_overrides: Palette::default(),
                 icons: IconSet::Unicode,
                 delay_url: DEFAULT_DELAY_URL.into(),
@@ -489,7 +575,7 @@ accent = "#7aa2f7"
                 profile: "local".into(),
                 url: "http://local:9090".into(),
                 secret: Some("file-secret".into()),
-                theme: ThemeName::TokyoNight,
+                theme: "tokyo-night".into(),
                 theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
                 delay_url: "http://delay.test/204".into(),
@@ -504,7 +590,7 @@ accent = "#7aa2f7"
             profile: Some("router".into()),
             url: Some("http://cli:1".into()),
             secret: Some("cli-secret".into()),
-            theme: Some(ThemeName::CatppuccinMocha),
+            theme: Some("catppuccin-mocha".into()),
         };
         let settings = file().resolve(&overrides).unwrap();
         assert_eq!(
@@ -513,7 +599,7 @@ accent = "#7aa2f7"
                 profile: "router".into(),
                 url: "http://cli:1".into(),
                 secret: Some("cli-secret".into()),
-                theme: ThemeName::CatppuccinMocha,
+                theme: "catppuccin-mocha".into(),
                 // Not tied to the theme they were written under.
                 theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
@@ -668,6 +754,39 @@ c4 = "gray"
         );
         let err = overrides_of("[theme_overrides]\nsurface = \"reset\"\n").unwrap_err();
         assert!(err.contains("`surface`"), "{err}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_theme_path_is_made_absolute_where_it_was_written_and_a_name_is_kept() {
+        let config = |theme: &str| Config {
+            theme: Some(theme.to_owned()),
+            dir: Some(PathBuf::from("/etc/tabby")),
+            ..Config::default()
+        };
+        let theme =
+            |config: &Config, overrides: &Overrides| config.resolve(overrides).unwrap().theme;
+        let none = Overrides::default();
+        // Relative to `config.toml`, whatever the current directory.
+        assert_eq!(
+            theme(&config("mine/dark.toml"), &none),
+            "/etc/tabby/mine/dark.toml"
+        );
+        assert_eq!(theme(&config("/abs/x.toml"), &none), "/abs/x.toml");
+        assert_eq!(theme(&config("nord"), &none), "nord");
+        // From the command line, relative to the current directory.
+        let cli = Overrides {
+            theme: Some("dark.toml".into()),
+            ..Overrides::default()
+        };
+        let cwd = std::env::current_dir().unwrap().join("dark.toml");
+        assert_eq!(theme(&config("nord"), &cli), cwd.to_string_lossy());
+        // An empty override is no override.
+        let empty = Overrides {
+            theme: Some(String::new()),
+            ..Overrides::default()
+        };
+        assert_eq!(theme(&config("nord"), &empty), "nord");
     }
 
     fn offered(config: &Config, overrides: &Overrides) -> Profiles {
