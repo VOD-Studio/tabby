@@ -31,7 +31,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let profiles = &app.profiles;
     let len = profiles.choices.len();
     let height = u16::try_from(len + 2).unwrap_or(u16::MAX);
-    let rect = popup::centered(area, WIDTH.min(area.width), height);
+    let rect = popup::modal(app, area, WIDTH.min(area.width), height);
     let inner = popup::panel(frame, rect, theme.accent, Some(TITLE), None);
 
     let width = usize::from(inner.width);
@@ -132,7 +132,7 @@ fn render_empty(frame: &mut Frame, area: Rect, app: &App) {
     ]);
 
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
-    let rect = popup::centered(area, width, height);
+    let rect = popup::modal(app, area, width, height);
     let inner = popup::panel(frame, rect, theme.accent, Some(TITLE), None);
     frame.render_widget(Paragraph::new(lines), inner);
 }

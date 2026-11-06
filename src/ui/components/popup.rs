@@ -8,6 +8,8 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
+use crate::{app::App, ui::hit::Target};
+
 /// A `width` x `height` rectangle centered in `area`, shrunk to fit if needed.
 pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
     let width = width.min(area.width);
@@ -18,6 +20,14 @@ pub fn centered(area: Rect, width: u16, height: u16) -> Rect {
         width,
         height,
     }
+}
+
+/// [`centered`], registered as a popup's face: a click on it is not a click
+/// outside.
+pub fn modal(app: &App, area: Rect, width: u16, height: u16) -> Rect {
+    let rect = centered(area, width, height);
+    app.hits.add(rect, Target::Popup);
+    rect
 }
 
 /// Draws an overlay panel over `area`: wipes what is underneath, then a rounded

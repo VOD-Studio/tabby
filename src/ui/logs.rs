@@ -13,6 +13,7 @@ use crate::{
     format,
     ui::{
         components::{states, title},
+        hit::Target,
         text::wrap,
         theme::Theme,
     },
@@ -174,6 +175,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.hits.add(inner, Target::List);
 
     if shown == 0 {
         if filter.is_empty() {

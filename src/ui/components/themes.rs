@@ -26,7 +26,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let picker = &app.themes;
     let len = picker.entries.len();
     let height = u16::try_from(len + 2).unwrap_or(u16::MAX);
-    let rect = popup::centered(area, WIDTH.min(area.width), height);
+    let rect = popup::modal(app, area, WIDTH.min(area.width), height);
     let inner = popup::panel(frame, rect, theme.accent, Some(TITLE), None);
 
     let width = usize::from(inner.width);

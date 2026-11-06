@@ -232,6 +232,8 @@ pub struct Config {
     #[serde(deserialize_with = "theme_overrides")]
     theme_overrides: Palette,
     icons: IconSet,
+    /// Whether tabby takes the mouse; on unless the file says `false`.
+    mouse: Option<bool>,
     delay: DelayConfig,
     profiles: BTreeMap<String, Profile>,
     /// The directory the file was read from: a relative theme path in it
@@ -296,6 +298,9 @@ pub struct Settings {
     pub theme_pinned: bool,
     pub theme_overrides: Palette,
     pub icons: IconSet,
+    /// Whether the terminal's mouse reports go to tabby (`mouse` in
+    /// `config.toml`); off leaves native text selection alone.
+    pub mouse: bool,
     pub delay_url: String,
     pub delay_timeout_ms: u32,
 }
@@ -492,6 +497,7 @@ impl Config {
             theme_pinned,
             theme_overrides: self.theme_overrides,
             icons: self.icons,
+            mouse: self.mouse.unwrap_or(true),
             delay_url: self
                 .delay
                 .url
@@ -559,6 +565,7 @@ mod tests {
 default = "local"
 theme = "tokyo-night"
 icons = "nerd"
+mouse = false
 
 [delay]
 url = "http://delay.test/204"
@@ -600,6 +607,7 @@ accent = "#7aa2f7"
                 theme_pinned: false,
                 theme_overrides: Palette::default(),
                 icons: IconSet::Unicode,
+                mouse: true,
                 delay_url: DEFAULT_DELAY_URL.into(),
                 delay_timeout_ms: DEFAULT_DELAY_TIMEOUT_MS,
             }
@@ -619,6 +627,7 @@ accent = "#7aa2f7"
                 theme_pinned: false,
                 theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
+                mouse: false,
                 delay_url: "http://delay.test/204".into(),
                 delay_timeout_ms: 2500,
             }
@@ -645,6 +654,7 @@ accent = "#7aa2f7"
                 // Not tied to the theme they were written under.
                 theme_overrides: file_overrides(),
                 icons: IconSet::Nerd,
+                mouse: false,
                 delay_url: "http://delay.test/204".into(),
                 delay_timeout_ms: 2500,
             }

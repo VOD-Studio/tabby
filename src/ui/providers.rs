@@ -15,6 +15,7 @@ use crate::{
     format,
     ui::{
         components::{states, title},
+        hit::Target,
         text::{describe, detail},
         theme::Theme,
     },
@@ -119,6 +120,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.hits.add(inner, Target::List);
 
     let supported = app.rule_providers_supported();
     let rows = view.rows();

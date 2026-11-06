@@ -14,6 +14,7 @@ use crate::{
     ui::{
         NARROW_WIDTH,
         components::{popup, states, title},
+        hit::Target,
         text::truncate_spans,
     },
 };
@@ -145,10 +146,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies) {
             groups: left,
             nodes,
         } => {
+            app.hits.add(left, Target::Pane(Pane::Groups));
+            app.hits.add(nodes, Target::Pane(Pane::Nodes));
             render_groups(frame, left, app, proxies, &groups, selected);
             render_nodes(frame, nodes, app, proxies, groups[selected]);
         }
         Panes::Stacked { picker, nodes } => {
+            app.hits.add(nodes, Target::Pane(Pane::Nodes));
             render_picker_row(frame, picker, app, proxies, groups[selected]);
             render_nodes(frame, nodes, app, proxies, groups[selected]);
         }
@@ -199,6 +203,7 @@ pub fn render_picker(frame: &mut Frame, body: Rect, app: &App) {
     let view = &app.proxies_view;
     let len = groups.len();
     let rect = dropdown(body, len);
+    app.hits.add(rect, Target::Popup);
     let inner = popup::panel(frame, rect, theme.accent, Some("代理组"), None);
     let cursor = view.picker.min(len - 1);
     let selected = view.group.min(len - 1);

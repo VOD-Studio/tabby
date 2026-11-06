@@ -6,7 +6,7 @@ mod format;
 mod themes;
 mod ui;
 
-use std::panic;
+use std::{io, panic};
 
 use api::client::ApiClient;
 use app::App;
@@ -16,6 +16,10 @@ use color_eyre::{
     eyre::{WrapErr, eyre},
 };
 use config::{Config, Overrides, Profiles};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture},
+    execute,
+};
 use directories::ProjectDirs;
 use tokio::sync::mpsc;
 use tracing::level_filters::LevelFilter;
@@ -58,7 +62,15 @@ async fn main() -> Result<()> {
     let client = ApiClient::new(&settings.url, settings.secret.as_deref())?;
     let (msg_tx, msg_rx) = mpsc::channel(event::MSG_BUFFER);
 
+    let mouse = settings.mouse;
     let mut terminal = ratatui::init();
+    if mouse {
+        if let Err(err) = execute!(io::stdout(), EnableMouseCapture) {
+            ratatui::restore();
+            return Err(err).wrap_err("cannot turn on mouse reporting");
+        }
+        release_mouse_on_panic();
+    }
     let result = match terminal.size() {
         Ok(size) => {
             let mut app = App::new(settings, theme, client, msg_tx, size, profiles, picker);
@@ -67,8 +79,23 @@ async fn main() -> Result<()> {
         }
         Err(err) => Err(err.into()),
     };
+    if mouse && let Err(err) = execute!(io::stdout(), DisableMouseCapture) {
+        tracing::warn!("cannot turn off mouse reporting: {err}");
+    }
     ratatui::restore();
     result
+}
+
+/// Makes a panic turn mouse reporting off before anything else: the hook
+/// `ratatui::init` installed restores the screen but leaves it on, and the
+/// shell would then receive the pointer's escape sequences as input.
+fn release_mouse_on_panic() {
+    let previous = panic::take_hook();
+    panic::set_hook(Box::new(move |info| {
+        // Nothing can be done about a failure while panicking.
+        let _ = execute!(io::stdout(), DisableMouseCapture);
+        previous(info);
+    }));
 }
 
 /// Sends tracing output to `tabby.log` in the state directory (stdout belongs

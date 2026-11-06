@@ -1,5 +1,6 @@
 pub mod components;
 pub mod connections;
+pub mod hit;
 pub mod icons;
 pub mod logs;
 pub mod overview;
@@ -24,7 +25,7 @@ use ratatui::{
 use crate::{
     api::error::ApiError,
     app::{App, Overlay, Page},
-    ui::theme::Theme,
+    ui::{hit::Target, theme::Theme},
 };
 
 /// Below this many columns the proxies page folds its group list into a
@@ -82,6 +83,7 @@ pub fn regions(screen: Rect, reconnecting: bool) -> Regions {
 }
 
 pub fn draw(frame: &mut Frame, app: &App) {
+    app.hits.clear();
     if too_small(frame.area()) {
         draw_too_small(frame, app);
     } else {
@@ -117,6 +119,9 @@ fn draw_screen(frame: &mut Frame, app: &App) {
     }
     draw_page(frame, regions.body, app);
     components::footer::render(frame, regions.footer, app);
+    if app.overlay.is_some() {
+        app.hits.add(frame.area(), Target::Backdrop);
+    }
     match app.overlay {
         Some(Overlay::Help) => components::help::render(frame, frame.area(), app),
         Some(Overlay::Connection) => connections::render_detail(frame, frame.area(), app),

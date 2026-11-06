@@ -47,7 +47,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
 
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
-    let rect = popup::centered(area, width, height);
+    let rect = popup::modal(app, area, width, height);
     let inner = popup::panel(frame, rect, theme.warning, Some(pending.title()), None);
     frame.render_widget(Paragraph::new(lines), inner);
 }

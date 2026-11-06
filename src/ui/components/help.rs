@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::{
     app::{App, Page},
-    ui::{COMPACT_WIDTH, components::popup, page_title, proxies},
+    ui::{COMPACT_WIDTH, components::popup, hit::Target, page_title, proxies},
 };
 
 /// Keys that only work on the given page; the proxies page's depend on
@@ -187,6 +187,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         position.push_str(" · j/k 滚动 ");
         Span::styled(position, Style::new().fg(theme.muted))
     });
+    app.hits.add(sheet.rect, Target::Popup);
     let inner = popup::panel(frame, sheet.rect, theme.accent, Some("帮助"), status);
 
     let heading =

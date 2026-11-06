@@ -14,6 +14,7 @@ use crate::{
     ui::{
         COMPACT_WIDTH,
         components::{popup, states, title},
+        hit::Target,
         text::wrap,
     },
 };
@@ -185,6 +186,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.hits.add(inner, Target::List);
 
     if visible.is_empty() {
         if filter.is_empty() {
@@ -446,7 +448,7 @@ pub fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     let height = u16::try_from(lines.len() + 2).unwrap_or(u16::MAX);
-    let rect = popup::centered(area, width, height);
+    let rect = popup::modal(app, area, width, height);
     let status = detail
         .closed
         .then(|| Span::styled("已关闭 ", Style::new().fg(theme.error)));

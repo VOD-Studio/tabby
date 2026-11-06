@@ -13,6 +13,7 @@ use crate::{
     ui::{
         COMPACT_WIDTH,
         components::{states, title},
+        hit::Target,
         theme::Theme,
     },
 };
@@ -245,6 +246,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.hits.add(inner, Target::List);
 
     if visible.is_empty() {
         if filter.is_empty() {

@@ -4,10 +4,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use futures_util::future::join_all;
 use jiff::{Timestamp, Zoned, civil};
-use ratatui::layout::{Rect, Size};
+use ratatui::layout::{Position, Rect, Size};
 use tokio::sync::mpsc;
 use tui_input::{Input, backend::crossterm::EventHandler};
 
@@ -29,6 +31,7 @@ use crate::{
     ui::{
         components::help,
         connections,
+        hit::{Hits, Target},
         icons::Icons,
         logs::{self, Fit},
         providers, proxies, regions, rules,
@@ -1229,7 +1232,7 @@ impl LogsView {
 }
 
 /// A user intent, derived from a terminal event.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     Quit,
     /// The terminal changed size.
@@ -1291,6 +1294,11 @@ pub enum Action {
     Themes,
     /// `Esc`: closes the topmost overlay, or clears an applied filter.
     Dismiss,
+    /// A left click on something the last frame drew.
+    Pick(Target),
+    /// A turn of the wheel over something that scrolls: one step of
+    /// `Up` or `Down`.
+    Wheel(Target, Move),
 }
 
 /// A message from a background task.
@@ -2098,6 +2106,8 @@ pub struct App {
     should_quit: bool,
     /// The terminal size, from the start and every resize event.
     pub size: Size,
+    /// What the last frame drew that the mouse can act on.
+    pub hits: Hits,
     dirty: bool,
 }
 
@@ -2181,6 +2191,7 @@ impl App {
             refreshing: false,
             should_quit: false,
             size,
+            hits: Hits::default(),
             dirty: false,
         }
     }
@@ -2298,10 +2309,14 @@ impl App {
         match action {
             Action::Quit => self.should_quit = true,
             Action::Resize(size) => self.resize(size),
-            _ if self.overlay == Some(Overlay::Confirm) => self.answer(action),
-            _ if self.overlay == Some(Overlay::Profiles) => self.pick_profile(action),
-            _ if self.overlay == Some(Overlay::Themes) => self.pick_theme(action),
-            _ if self.overlay == Some(Overlay::Groups) => self.pick_group(action),
+            // A click outside a popup is `Esc` to it.
+            Action::Pick(Target::Backdrop) if self.overlay.is_some() => {
+                self.update(Action::Dismiss);
+            }
+            _ if self.overlay == Some(Overlay::Confirm) => self.answer(&action),
+            _ if self.overlay == Some(Overlay::Profiles) => self.pick_profile(&action),
+            _ if self.overlay == Some(Overlay::Themes) => self.pick_theme(&action),
+            _ if self.overlay == Some(Overlay::Groups) => self.pick_group(&action),
             Action::ToggleHelp => {
                 // The connection popup is not swapped for the help.
                 self.overlay = match self.overlay {
@@ -2327,6 +2342,8 @@ impl App {
             }
             // Overlays are modal: everything else waits until they close.
             _ if self.overlay.is_some() => {}
+            Action::Pick(target) => self.pick(&target),
+            Action::Wheel(target, movement) => self.wheel(&target, movement),
             Action::Profiles => {
                 self.profile_cursor = self.profiles.current;
                 self.overlay = Some(Overlay::Profiles);
@@ -2590,7 +2607,7 @@ impl App {
     /// The group picker's drop-down answers to the cursor keys, `Enter`
     /// (which selects the group under its cursor) and `Esc`; quitting and
     /// resizing are handled before it is asked.
-    fn pick_group(&mut self, action: Action) {
+    fn pick_group(&mut self, action: &Action) {
         let len = self.visible_groups().count();
         match action {
             Action::Cursor(movement) => {
@@ -2696,6 +2713,76 @@ impl App {
             Page::Logs => Some(&self.logs_view.filter),
             _ => None,
         }
+    }
+
+    /// Maps a mouse event to an [`Action`] by what the last frame drew
+    /// under it; `None` means the event is ignored. A press that lands on
+    /// nothing, and every other button and movement, is ignored; so is
+    /// everything while the terminal is too small to draw into, which
+    /// registers nothing.
+    ///
+    /// The wheel moves what a popup lists wherever the pointer is, as the
+    /// keys do; without a popup, it moves the list under the pointer.
+    pub fn mouse_action(&self, event: MouseEvent) -> Option<Action> {
+        let position = Position::new(event.column, event.row);
+        let movement = match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                return self.hits.at(position).map(Action::Pick);
+            }
+            MouseEventKind::ScrollUp => Move::Up,
+            MouseEventKind::ScrollDown => Move::Down,
+            _ => return None,
+        };
+        if self.overlay.is_some() {
+            return Some(Action::Cursor(movement));
+        }
+        let target = self.hits.scroll_area(position)?;
+        Some(Action::Wheel(target, movement))
+    }
+
+    /// A click on `target`. An input box that has the keyboard lets go of it
+    /// first, as `Enter` (a filter) or `Esc` (a port, whose value is not
+    /// sent) would make it.
+    fn pick(&mut self, target: &Target) {
+        self.release_input();
+        match target {
+            Target::Tab(page) => self.set_page(*page),
+            Target::Pane(_) | Target::List | Target::Backdrop | Target::Popup => {}
+        }
+        self.dirty = true;
+    }
+
+    /// A wheel step over `target`: the list moves a row, and a pane of the
+    /// proxies page takes the focus.
+    fn wheel(&mut self, target: &Target, movement: Move) {
+        // The port being typed belongs to the row the cursor is on.
+        if self.page == Page::Settings && self.typing() {
+            return;
+        }
+        match target {
+            Target::Pane(pane) if self.page == Page::Proxies => {
+                if self.selected_group().is_some() {
+                    self.proxies_view.focus = *pane;
+                    self.move_cursor(movement);
+                }
+            }
+            Target::List => self.move_cursor(movement),
+            _ => {}
+        }
+    }
+
+    /// Takes the keyboard from the input box that has it, the way a click
+    /// elsewhere does.
+    fn release_input(&mut self) {
+        if !self.typing() {
+            return;
+        }
+        if self.page == Page::Settings {
+            self.settings_view.editing = None;
+        } else {
+            self.set_typing(false);
+        }
+        self.dirty = true;
     }
 
     /// `p`: freezes or resumes the current page's list.
@@ -3031,7 +3118,7 @@ impl App {
 
     /// The confirm dialog answers to `y`, `n` and `Esc` only; quitting and
     /// resizing are handled before it is asked.
-    fn answer(&mut self, action: Action) {
+    fn answer(&mut self, action: &Action) {
         match action {
             Action::Accept => self.accept(),
             Action::Cancel | Action::Dismiss => self.close_overlay(),
@@ -3052,7 +3139,7 @@ impl App {
     /// The profile popup answers to the cursor keys, `Enter`, `Esc` and
     /// `P`; quitting and resizing are handled before it is asked. Without a
     /// profile to offer it only explains how to add one, and only closes.
-    fn pick_profile(&mut self, action: Action) {
+    fn pick_profile(&mut self, action: &Action) {
         match action {
             Action::Cursor(movement) if !self.profiles.is_empty() => {
                 let len = self.profiles.choices.len();
@@ -3090,7 +3177,7 @@ impl App {
     /// The theme picker answers to the cursor keys, `Enter`, `Esc` and `C`;
     /// quitting and resizing are handled before it is asked. The whole
     /// screen shows the theme under the cursor as it moves.
-    fn pick_theme(&mut self, action: Action) {
+    fn pick_theme(&mut self, action: &Action) {
         match action {
             Action::Cursor(movement) => {
                 let len = self.themes.entries.len();
@@ -7635,5 +7722,265 @@ secret = "b-secret"
         key_press(&mut app, KeyCode::Char('?'));
         key_press(&mut app, KeyCode::Char('?'));
         assert_eq!(app.help_scroll, 0);
+    }
+
+    /// Draws `app` at its own size, which registers what the mouse can act
+    /// on, as the event loop does before it reads one.
+    fn draw(app: &App) -> String {
+        screen_text(app, app.size.width, app.size.height)
+    }
+
+    fn mouse(app: &mut App, kind: MouseEventKind, column: u16, row: u16) {
+        let event = MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        if let Some(action) = app.mouse_action(event) {
+            app.update(action);
+        }
+    }
+
+    fn click(app: &mut App, column: u16, row: u16) {
+        mouse(app, MouseEventKind::Down(MouseButton::Left), column, row);
+    }
+
+    /// The column `needle` starts at on screen row `row` of `screen`.
+    fn column_of(screen: &str, row: usize, needle: &str) -> u16 {
+        use unicode_width::UnicodeWidthStr;
+        let line = screen.lines().nth(row).unwrap();
+        let at = line
+            .find(needle)
+            .unwrap_or_else(|| panic!("{needle} not in {line}"));
+        u16::try_from(line[..at].width()).unwrap()
+    }
+
+    /// Rules page of `count` rules at `size`, the first one under the cursor.
+    fn rules_page(count: usize, size: Size) -> App {
+        let (mut app, _rx) = app_without_controller();
+        let payloads: Vec<String> = (0..count).map(|n| n.to_string()).collect();
+        let payloads: Vec<&str> = payloads.iter().map(String::as_str).collect();
+        app.handle_msg(Msg::Rules {
+            seq: 1,
+            refetch: false,
+            result: Ok(rules_of(&payloads)),
+        });
+        app.page = Page::Rules;
+        app.size = size;
+        app
+    }
+
+    #[tokio::test]
+    async fn a_click_on_a_tab_opens_its_page_with_titles_or_with_numbers_only() {
+        let (mut app, _rx) = app_without_controller();
+        for width in [120, 80] {
+            app.update(Action::Resize(Size::new(width, 30)));
+            for (index, page) in Page::ALL.into_iter().enumerate() {
+                let label = if width >= 100 {
+                    format!("{} {}", index + 1, crate::ui::page_title(page))
+                } else {
+                    (index + 1).to_string()
+                };
+                // Some other page first, so that a click that did nothing
+                // shows.
+                app.page = Page::ALL[(index + 3) % 7];
+                let screen = draw(&app);
+                let x = column_of(&screen, 1, &label);
+                click(&mut app, x, 1);
+                assert_eq!(app.page, page, "{label} at {width}");
+                // The row under the labels is the divider; it belongs to
+                // the tab above it.
+                app.page = Page::ALL[(index + 3) % 7];
+                draw(&app);
+                click(&mut app, x, 2);
+                assert_eq!(app.page, page, "divider under {label} at {width}");
+            }
+        }
+        // Bare numbers are three columns apart: the blank column on either
+        // side belongs to the number next to it.
+        app.update(Action::Resize(Size::new(80, 30)));
+        app.page = Page::Overview;
+        draw(&app);
+        click(&mut app, 3 * 2 + 1, 1);
+        assert_eq!(app.page, Page::Providers);
+        click(&mut app, 3 * 3 - 1, 1);
+        assert_eq!(app.page, Page::Rules);
+    }
+
+    #[tokio::test]
+    async fn a_click_ends_a_filter_keeping_the_text_and_drops_a_port_being_typed() {
+        let mut app = rules_page(5, Size::new(120, 30));
+        key_press(&mut app, KeyCode::Char('/'));
+        type_text(&mut app, "ab");
+        assert!(app.typing());
+        let screen = draw(&app);
+        // On the page's list: the click lands on it, and that is all.
+        click(&mut app, 5, 10);
+        assert!(!app.typing() && app.page == Page::Rules);
+        assert_eq!(app.rules_view.filter.value(), "ab");
+        key_press(&mut app, KeyCode::Char('/'));
+        let x = column_of(&screen, 1, "5 连接");
+        click(&mut app, x, 1);
+        assert!(!app.typing());
+        assert_eq!(app.page, Page::Connections);
+        assert_eq!(app.rules_view.filter.value(), "ab");
+
+        let (mut app, rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        select(&mut app, Setting::Port(Port::Mixed));
+        retype_port(&mut app, "9999");
+        assert_eq!(port_box(&app), Some("9999"));
+        let screen = draw(&app);
+        let x = column_of(&screen, 1, "2 代理");
+        click(&mut app, x, 1);
+        // Left unsent, as `Esc` leaves it.
+        assert!(port_box(&app).is_none() && app.page == Page::Proxies);
+        assert!(!app.is_changing(Setting::Port(Port::Mixed)));
+        assert_eq!(requests_made(app, rx).await, (0, 0, 0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_click_outside_a_popup_closes_it_and_never_reaches_the_page_below() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Rules;
+        let screen = draw(&app);
+        let tab = column_of(&screen, 1, "5 连接");
+
+        // Help: the tab under the backdrop does not switch pages.
+        key_press(&mut app, KeyCode::Char('?'));
+        draw(&app);
+        click(&mut app, tab, 1);
+        assert!(app.overlay.is_none());
+        assert_eq!(app.page, Page::Rules);
+        // Inside the popup, nothing happens to it.
+        key_press(&mut app, KeyCode::Char('?'));
+        draw(&app);
+        click(&mut app, 60, 20);
+        assert_eq!(app.overlay, Some(Overlay::Help));
+        click(&mut app, 0, 0);
+        assert!(app.overlay.is_none());
+
+        // Themes: closing by a click puts the theme in use back.
+        let before = app.theme;
+        key_press(&mut app, KeyCode::Char('C'));
+        key_press(&mut app, KeyCode::Char('j'));
+        assert_ne!(app.theme, before);
+        draw(&app);
+        click(&mut app, 0, 0);
+        assert!(app.overlay.is_none());
+        assert_eq!(app.theme, before);
+
+        // Profiles.
+        key_press(&mut app, KeyCode::Char('P'));
+        draw(&app);
+        click(&mut app, 0, 0);
+        assert!(app.overlay.is_none());
+
+        // The drop-down of the narrow proxies page: the group under its
+        // cursor is not taken.
+        let mut app = proxies_page(99);
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.overlay, Some(Overlay::Groups));
+        key_press(&mut app, KeyCode::Char('j'));
+        draw(&app);
+        click(&mut app, 98, 28);
+        assert!(app.overlay.is_none());
+        assert_eq!(app.proxies_view.group, 0);
+    }
+
+    #[tokio::test]
+    async fn the_mouse_is_ignored_on_a_screen_too_small_to_draw() {
+        let mut app = rules_page(40, Size::new(49, 20));
+        let event = |kind| MouseEvent {
+            kind,
+            column: 1,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        };
+        draw(&app);
+        assert_eq!(
+            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left))),
+            None
+        );
+        assert_eq!(app.mouse_action(event(MouseEventKind::ScrollDown)), None);
+        // What an earlier, larger frame registered is forgotten.
+        app.update(Action::Resize(Size::new(120, 30)));
+        draw(&app);
+        assert!(
+            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left)))
+                .is_some()
+        );
+        app.update(Action::Resize(Size::new(49, 30)));
+        draw(&app);
+        assert_eq!(
+            app.mouse_action(event(MouseEventKind::Down(MouseButton::Left))),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn the_wheel_moves_the_list_under_the_pointer_a_row_at_a_time() {
+        let mut app = rules_page(40, Size::new(120, 30));
+        draw(&app);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
+        assert_eq!(app.rules_view.cursor, 3);
+        mouse(&mut app, MouseEventKind::ScrollUp, 10, 10);
+        assert_eq!(app.rules_view.cursor, 2);
+        // The tab row and the footer are not lists.
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 1);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 29);
+        assert_eq!(app.rules_view.cursor, 2);
+        // Neither is the page of a kernel that has no list to scroll.
+        app.page = Page::Overview;
+        draw(&app);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
+        assert_eq!(app.rules_view.cursor, 2);
+
+        // A popup takes the wheel wherever it is: the help scrolls, the page
+        // does not.
+        let mut app = rules_page(40, Size::new(50, 15));
+        key_press(&mut app, KeyCode::Char('?'));
+        draw(&app);
+        mouse(&mut app, MouseEventKind::ScrollDown, 0, 0);
+        mouse(&mut app, MouseEventKind::ScrollDown, 25, 7);
+        assert_eq!(app.help_scroll, 2);
+        assert_eq!(app.rules_view.cursor, 0);
+        mouse(&mut app, MouseEventKind::ScrollUp, 25, 7);
+        assert_eq!(app.help_scroll, 1);
+    }
+
+    #[tokio::test]
+    async fn the_wheel_moves_the_pane_it_is_over_and_gives_it_the_focus() {
+        let mut app = proxies_page(120);
+        draw(&app);
+        // The group list is the first 28 columns, the grid the rest.
+        assert_eq!(app.proxies_view.focus, Pane::Groups);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
+        assert_eq!(
+            (app.proxies_view.group, app.proxies_view.focus),
+            (1, Pane::Groups)
+        );
+        // The group of eight nodes, three cards to a row.
+        let eight = app
+            .visible_groups()
+            .position(|group| group.name == "节点选择")
+            .unwrap();
+        app.proxies_view.group = eight;
+        let cursor = app.node_cursor();
+        mouse(&mut app, MouseEventKind::ScrollDown, 60, 10);
+        assert_eq!(app.proxies_view.focus, Pane::Nodes);
+        assert_eq!(app.node_cursor(), cursor + 3);
+        let group = app.proxies_view.group;
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
+        assert_eq!(app.proxies_view.focus, Pane::Groups);
+        assert_eq!(app.proxies_view.group, group + 1);
+
+        // Narrow, the picker row is one line: nothing to scroll there.
+        let mut app = proxies_page(99);
+        draw(&app);
+        mouse(&mut app, MouseEventKind::ScrollDown, 10, 3);
+        assert_eq!(app.proxies_view.group, 0);
     }
 }

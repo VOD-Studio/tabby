@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use color_eyre::Result;
-use crossterm::event::EventStream;
+use crossterm::event::{Event, EventStream};
 use futures_util::StreamExt;
 use ratatui::DefaultTerminal;
 use tokio::{
@@ -47,7 +47,12 @@ pub async fn run(
             Some(envelope) = msg_rx.recv() => app.receive(envelope),
             event = events.next() => {
                 let Some(event) = event else { break };
-                if let Some(action) = action_for(&event?, app.page, app.typing()) {
+                let event = event?;
+                let action = match event {
+                    Event::Mouse(mouse) => app.mouse_action(mouse),
+                    other => action_for(&other, app.page, app.typing()),
+                };
+                if let Some(action) = action {
                     app.update(action);
                 }
                 if app.take_dirty() {

@@ -12,7 +12,10 @@ use crate::{
     api::models::Configs,
     app::{App, Gate, Setting},
     format,
-    ui::components::{states, title},
+    ui::{
+        components::{states, title},
+        hit::Target,
+    },
 };
 
 /// The spinner and the space after it, in front of every name.
@@ -78,6 +81,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
     );
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    app.hits.add(inner, Target::List);
 
     let view = &app.settings_view;
     let items = items();
