@@ -1,7 +1,7 @@
 # tabby：托管内核实施方案
 
 - 日期：2026-11-06
-- 状态：待实施
+- 状态：已完成（2026-11-06）。实现记录见 §15 各项；TUN 的真机授权与路由、真实的 pkexec / sudo、GNOME / KDE 桌面、注销再登录没有验证，见各项记录里的“没有验证”。
 - 前置：主方案 `2026-11-05-tabby-tui.md`（M0–M6）。本方案取代其 §1 中“不管理内核进程”“不编辑订阅或 YAML 配置文件”两条非目标。
 - 参照：FlClash（`chen08209/FlClash`，2026-11-06 的 main 分支），下文引用的路径都相对于它的仓库根目录。
 
@@ -402,3 +402,8 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
      - 手动验证：本机没装 `age`，用 `go install filippo.io/age/cmd/...` 装了参考实现的 `age` 和 `age-keygen`，用它们生成密钥并加密 `second.yaml`（二进制和 `-a` 两种），本地 `python3 -m http.server` 提供：订阅页输入地址 → 出现密钥提示，输入显示成 `*`；先输另一把密钥 → 报错并再问，`profiles/` 里没有文件、`subscriptions.toml` 不存在；再输正确密钥 → 导入，`profiles/<id>.yaml` 是明文，`subscriptions.toml` 权限 0600 且带 `age_key`；ASCII 封装的同样能导入；`u` 更新不再问密钥，服务端收到请求，toast `已更新`。
 10. `docs: record M7 managed core decisions`
     - README 增加托管内核一节（启用方式、数据目录、TUN 授权、自启、局限）；AGENTS.md 更新项目概述、目录表和数据目录约定；本文件状态改为已完成。
+    - 实现记录（2026-11-06）：
+      - README：特性里改成八个页面并加一条托管内核；新增 `## 托管内核` 一节（`[core]` 启用与 `binary`、下载与校验、数据目录与文件权限、systemd 单元与后备进程、订阅页的按键与自动更新、age、设置页的托管内核组、TUN 授权流程与 `nosuid`、登录时启动、系统代理、已知局限与哪些验证过哪些没有）；页面表加第 8 页和设置页的托管内核行；按键表 `1`–`8` 并加订阅页一行。
+      - AGENTS.md：项目概述改成八个页面并写明托管内核；数据流里加托管内核的一段（`ManagedCore`、`Runner`、`CoreEvent`/`SubEvent`、`lend_terminal`）；目录表加 `src/core/`、`src/app/`、`ui/subscriptions`；数据目录与 0600 约定；新增依赖；托管内核手动验证的规矩（临时 `XDG_*`、清理单元、不 `tmux kill-server`、`GSETTINGS_BACKEND=memory`、TUN 等先征得同意）；测试基线 391 passed, 1 ignored，以及 `core::testing` 的替身用法。
+      - 本文件状态改为已完成，并在状态里列出没有验证的项：真实的 `pkexec` / `sudo setcap`、TUN 设备与路由（R8/R9，需要用户同意后才做）、GNOME / KDE 桌面本身、注销再登录。
+      - 实施中偏离方案的地方，各项记录里都写了原因：`mihomo -t` 不打开 provider 文件，分享链接由 tabby 自己识别（第 3 项）；订阅的 ASCII 封装 age 文件也收（第 9 项）；改 Mixed 端口时系统代理跟着改（第 8 项）；`persist` 顺带重新生成 `config.yaml`（第 7 项）；到期判断不用 `start_paused`（第 6 项）。

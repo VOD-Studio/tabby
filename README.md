@@ -31,7 +31,8 @@ Enter 选组   t 测速   T 整组测速   s 排序   / 过滤   …   ? 帮助 
 
 ## 特性
 
-- **七个页面**：概览、代理、Providers、规则、连接、日志、设置。
+- **八个页面**：概览、代理、Providers、规则、连接、日志、设置、订阅。
+- **托管内核**（可选）：tabby 自己下载并运行 mihomo，管理订阅，设置 TUN、登录时启动与系统代理。
 - **实时数据**：流量、内存、连接与日志走 WebSocket；断线自动退避重连。
 - **多配置**：在多个控制器之间一键切换。
 - **主题**：内置 7 套，支持自定义主题文件与逐色覆盖，主题弹窗实时预览。
@@ -96,6 +97,43 @@ bg = "reset"
 
 `P` 打开 profile 弹窗。切换时以目标 profile 的 `url` 与 `secret` 重新连接，并丢弃旧连接上未完成的请求；当前页面、排序、日志级别、主题保持不变，其余状态重置。`--url` / `--secret` 只作用于启动时的连接，弹窗首行“启动参数指定”可切回。
 
+## 托管内核
+
+除了连接已有的控制器，tabby 也可以自己运行 mihomo：下载内核、管理订阅、设置 TUN、登录时启动、设置桌面系统代理。默认不启用，在 `config.toml` 里加一段 `[core]` 才会在 `P` 弹窗里出现 `托管内核` 一行；`default = "core"` 或 `--profile core` 启动时直接用它。
+
+```toml
+default = "core"             # 可选：启动时直接用托管内核
+
+[core]                       # 有这一段才显示“托管内核”
+binary = "/usr/bin/mihomo"   # 可选；不写则由 tabby 下载到数据目录并负责更新
+```
+
+`binary` 已设置时 tabby 直接用它，不下载也不升级（设置页 `升级内核` 显示“由你自己管理”）。未设置且数据目录里还没有内核时，tabby 询问后从 GitHub 下载最新的 mihomo（校验 sha256，按 CPU 选 amd64 的 v1/v2/v3 构建）；托管内核运行时之后的升级经它自己的 mixed 端口下载。没有 `[core]` 段时，托管内核的功能都不会出现（订阅页只显示一句说明），其余行为不变。
+
+**数据目录**：`$XDG_DATA_HOME/tabby/core/`（默认 `~/.local/share/tabby/core/`）。内核和它的 `home/`（`config.yaml`、geo 数据、provider 文件）、订阅原文 `profiles/`、订阅列表 `subscriptions.toml`、托管内核的设置 `settings.toml`、`state.toml`（控制器端口与 secret）都在这里；含 secret、订阅 URL 或 age 密钥的文件权限是 0600。这些都由 tabby 维护，不要手动改 `config.yaml`：它是每次从当前订阅和 `settings.toml` 重新生成的。
+
+**进程**：有 systemd 用户实例时，内核作为临时单元 `tabby-mihomo-<后缀>` 运行（`systemd-run --user`），崩溃自动拉起，日志在 `journalctl --user -u tabby-mihomo-…`；没有时作为独立进程运行，日志在 `core.log`，崩溃不会自动拉起（横幅提示 `内核已退出`，`r` 重启）。`q` 只退出 tabby，内核继续运行；设置页 `停止内核` 才停。下次启动 tabby 会接上正在运行的内核。
+
+**订阅**（第 8 页）：`a` 输入订阅地址或文件路径导入；`Enter` 切换（重新生成 `config.yaml` 并让内核重载）；`u` / `U` 更新；`t` 开关自动更新（URL 订阅默认每 24 小时，间隔改 `subscriptions.toml` 里的 `interval_hours`；tabby 运行期间每分钟检查，失败 30 分钟内不重试）；`d` 删除。订阅内容用 `mihomo -t` 检查；分享链接列表会被包装成一个 provider 和一个 `节点选择` 组；age 加密的订阅（`age-encryption.org/v1`，二进制或 ASCII 封装，X25519 私钥）会提示输入私钥，私钥以 `*` 显示，并明文保存在 `subscriptions.toml` 里供后续更新使用。订阅原文不会被重新序列化：tabby 只删除自己接管的顶层键（端口、控制器、`secret`、`tun` 等）并追加一段覆盖块。
+
+**设置页的“托管内核”组**：内核路径与版本、`升级内核`、`登录时启动`、`系统代理`、`停止内核`。托管内核只开 Mixed 一个端口（默认 7890，被占用时在设置页改）；设置页和 `m` 的改动在生效后写进 `settings.toml`，重启后保留。
+
+**TUN**：给内核文件加 `CAP_NET_ADMIN` 和 `CAP_NET_BIND_SERVICE`（`setcap`），而不是用 root 运行。第一次开 TUN 时确认后，tabby 先用 `pkexec` 请求授权；没有图形认证代理（例如 Hyprland 下没有 polkit agent）时，临时退出全屏，在终端里执行 `sudo setcap …`，完成后回到界面。内核所在分区以 `nosuid` 挂载时文件能力不生效，tabby 会提前报错，请用 `[core].binary` 指向别处（`/tmp` 和一些外接盘常常是 `nosuid`）。升级或替换内核文件后能力会丢失，TUN 会被关掉并提示重新授权。
+
+**登录时启动**：设置页打开后写入 `~/.config/systemd/user/tabby-mihomo-<后缀>.service` 并 `enable`（`WantedBy=default.target`），登录后由 systemd 直接拉起内核，不需要 tabby 在运行；关闭则 `disable` 并删除单元文件，正在运行的内核不受影响。这是登录启动，不是开机启动，tabby 不执行 `loginctl enable-linger`。没有 systemd 用户实例时该项置灰（`需要 systemd`）。
+
+**系统代理**：设置页的 `系统代理` 把桌面的代理指向 `127.0.0.1:<Mixed 端口>`，关闭或停止内核时恢复成原来的值（记在 `system-proxy.toml`）。GNOME / MATE / Cinnamon 用 `gsettings`，KDE 用 `kwriteconfig6`（没有则 `kwriteconfig5`）；其他桌面（包括 Hyprland）该项置灰，显示“当前桌面不支持系统代理”。
+
+**已知局限**
+
+- 内核在 tabby 之外退出（例如被 `systemctl --user stop`）时，系统代理会仍然指向已关闭的端口；下次启动 tabby 时会提示，在设置页关闭系统代理即可恢复。
+- 托管内核和别的内核（例如 FlClash）不要同时开 TUN 并 auto-route，它们会互相抢路由；也不要两个都用 7890。
+- 临时单元随用户会话结束而停止；需要登录后自动运行请打开 `登录时启动`。
+- 订阅里的 age 私钥是明文存放的，更换私钥要删除订阅后重新导入；只支持 X25519 私钥，不支持口令加密和 SSH 密钥。
+- 在 MATE 上 `gsettings` 的 schema 是 `org.gnome.system.proxy` 还是 `org.mate.system.proxy` 没有验证；GNOME / KDE 桌面本身没有在真实环境里验证，只验证了命令的参数和写入的值。
+- 导入订阅时 `mihomo -t` 可能为 `GEOIP` / `GEOSITE` 规则下载 geo 数据（第一次较慢）。
+- 在真实环境里验证过：systemd 单元、登录单元（`systemctl --user restart default.target`）、`setcap` 授权流程（用替身命令）、订阅导入与自动更新、age 解密、`gsettings`（内存后端）与 `kwriteconfig6`（临时目录）。**没有**验证真实的 `pkexec` / `sudo setcap`、TUN 设备与路由，以及注销再登录。
+
 ## 主题
 
 | 主题                                                             | 说明                                   |
@@ -150,7 +188,8 @@ bg = "#16161e"
 | 4 规则      | 规则列表与过滤                                                                                   |
 | 5 连接      | 实时连接表；详情、关闭、排序、暂停、过滤                                                         |
 | 6 日志      | 内核日志流；按级别订阅、暂停、清空、过滤（保留 2000 条）                                         |
-| 7 设置      | 模式、局域网连接、日志级别、IPv6、端口、TUN、重载配置、刷新 FakeIP、更新 GeoData、重启与升级内核 |
+| 7 设置      | 模式、局域网连接、日志级别、IPv6、端口、TUN、重载配置、刷新 FakeIP、更新 GeoData、重启与升级内核；托管内核另有登录时启动、系统代理、停止内核 |
+| 8 订阅      | 托管内核的订阅：导入、切换、更新、自动更新、删除（连接外部控制器时只显示说明）                   |
 
 控制器不可达时顶部出现重连横幅（1、2、4、8、16 秒，之后每 30 秒），`r` 立即重试，`P` 换配置；secret 错误同样会提示。
 
@@ -162,7 +201,7 @@ bg = "#16161e"
 
 | 按键                          | 作用                             |
 | ----------------------------- | -------------------------------- |
-| `1`–`7` / `Tab` / `Shift+Tab` | 跳转 / 下一页 / 上一页           |
+| `1`–`8` / `Tab` / `Shift+Tab` | 跳转 / 下一页 / 上一页           |
 | `r`                           | 刷新当前页，出错时重试           |
 | `m`                           | 切换模式：rule → global → direct |
 | `P` / `C`                     | 切换配置 / 主题                  |
@@ -187,6 +226,7 @@ bg = "#16161e"
 | 连接      | `Enter` 详情 · `x` 关闭所选 · `X` 关闭全部（需确认）· `s` 切换排序列 · `S` 反转 · `p` 暂停                   |
 | 日志      | `l` 切换订阅级别 · `p` 暂停 · `c` 清空                                                                       |
 | 设置      | `Enter` / `Space` 切换或执行（端口行进入编辑）· `y` / `n` 确认 / 取消带 `!` 的操作                           |
+| 订阅      | `Enter` 切换 · `a` 添加 · `u` 更新 · `U` 全部更新（需确认）· `t` 自动更新开关 · `d` 删除（需确认）           |
 
 有过滤条件时，`U` 与 `X` 只作用于匹配项。
 
