@@ -26,7 +26,7 @@ use crate::{
         stream::{Event as StreamEvent, Stream, Streams},
     },
     config::{self, Origin, Profiles, Settings},
-    core::Release,
+    core::{ManagedCore, Release},
     format::natural_cmp,
     themes::{self, Entry, Picker},
     ui::{
@@ -1669,6 +1669,8 @@ pub enum Confirm {
     /// `重载配置` on a managed core: the config is made again from the
     /// subscription in use, then read.
     RegenerateConfig,
+    /// `开启 TUN` on a managed core whose kernel has no capabilities yet.
+    AuthorizeTun,
     /// The kernel to download, on first start (`upgrade` false) or as an
     /// upgrade of the installed one.
     InstallCore {
@@ -1686,6 +1688,7 @@ impl Confirm {
             Self::DeleteSubscription { .. } => "删除订阅",
             Self::StopCore => "停止内核",
             Self::RegenerateConfig => "重载配置",
+            Self::AuthorizeTun => "开启 TUN",
             Self::InstallCore { upgrade: true, .. } => "升级内核",
             Self::InstallCore { .. } => "下载内核",
             Self::Change(change) => change.title(),
@@ -1706,6 +1709,10 @@ impl Confirm {
             }
             Self::StopCore => "停止托管内核？经由它的连接都会断开。".to_owned(),
             Self::RegenerateConfig => "用当前订阅重新生成配置？".to_owned(),
+            Self::AuthorizeTun => {
+                "开启 TUN 需要授权：tabby 会用 setcap 给内核加上 CAP_NET_ADMIN 和 CAP_NET_BIND_SERVICE。"
+                    .to_owned()
+            }
             Self::UpdateSubscriptions { filter, ids } if filter.is_empty() => {
                 format!("更新全部 {} 个订阅？", ids.len())
             }
@@ -1731,6 +1738,7 @@ impl Confirm {
             Self::UpdateProviders { .. } | Self::UpdateSubscriptions { .. } => "更新",
             Self::StopCore => "停止",
             Self::RegenerateConfig => "重载",
+            Self::AuthorizeTun => "授权",
             Self::DeleteSubscription { .. } => "删除",
             Self::InstallCore { upgrade: true, .. } => "升级",
             Self::InstallCore { .. } => "下载",
@@ -2175,6 +2183,12 @@ pub struct App {
     outbox: Outbox,
     /// Where the managed kernel is; `None` on an external controller.
     pub core_phase: Option<CorePhase>,
+    /// Whether the managed kernel's file has the capabilities TUN needs, as
+    /// last looked; `None` until it was.
+    pub tun_authorized: Option<bool>,
+    /// The managed core, while `sudo` has to be run on the terminal, which
+    /// only the main loop can give.
+    suspend: Option<std::sync::Arc<ManagedCore>>,
     /// The connections `P` offers, and which one is in use.
     pub profiles: Profiles,
     /// Index into [`Profiles::choices`] of the row the profile popup's
@@ -2313,6 +2327,8 @@ impl App {
             client,
             outbox,
             core_phase,
+            tun_authorized: None,
+            suspend: None,
             profile_cursor: profiles.current,
             profiles,
             profile_scroll: Scroll::default(),
@@ -3481,6 +3497,10 @@ impl App {
         }
         match (setting, change) {
             (Setting::StopCore, _) => self.ask_stop_core(),
+            // The kernel needs the capabilities before it can run a TUN.
+            (Setting::Tun, Some(change @ Change::Patch(Patch::Tun(true)))) if self.is_managed() => {
+                self.ask_enable_tun(change);
+            }
             // The config is made again from the subscription first.
             (Setting::Reload, _) if self.is_managed() => {
                 self.pending = Some(Confirm::RegenerateConfig);
@@ -3765,6 +3785,7 @@ impl App {
             Confirm::Change(change) => self.send_change(change),
             Confirm::StopCore => self.stop_core(),
             Confirm::RegenerateConfig => self.regenerate_config(),
+            Confirm::AuthorizeTun => self.begin_authorization(),
             Confirm::UpdateSubscriptions { ids, .. } => self.update_subscriptions(ids),
             Confirm::DeleteSubscription { id, .. } => self.delete_subscription(id),
             Confirm::InstallCore { release, upgrade } => {
@@ -9921,5 +9942,297 @@ secret = "b-secret"
         select(&mut app, Setting::Port(Port::Http));
         key_press(&mut app, KeyCode::Enter);
         assert!(app.settings_view.editing.is_some());
+    }
+
+    /// A machine whose kernel answers on `port`, and whose `getcap` says it
+    /// may manage the network once `setcap` ran: through `pkexec` (which
+    /// exits `pkexec`) or `sudo` (`sudo`); either has to exit 0 for that.
+    /// `capable` is whether it already may.
+    fn tun_machine(
+        port: u16,
+        pkexec: i32,
+        sudo: i32,
+        capable: Arc<std::sync::atomic::AtomicBool>,
+    ) -> Arc<testing::Recorder> {
+        use std::sync::atomic::Ordering;
+        testing::serve(port, testing::Reply::Mihomo, Duration::ZERO);
+        testing::Recorder::new(move |cmd| match cmd.program.as_str() {
+            "getcap" if capable.load(Ordering::SeqCst) => {
+                testing::answer(0, "/x cap_net_admin,cap_net_bind_service=ep\n")
+            }
+            "pkexec" | "sudo" => {
+                let code = if cmd.program == "pkexec" {
+                    pkexec
+                } else {
+                    sudo
+                };
+                if code == 0 {
+                    capable.store(true, Ordering::SeqCst);
+                }
+                testing::answer(code, "")
+            }
+            "systemctl" if cmd.args.get(1).map(String::as_str) == Some("is-active") => {
+                testing::answer(0, "active\n")
+            }
+            _ => testing::answer(0, ""),
+        })
+    }
+
+    /// The managed settings page of `core`, on the TUN row.
+    async fn on_tun_row(core: &Arc<ManagedCore>) -> (App, mpsc::Receiver<Envelope>) {
+        let (mut app, mut rx) = managed_settings_on(Arc::clone(core), Setting::Tun).await;
+        // What `getcap` said at the start is in.
+        pump_until(&mut app, &mut rx, |app| app.tun_authorized.is_some()).await;
+        (app, rx)
+    }
+
+    #[tokio::test]
+    async fn tun_asks_for_the_capabilities_first_and_is_turned_on_once_the_kernel_has_them() {
+        use std::sync::atomic::AtomicBool;
+        let dir = testing::scratch("app-tun-auth");
+        let port = testing::free_port();
+        let recorder = tun_machine(port, 0, 1, Arc::new(AtomicBool::new(false)));
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = on_tun_row(&core).await;
+        assert_eq!(app.tun_authorized, Some(false));
+        let before = testing::requests_to(port).len();
+
+        key_press(&mut app, KeyCode::Enter);
+        let screen = draw(&app);
+        assert!(screen.contains("开启 TUN 需要授权"), "{screen}");
+        assert!(
+            screen.contains("CAP_NET_ADMIN 和 CAP_NET_BIND_SERVICE"),
+            "{screen}"
+        );
+        // Nothing is asked of the system before the answer.
+        assert_eq!(recorder.runs("pkexec"), Vec::<String>::new());
+
+        key_press(&mut app, KeyCode::Char('y'));
+        assert!(app.is_changing(Setting::Tun));
+        requested(&mut app, &mut rx, port, |requests| {
+            requests[before..]
+                .iter()
+                .any(|request| request.starts_with("PATCH /configs"))
+        })
+        .await;
+
+        // The capability was set on the kernel alone, through the desktop's
+        // dialog; the kernel was started again to have it, and TUN is on.
+        assert_eq!(
+            recorder.runs("pkexec"),
+            [format!(
+                "/usr/bin/setcap cap_net_admin,cap_net_bind_service=+ep {}",
+                dir.join("mihomo").display()
+            )]
+        );
+        assert_eq!(recorder.runs("sudo"), Vec::<String>::new());
+        assert_eq!(
+            recorder.runs("systemctl").last().unwrap(),
+            &format!("--user restart {}", testing::UNIT)
+        );
+        assert_eq!(app.tun_authorized, Some(true));
+        pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::Tun)).await;
+        assert!(
+            settings_toml(&dir).contains("enable = true"),
+            "{}",
+            settings_toml(&dir)
+        );
+        assert!(app.take_suspend().is_none());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_kernel_that_may_already_manage_the_network_is_only_asked_the_usual_question() {
+        use std::sync::atomic::AtomicBool;
+        let dir = testing::scratch("app-tun-authorized");
+        let port = testing::free_port();
+        let recorder = tun_machine(port, 0, 1, Arc::new(AtomicBool::new(true)));
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = on_tun_row(&core).await;
+        assert_eq!(app.tun_authorized, Some(true));
+
+        key_press(&mut app, KeyCode::Enter);
+        assert!(draw(&app).contains("开启 TUN？内核会接管本机流量"));
+        key_press(&mut app, KeyCode::Char('y'));
+        pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::Tun)).await;
+        assert_eq!(recorder.runs("pkexec"), Vec::<String>::new());
+        assert_eq!(
+            recorder
+                .runs("systemctl")
+                .iter()
+                .filter(|run| run.contains("restart"))
+                .count(),
+            0
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn saying_no_to_the_dialog_leaves_tun_off_and_the_kernel_alone() {
+        use std::sync::atomic::AtomicBool;
+        let dir = testing::scratch("app-tun-cancel");
+        let port = testing::free_port();
+        let recorder = tun_machine(port, 126, 1, Arc::new(AtomicBool::new(false)));
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = on_tun_row(&core).await;
+        let before = testing::requests_to(port).len();
+
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Char('y'));
+        pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::Tun)).await;
+
+        assert!(
+            toasted(&app, "已取消授权，TUN 保持关闭"),
+            "{:?}",
+            app.toasts
+        );
+        assert_eq!(recorder.runs("sudo"), Vec::<String>::new());
+        assert_eq!(
+            recorder
+                .runs("systemctl")
+                .iter()
+                .filter(|run| run.contains("restart"))
+                .count(),
+            0
+        );
+        assert!(
+            testing::requests_to(port)[before..]
+                .iter()
+                .all(|request| !request.starts_with("PATCH"))
+        );
+        assert!(app.take_suspend().is_none());
+        assert!(!settings_toml(&dir).contains("enable = true"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn without_a_polkit_agent_the_terminal_is_asked_for_and_what_sudo_says_decides() {
+        use std::sync::atomic::AtomicBool;
+        for (sudo, ok) in [(0, true), (1, false)] {
+            let dir = testing::scratch("app-tun-sudo");
+            let port = testing::free_port();
+            // 127: pkexec found no one to ask.
+            let recorder = tun_machine(port, 127, sudo, Arc::new(AtomicBool::new(false)));
+            let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+            let (mut app, mut rx) = on_tun_row(&core).await;
+            let before = testing::requests_to(port).len();
+
+            key_press(&mut app, KeyCode::Enter);
+            key_press(&mut app, KeyCode::Char('y'));
+            pump_until(&mut app, &mut rx, |app| app.suspend.is_some()).await;
+
+            // The main loop is asked for the terminal; until it has run `sudo`
+            // nothing else happens.
+            let lent = app.take_suspend().expect("the terminal is asked for");
+            assert_eq!(recorder.runs("sudo"), Vec::<String>::new());
+            let result = lent.authorize_terminal().await;
+            assert_eq!(
+                recorder.runs("sudo"),
+                [format!(
+                    "setcap cap_net_admin,cap_net_bind_service=+ep {}",
+                    dir.join("mihomo").display()
+                )]
+            );
+            app.finish_terminal(result);
+            if ok {
+                requested(&mut app, &mut rx, port, |requests| {
+                    requests[before..]
+                        .iter()
+                        .any(|request| request.starts_with("PATCH /configs"))
+                })
+                .await;
+                assert_eq!(app.tun_authorized, Some(true));
+            } else {
+                assert!(toasted(&app, "授权没有完成"), "{:?}", app.toasts);
+                assert!(!app.is_changing(Setting::Tun));
+                assert!(
+                    testing::requests_to(port)[before..]
+                        .iter()
+                        .all(|request| !request.starts_with("PATCH"))
+                );
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn a_kernel_that_lost_its_capabilities_starts_without_tun_and_says_to_authorize_again() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let dir = testing::scratch("app-tun-lost");
+        let port = testing::free_port();
+        let capable = Arc::new(AtomicBool::new(true));
+        let recorder = tun_machine(port, 0, 1, Arc::clone(&capable));
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        core.persist(crate::core::Persist::Tun(true)).unwrap();
+        let (mut app, mut rx) = managed_settings_on(Arc::clone(&core), Setting::Restart).await;
+        assert!(core.settings().tun.enable);
+
+        // The kernel is replaced (an upgrade, a package manager): no file
+        // capability on the new one. Then it is started again.
+        capable.store(false, Ordering::SeqCst);
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Char('y'));
+        pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::Restart)).await;
+
+        assert!(
+            toasted(&app, "内核已更新，TUN 需要重新授权"),
+            "{:?}",
+            app.toasts
+        );
+        assert!(!core.settings().tun.enable);
+        assert!(settings_toml(&dir).contains("enable = false"));
+        let config = std::fs::read_to_string(dir.join("core/home/config.yaml")).unwrap();
+        assert!(config.contains("\"enable\":false"), "{config}");
+        pump_until(&mut app, &mut rx, |app| app.tun_authorized == Some(false)).await;
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_kernel_on_a_nosuid_mount_is_told_so_before_anything_is_asked() {
+        use std::sync::atomic::AtomicBool;
+        let dir = testing::scratch("app-tun-nosuid");
+        let port = testing::free_port();
+        let recorder = tun_machine(port, 0, 0, Arc::new(AtomicBool::new(false)));
+        let core = Arc::new(testing::core_on_nosuid_mount(&dir, port, &recorder));
+        let (mut app, _rx) = on_tun_row(&core).await;
+
+        key_press(&mut app, KeyCode::Enter);
+
+        assert!(app.pending.is_none() && app.overlay.is_none());
+        assert!(
+            toasted(
+                &app,
+                "以 nosuid 挂载，无法授权，请在 [core].binary 指定其他位置"
+            ),
+            "{:?}",
+            app.toasts
+        );
+        assert_eq!(recorder.runs("pkexec"), Vec::<String>::new());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_toast_too_long_for_a_line_goes_over_more_and_ends_in_an_ellipsis_past_three() {
+        let (mut app, _rx) = app_without_controller();
+        app.toast(
+            ToastKind::Error,
+            "内核所在分区（/tmp）以 nosuid 挂载，无法授权，请在 [core].binary 指定其他位置"
+                .to_owned(),
+        );
+        let screen = draw(&app);
+        assert!(
+            screen.contains("[core].binary") && screen.contains("其他位置"),
+            "{screen}"
+        );
+
+        app.toasts.clear();
+        app.toast(ToastKind::Error, "很长的话".repeat(60));
+        let screen = draw(&app);
+        let rows = screen
+            .lines()
+            .filter(|line| line.contains("很长的话"))
+            .count();
+        assert_eq!(rows, 3, "{screen}");
+        assert!(screen.contains('…'), "{screen}");
     }
 }

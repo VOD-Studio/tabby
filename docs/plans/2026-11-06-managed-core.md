@@ -355,6 +355,13 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
 5. `feat(core): authorize tun with setcap`
    - 范围：§8。
    - 验收（实测前征得用户同意）：没有 polkit agent 时走到 sudo，输入密码后 TUN 开启，`ip link` 能看到 TUN 设备，经它访问正常；取消（126）时 TUN 保持关闭；替换二进制后自动关掉 TUN 并提示；nosuid 分区上提前报错。同时确认 R9。
+   - 实现记录（2026-11-06）：
+     - `src/core/privilege.rs`：`ManagedCore::{tun_authorized, nosuid_mount, authorize_graphical, authorize_terminal, finish_authorization, take_tun_dropped}`。命令固定为 `pkexec /usr/bin/setcap cap_net_admin,cap_net_bind_service=+ep <bin>` 与 `sudo setcap …`（参数有测试）；退出码 0 继续、126 取消、127 或没有 `pkexec` 走终端，其余按 `setcap` 的失败报 stderr。`Runner` 增加 `run_interactive`（继承终端的 stdio）。授权后要 `getcap` 确认能力真的在，再 `restart`（文件能力在 `execve` 时生效），然后才 `PATCH {"tun":{"enable":true}}`，随后走原来的“修改后写进 `settings.toml`”。
+     - nosuid：读 `/proc/self/mountinfo`（解 `\040` 之类的八进制转义），取包含二进制的最内层挂载，同一路径取后挂的；`nosuid` 时在弹确认框之前就 toast `内核所在分区（…）以 nosuid 挂载，无法授权，请在 [core].binary 指定其他位置`。这台机器上 `/tmp` 和 `/run/media/xfy/Plextor512` 都是 nosuid。
+     - 终端交接在 `src/event.rs`：`App` 只记下“要终端”（`take_suspend`），主循环在两轮之间丢掉 `EventStream`（否则它会和 sudo 抢键盘），`ratatui::restore()`、关鼠标，在普通屏幕上打一行提示并运行 `sudo`，结束后 `ratatui::init()`、开鼠标、`clear` 并重置 `Shadow`，再 `App::finish_terminal`。
+     - 丢失能力（R2）：每次写 `config.yaml`（启动、重启、升级后重启）前，若 `settings.toml` 里 TUN 是开的而 `getcap` 看不到 `cap_net_admin`，就把它关掉并写回，`take_tun_dropped` 让界面弹一次 `内核已更新，TUN 需要重新授权`。授权状态（`App.tun_authorized`）在连上、重启、升级后重新查。
+     - 附带改动：toast 原来一行、最宽 50 列，超出被截断（上面的 nosuid 提示和订阅更新失败的原因都被截掉了），现在按宽度折行，最多 3 行，再多以 `…` 结尾。
+     - 手动验证（没有动真实的权限和路由）：(a) nosuid：二进制在 `/tmp`（nosuid）时，设置页 TUN 行按 `Enter` 直接弹出 nosuid 提示，没有对话框；(b) 终端交接：用 `PATH` 里的假 `pkexec`（退出码 127）、假 `sudo`（读一行再 `touch` 标记）、假 `getcap`，确认框 `y` 之后屏幕切回普通终端并显示提示与假 sudo 的口令提示，输入的字符进了 sudo 而不是 tabby，回车后界面恢复，内核被重启，`PATCH tun.enable` 发出（无权限的 mihomo 随后报 `operation not permitted`，符合预期）。**没有验证**：真实的 `pkexec` / `sudo` / `setcap`、TUN 设备出现与经它访问、取消（126）在真实 polkit 上的表现、R9（文件能力在 `systemd --user` 单元里是否生效）；这几项要改动本机路由或需要口令，按方案要先征得用户同意，等用户确认后再做。
 6. `feat(subscriptions): auto-update subscriptions`
    - 范围：§7.1 的自动更新，订阅页的开关和间隔显示。
    - 验收：用 `start_paused` 的时钟测到期判断；实测把间隔改成 1 分钟，本地 http server 收到请求，当前订阅更新后配置被重载。

@@ -53,6 +53,7 @@ pub fn core_title(err: &CoreError) -> String {
             Action::Stop => "无法停止内核",
             Action::Install => "无法安装内核",
             Action::Validate => "无法检查订阅",
+            Action::Authorize => "无法授权内核",
         }
         .to_owned(),
         CoreError::Release(_) => "无法获取内核版本".to_owned(),

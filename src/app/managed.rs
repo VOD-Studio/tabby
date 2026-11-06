@@ -8,7 +8,7 @@ use super::{
     App, Change, Confirm, Msg, Outbox, Overlay, Patch, Port, Reconnect, Setting, Stage, ToastKind,
 };
 use crate::{
-    core::{CoreError, ManagedCore, Persist, Release, Step, Upgrade},
+    core::{CoreError, Graphical, ManagedCore, Persist, Release, Step, Upgrade},
     ui::text::core_reason,
 };
 
@@ -51,6 +51,12 @@ pub enum CoreEvent {
     Upgraded(Result<String, CoreError>),
     /// The config file was made again, for `重载配置`.
     Regenerated(Result<(), CoreError>),
+    /// Whether the kernel's file has the capabilities, as `getcap` says.
+    Authority(bool),
+    /// What asking for them through the desktop's dialog came to.
+    Setcap(Result<Graphical, CoreError>),
+    /// The capabilities are set and the kernel started again, or not.
+    Authorized(Result<(), CoreError>),
 }
 
 /// A toast about what failed: `what`, then what the managed core said.
@@ -143,6 +149,8 @@ impl App {
                 self.start();
                 self.load_page(self.page);
                 self.load_subscriptions();
+                self.say_tun_dropped();
+                self.check_authority();
             }
             // Nothing downloaded yet: look up what there is to download, and
             // ask before downloading it.
@@ -178,6 +186,9 @@ impl App {
                     }
                 }
             }
+            CoreEvent::Authority(_) | CoreEvent::Setcap(_) | CoreEvent::Authorized(_) => {
+                self.on_authorization(event);
+            }
             CoreEvent::Regenerated(Ok(())) => {
                 // The reload itself is the one every other kernel has.
                 self.changing.remove(&Setting::Reload);
@@ -192,6 +203,9 @@ impl App {
                 match result {
                     Ok(tag) => {
                         self.toast(ToastKind::Success, format!("已升级到 {tag}，内核已重启"));
+                        // The new file has no capabilities.
+                        self.say_tun_dropped();
+                        self.check_authority();
                     }
                     Err(err) => {
                         let reason = core_reason(&err);
@@ -199,6 +213,16 @@ impl App {
                     }
                 }
             }
+            CoreEvent::Stopped(_) | CoreEvent::Restarted(_) | CoreEvent::Alive(_) => {
+                self.on_process(event);
+            }
+        }
+    }
+
+    /// What became of the kernel's process: stopped, started again, or gone
+    /// without being asked.
+    fn on_process(&mut self, event: CoreEvent) {
+        match event {
             CoreEvent::Stopped(result) => {
                 self.changing.remove(&Setting::StopCore);
                 match result {
@@ -225,6 +249,8 @@ impl App {
                         self.toast(ToastKind::Error, format!("重启失败：{reason}"));
                     }
                 }
+                self.say_tun_dropped();
+                self.check_authority();
             }
             CoreEvent::Alive(alive) => {
                 if !alive && let Some(reconnect) = &mut self.reconnect {
@@ -235,6 +261,7 @@ impl App {
                     };
                 }
             }
+            _ => {}
         }
     }
 
@@ -256,6 +283,119 @@ impl App {
         }
         self.spawn_core(|core, _| async move { CoreEvent::Restarted(core.restart().await) });
         true
+    }
+
+    /// `开启 TUN` on a managed core: the kernel needs the capabilities
+    /// first, which asks the user (plan §8). A kernel on a `nosuid`
+    /// mount cannot have them, which is said before anything is asked.
+    pub(super) fn ask_enable_tun(&mut self, change: Change) {
+        let Some(core) = self.managed_core() else {
+            return;
+        };
+        let authorized = self.tun_authorized == Some(true);
+        if !authorized && let Some(mount) = core.nosuid_mount() {
+            self.toast(
+                ToastKind::Error,
+                format!(
+                    "内核所在分区（{}）以 nosuid 挂载，无法授权，请在 [core].binary 指定其他位置",
+                    mount.display()
+                ),
+            );
+            return;
+        }
+        self.pending = Some(if authorized {
+            Confirm::Change(change)
+        } else {
+            Confirm::AuthorizeTun
+        });
+        self.overlay = Some(Overlay::Confirm);
+        self.dirty = true;
+    }
+
+    /// `y` to the question about the capabilities: asks for them through the
+    /// desktop's dialog first.
+    pub(super) fn begin_authorization(&mut self) {
+        if self.changing.contains_key(&Setting::Tun) {
+            return;
+        }
+        self.changing.insert(Setting::Tun, Stage::Sending);
+        self.dirty = true;
+        self.spawn_core(
+            |core, _| async move { CoreEvent::Setcap(core.authorize_graphical().await) },
+        );
+    }
+
+    /// The capabilities are set: the kernel starts again to have them.
+    fn finish_authorization(&mut self) {
+        self.spawn_core(|core, _| async move {
+            CoreEvent::Authorized(core.finish_authorization().await)
+        });
+    }
+
+    /// The managed core, when `sudo` has to be asked on the terminal: the
+    /// main loop gives the terminal back, runs it, and reports with
+    /// [`App::finish_terminal`].
+    pub fn take_suspend(&mut self) -> Option<Arc<ManagedCore>> {
+        self.suspend.take()
+    }
+
+    /// What the terminal run of `sudo` came to.
+    pub fn finish_terminal(&mut self, result: Result<bool, CoreError>) {
+        self.dirty = true;
+        match result {
+            Ok(true) => self.finish_authorization(),
+            Ok(false) => {
+                self.changing.remove(&Setting::Tun);
+                self.toast(ToastKind::Error, "授权没有完成，TUN 保持关闭".to_owned());
+            }
+            Err(err) => {
+                self.changing.remove(&Setting::Tun);
+                self.toast(ToastKind::Error, failure("授权失败", &err));
+            }
+        }
+    }
+
+    /// What came of the capabilities TUN needs: what `getcap` says, what
+    /// the dialog of the desktop (or `sudo`) did, and the restart after it.
+    fn on_authorization(&mut self, event: CoreEvent) {
+        match event {
+            CoreEvent::Authority(authorized) => self.tun_authorized = Some(authorized),
+            CoreEvent::Setcap(Ok(Graphical::Done)) => self.finish_authorization(),
+            CoreEvent::Setcap(Ok(Graphical::Cancelled)) => {
+                self.changing.remove(&Setting::Tun);
+                self.toast(ToastKind::Error, "已取消授权，TUN 保持关闭".to_owned());
+            }
+            // Nobody to ask on the desktop (no polkit agent, as on a tiling
+            // window manager): `sudo`, on the terminal.
+            CoreEvent::Setcap(Ok(Graphical::NeedsTerminal)) => self.suspend = self.managed_core(),
+            CoreEvent::Authorized(Ok(())) => {
+                self.tun_authorized = Some(true);
+                self.changing.remove(&Setting::Tun);
+                // The kernel runs with the capabilities: TUN can be turned on.
+                self.send_change(Change::Patch(Patch::Tun(true)));
+            }
+            CoreEvent::Setcap(Err(err)) | CoreEvent::Authorized(Err(err)) => {
+                self.changing.remove(&Setting::Tun);
+                self.toast(ToastKind::Error, failure("授权失败", &err));
+            }
+            _ => {}
+        }
+    }
+
+    /// Asks the kernel's file what it may do.
+    pub(super) fn check_authority(&self) {
+        self.spawn_core(|core, _| async move { CoreEvent::Authority(core.tun_authorized().await) });
+    }
+
+    /// Says that TUN was turned off because the kernel lost its
+    /// capabilities (plan §8, R2).
+    fn say_tun_dropped(&mut self) {
+        if self
+            .managed_core()
+            .is_some_and(|core| core.take_tun_dropped())
+        {
+            self.toast(ToastKind::Error, "内核已更新，TUN 需要重新授权".to_owned());
+        }
     }
 
     /// What a managed kernel is changed to, written down for its next

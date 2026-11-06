@@ -1,6 +1,6 @@
 use std::{
     io,
-    process::{Command, Output, Stdio},
+    process::{Command, ExitStatus, Output, Stdio},
 };
 
 /// One external command: a program and its arguments.
@@ -29,6 +29,10 @@ impl Cmd {
 pub trait Runner: Send + Sync + std::fmt::Debug {
     /// Runs `cmd` to its end with stdin closed and its output captured.
     fn run(&self, cmd: &Cmd) -> io::Result<Output>;
+
+    /// Runs `cmd` to its end on the terminal tabby has given back: its
+    /// input and output are the user's, for a password prompt.
+    fn run_interactive(&self, cmd: &Cmd) -> io::Result<ExitStatus>;
 }
 
 /// Runs the programs for real.
@@ -41,5 +45,9 @@ impl Runner for System {
             .args(&cmd.args)
             .stdin(Stdio::null())
             .output()
+    }
+
+    fn run_interactive(&self, cmd: &Cmd) -> io::Result<ExitStatus> {
+        Command::new(&cmd.program).args(&cmd.args).status()
     }
 }

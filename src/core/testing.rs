@@ -46,6 +46,8 @@ pub(crate) type Script = Box<dyn Fn(&Cmd) -> Output + Send + Sync>;
 pub(crate) struct Recorder {
     calls: Mutex<Vec<Cmd>>,
     script: Script,
+    /// Programs this machine does not have.
+    missing: Mutex<Vec<String>>,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -57,7 +59,14 @@ impl std::fmt::Debug for Recorder {
 impl Runner for Arc<Recorder> {
     fn run(&self, cmd: &Cmd) -> io::Result<Output> {
         self.calls.lock().unwrap().push(cmd.clone());
+        if self.missing.lock().unwrap().contains(&cmd.program) {
+            return Err(io::Error::from(io::ErrorKind::NotFound));
+        }
         Ok((self.script)(cmd))
+    }
+
+    fn run_interactive(&self, cmd: &Cmd) -> io::Result<ExitStatus> {
+        self.run(cmd).map(|output| output.status)
     }
 }
 
@@ -66,7 +75,14 @@ impl Recorder {
         Arc::new(Self {
             calls: Mutex::new(vec![]),
             script: Box::new(script),
+            missing: Mutex::new(vec![]),
         })
+    }
+
+    /// This machine does not have `program`: running it is not found.
+    pub(crate) fn without(self: Arc<Self>, program: &str) -> Arc<Self> {
+        self.missing.lock().unwrap().push(program.to_owned());
+        self
     }
 
     pub(crate) fn calls(&self) -> Vec<Cmd> {
@@ -93,6 +109,17 @@ pub(crate) fn core_at(
     systemd: bool,
 ) -> ManagedCore {
     core_in(dir, port, recorder, systemd, true)
+}
+
+/// Like [`core_at`], on a machine where `dir` is on a `nosuid` mount.
+pub(crate) fn core_on_nosuid_mount(dir: &Path, port: u16, recorder: &Arc<Recorder>) -> ManagedCore {
+    let core = core_at(dir, port, recorder, true);
+    let line = format!(
+        "40 1 8:1 / {} rw,nosuid,nodev - ext4 /dev/sda1 rw\n",
+        dir.display()
+    );
+    fs::write(dir.join("mountinfo"), line).unwrap();
+    core
 }
 
 /// Like [`core_at`], but with no `[core].binary`: the kernel is the one
@@ -133,6 +160,8 @@ fn core_in(
         Some(runtime),
     )
     .unwrap();
+    // The mounts of the machine the tests run on are not what they are about.
+    core.mountinfo = dir.join("mountinfo");
     core.timing = Timing {
         ready: Duration::from_secs(3),
         poll: Duration::from_millis(20),

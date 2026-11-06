@@ -6,6 +6,7 @@
 
 mod files;
 mod install;
+mod privilege;
 mod profiles;
 mod runner;
 mod runtime;
@@ -17,7 +18,7 @@ mod supervisor;
 use std::{
     env, io,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex, PoisonError},
+    sync::{Arc, Mutex, PoisonError, atomic::AtomicBool},
     time::{Duration, Instant},
 };
 
@@ -27,6 +28,7 @@ use tokio::sync::OnceCell;
 use crate::api::{client::ApiClient, error::ApiError, models::CoreKind};
 use install::Target;
 pub use install::{Release, Upgrade};
+pub use privilege::Graphical;
 pub use profiles::Outcome;
 use runner::Runner;
 pub use runner::System;
@@ -111,6 +113,7 @@ pub enum Action {
     Stop,
     Install,
     Validate,
+    Authorize,
 }
 
 impl std::fmt::Display for Action {
@@ -121,6 +124,7 @@ impl std::fmt::Display for Action {
             Self::Install => "install the kernel",
             Self::Stop => "stop the kernel",
             Self::Validate => "check the subscription",
+            Self::Authorize => "authorize the kernel",
         })
     }
 }
@@ -231,6 +235,11 @@ pub struct ManagedCore {
     http: reqwest::Client,
     /// What the nodes of a share-link subscription are tested with.
     delay_url: String,
+    /// TUN was turned off for want of the capabilities, and nobody has been
+    /// told.
+    tun_dropped: AtomicBool,
+    /// Where the mounts are listed (`/proc/self/mountinfo`).
+    mountinfo: PathBuf,
 }
 
 impl ManagedCore {
@@ -283,6 +292,8 @@ impl ManagedCore {
                 .build()
                 .wrap_err("cannot build HTTP client")?,
             delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
+            tun_dropped: AtomicBool::new(false),
+            mountinfo: PathBuf::from("/proc/self/mountinfo"),
             timing: Timing {
                 ready: READY_TIMEOUT,
                 poll: READY_POLL,
@@ -385,6 +396,9 @@ impl ManagedCore {
     }
 
     fn write_config(&self) -> Result<(), CoreError> {
+        // A kernel without the capabilities cannot run a TUN, whatever the
+        // settings say.
+        self.drop_tun_without_authority();
         self.write_config_for(&self.subscriptions()?)
     }
 
