@@ -139,11 +139,15 @@ pub enum Fetching {
 pub struct Transfer {
     /// Which try it is, from 1.
     pub attempt: u32,
+    /// The server answered this try.
+    pub answered: bool,
     pub received: u64,
     pub total: Option<u64>,
-    /// When this try said how far it was, and what it said: those of the
-    /// last [`RATE_WINDOW`], and the one before them, where the window
-    /// starts.
+    /// Every byte came; the kernel is checking it.
+    pub done: bool,
+    /// When this try said how far it was since the server answered, and
+    /// what it said: those of the last [`RATE_WINDOW`], and the one before
+    /// them, where the window starts.
     samples: VecDeque<(Instant, u64)>,
 }
 
@@ -151,8 +155,10 @@ impl Transfer {
     fn new(progress: Progress, now: Instant) -> Self {
         let mut transfer = Self {
             attempt: progress.attempt,
+            answered: false,
             received: 0,
             total: None,
+            done: false,
             samples: VecDeque::new(),
         };
         transfer.record(progress, now);
@@ -160,14 +166,20 @@ impl Transfer {
     }
 
     /// Takes in what the download said at `now`. Another try starts the
-    /// count again.
+    /// count again; the wait for an answer does not count toward the
+    /// speed.
     fn record(&mut self, progress: Progress, now: Instant) {
         if progress.attempt != self.attempt {
             self.samples.clear();
         }
         self.attempt = progress.attempt;
+        self.answered = progress.answered;
         self.received = progress.received;
         self.total = progress.total;
+        self.done = progress.done;
+        if !progress.answered {
+            return;
+        }
         self.samples.push_back((now, progress.received));
         let start = now.checked_sub(RATE_WINDOW);
         while self
@@ -180,8 +192,12 @@ impl Transfer {
     }
 
     /// Bytes a second over the last [`RATE_WINDOW`] as of `now`; falls to 0
-    /// while nothing comes. `None` until the try has run [`RATE_MIN`].
+    /// while nothing comes. `None` until the try has run [`RATE_MIN`] since
+    /// the server answered, and once every byte came.
     pub fn rate(&self, now: Instant) -> Option<u64> {
+        if self.done {
+            return None;
+        }
         let start = now.checked_sub(RATE_WINDOW);
         let first = *self.samples.front()?;
         // What had come when the window starts: the last report before
@@ -875,8 +891,10 @@ mod tests {
     fn said(attempt: u32, received: u64) -> Progress {
         Progress {
             attempt,
+            answered: true,
             received,
             total: None,
+            done: false,
         }
     }
 
@@ -884,7 +902,17 @@ mod tests {
     fn the_speed_is_what_came_over_the_last_two_seconds_and_falls_to_nothing_in_a_stall() {
         let start = Instant::now();
         let at = |millis| start + Duration::from_millis(millis);
-        let mut transfer = Transfer::new(said(1, 0), at(0));
+        // Asked; the server takes three seconds to answer, which is not a
+        // speed of nothing.
+        let asked = Progress {
+            answered: false,
+            ..said(1, 0)
+        };
+        let mut transfer = Transfer::new(asked, at(0));
+        assert_eq!(transfer.rate(at(3_000)), None);
+        let at = |millis: u64| start + Duration::from_millis(3_000 + millis);
+        transfer.record(said(1, 0), at(0));
+        assert!(transfer.answered);
         // Too early to say.
         transfer.record(said(1, 4_000), at(300));
         assert_eq!(transfer.rate(at(300)), None);

@@ -9857,17 +9857,19 @@ secret = "b-secret"
         let (mut app, _rx, dir, _) = subscriptions_app("subs-progress", &server).await;
         let id = app.subscriptions_view.selected().unwrap().id.clone();
         app.subscriptions_view.busy.insert(id.clone());
-        let progress = |attempt, received| {
+        let progress = |attempt, received, done| {
             Msg::Subscription(SubEvent::Progress {
                 fetching: Fetching::Subscription(id.clone()),
                 progress: crate::core::Progress {
                     attempt,
+                    answered: true,
                     received,
                     total: Some(16 * 1024),
+                    done,
                 },
             })
         };
-        app.handle_msg(progress(1, 8 * 1024));
+        app.handle_msg(progress(1, 8 * 1024, false));
         let row = |app: &App| {
             draw(app)
                 .lines()
@@ -9877,9 +9879,16 @@ secret = "b-secret"
         };
         assert!(row(&app).contains("8.0 KB/16.0 KB"), "{}", row(&app));
         // A second try says so.
-        app.handle_msg(progress(2, 1024));
+        app.handle_msg(progress(2, 1024, false));
         assert!(
             row(&app).contains("第 2 次 · 1.0 KB/16.0 KB"),
+            "{}",
+            row(&app)
+        );
+        // All there: the kernel checks it now.
+        app.handle_msg(progress(2, 16 * 1024, true));
+        assert!(
+            row(&app).contains("第 2 次 · 16.0 KB · 检查中…"),
             "{}",
             row(&app)
         );

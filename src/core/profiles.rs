@@ -46,10 +46,14 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 pub struct Progress {
     /// Which try this is, from 1.
     pub attempt: u32,
+    /// The server answered: what is received is the subscription.
+    pub answered: bool,
     /// Bytes of the subscription received in this try.
     pub received: u64,
     /// Bytes the server said it would send, when it did.
     pub total: Option<u64>,
+    /// Every byte came: what follows is the check, not the download.
+    pub done: bool,
 }
 
 /// What an operation on the subscriptions did.
@@ -172,10 +176,11 @@ impl ManagedCore {
                 Err(Failed::Again(err) | Failed::ForGood(err)) => break err,
             }
         };
-        // What failed through a proxy may be the proxy: it says which.
+        // What failed through a proxy may be the proxy: it says which,
+        // first, where a toast too short for the rest still shows it.
         Err(match err {
             CoreError::Fetch(message) if via != "direct" => {
-                CoreError::Fetch(format!("{message} ({via})"))
+                CoreError::Fetch(format!("{via}: {message}"))
             }
             other => other,
         })
@@ -194,8 +199,10 @@ impl ManagedCore {
     ) -> Result<Fetched, Failed> {
         let mut report = Progress {
             attempt,
+            answered: false,
             received: 0,
             total: None,
+            done: false,
         };
         progress(report);
         let idle = self.timing.fetch_idle;
@@ -234,6 +241,7 @@ impl ManagedCore {
         };
         let name = header("content-disposition").and_then(|value| parse_filename(&value));
         let usage = header("subscription-userinfo").and_then(|value| parse_usage(&value));
+        report.answered = true;
         report.total = response.content_length();
         progress(report);
         let mut bytes = Vec::new();
@@ -250,6 +258,9 @@ impl ManagedCore {
                 reported = Instant::now();
             }
         }
+        report.received = bytes.len() as u64;
+        report.done = true;
+        progress(report);
         Ok(Fetched { bytes, name, usage })
     }
 
@@ -853,8 +864,10 @@ mod tests {
             heard[0],
             Progress {
                 attempt: 1,
+                answered: false,
                 received: 0,
-                total: None
+                total: None,
+                done: false,
             }
         );
         let received: Vec<u64> = heard.iter().map(|progress| progress.received).collect();
@@ -869,6 +882,15 @@ mod tests {
                 .all(|progress| progress.total == Some(SUB.len() as u64)),
             "{heard:?}"
         );
+        // The last says it is all there, and only the last.
+        let finished: Vec<bool> = heard.iter().map(|progress| progress.done).collect();
+        assert_eq!(
+            finished.iter().filter(|done| **done).count(),
+            1,
+            "{heard:?}"
+        );
+        assert_eq!(heard.last().unwrap().received, SUB.len() as u64);
+        assert!(heard.last().unwrap().done);
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -941,7 +963,7 @@ mod tests {
         let err = core.import_url(address, None, |_| {}).await.unwrap_err();
         assert!(
             matches!(&err, CoreError::Fetch(message)
-                if message.ends_with(&format!("(through socks5://127.0.0.1:{gone})"))
+                if message.starts_with(&format!("through socks5://127.0.0.1:{gone}: "))
                     && !message.contains("hunter2")),
             "{err:?}"
         );
@@ -972,7 +994,7 @@ mod tests {
             .into_inner()
             .unwrap()
             .iter()
-            .filter(|progress| progress.received == 0 && progress.total.is_none())
+            .filter(|progress| !progress.answered)
             .map(|progress| progress.attempt)
             .collect();
         assert_eq!(starts, [1, 2, 3]);

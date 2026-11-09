@@ -255,11 +255,14 @@ fn row_line(
 }
 
 /// How far a download is, as of `now`: `32.1 KB/63.5 KB · 12.3 KB/s`, the
-/// size when the server said it, the speed once there is one, and which
-/// try it is from the second on.
+/// size when the server said it, the speed once there is one; `连接中…`
+/// until the server answers, `检查中…` once it all came; and which try
+/// it is from the second on.
 fn transfer_text(transfer: &Transfer, now: Instant) -> String {
     let (number, unit) = format::bytes(transfer.received);
     let mut text = match transfer.total {
+        _ if !transfer.answered => "连接中…".to_owned(),
+        _ if transfer.done => format!("{number} {unit} · 检查中…"),
         Some(total) if total >= transfer.received => {
             let (whole, whole_unit) = format::bytes(total);
             format!("{number} {unit}/{whole} {whole_unit}")
