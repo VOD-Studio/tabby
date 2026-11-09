@@ -41,9 +41,11 @@ Enter 选组   t 测速   T 整组测速   s 排序   / 过滤   …   ? 帮助 
 
 ## 安装
 
-**发布包**（Linux x86_64）：`tabby-<版本>-<平台>.tar.gz` 只有 tabby；`tabby-<版本>-<平台>-with-mihomo.tar.gz` 另带一个固定版本的 mihomo（`lib/tabby/mihomo`），托管内核不需要再下载。两种包的目录结构都和安装前缀一致，解压到 `~/.local` 或 `/usr/local`：
+**发布包**（Linux x86_64、aarch64，glibc 2.35 或更新，即 Ubuntu 22.04 / Debian 12 起）：在 [Releases](https://github.com/VOD-Studio/tabby/releases) 下载。`tabby-<版本>-<平台>.tar.gz` 只有 tabby；`tabby-<版本>-<平台>-with-mihomo.tar.gz` 另带一个固定版本的 mihomo（`lib/tabby/mihomo`），托管内核不需要再下载。两种包的目录结构都和安装前缀一致，解压到 `~/.local` 或 `/usr/local`：
 
 ```sh
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify tabby-*-x86_64-unknown-linux-gnu-with-mihomo.tar.gz --repo VOD-Studio/tabby   # 可选：确认由本仓库的 CI 构建
 tar -xzf tabby-*-x86_64-unknown-linux-gnu-with-mihomo.tar.gz -C ~/.local --strip-components=1
 # 得到 ~/.local/bin/tabby、~/.local/lib/tabby/mihomo、~/.local/share/licenses/tabby/…
 ```
@@ -301,7 +303,9 @@ XDG_CONFIG_HOME="$(mktemp -d)" cargo test
 
 发布包由 `make dist`（`scripts/dist.sh [<目标三元组>]`）生成到 `dist/`：两种 `tar.gz`、mihomo 的源码包 `mihomo-<tag>-source.tar.gz` 和 `SHA256SUMS`。随包的 mihomo 版本和两种架构的 sha256 固定在 `packaging/mihomo.env`，下载后不符就失败；amd64 用 `v1` 构建，任何 x86-64 CPU 都能运行（有新版本时 `升级内核` 按 CPU 选 v3/v2/v1）。依赖的许可证由 `cargo-about`（`cargo install --locked --features cli cargo-about`）生成 `THIRD-PARTY-LICENSES`。在同一台机器上，同一个提交打出的包逐字节相同（文件时间取最后一次提交的时间）。
 
-版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)，只写在 `Cargo.toml` 里。发布用 `make cut-release VERSION=x.y.z`（`scripts/release.sh`，不带版本号时打印 git-cliff 根据提交推荐的版本）：工作区必须干净；依次跑 `make check`、改 `Cargo.toml` 与 `Cargo.lock` 的版本号、用 [git-cliff](https://git-cliff.org)（`cargo install --locked git-cliff`，配置在 `cliff.toml`）把这一版的条目加到 `CHANGELOG.md` 顶部、提交 `chore(release): vx.y.z`、打带注释的标签 `vx.y.z`，最后执行 `make dist`；不推送。`CHANGELOG.md` 由 Conventional Commits 生成：`feat` 进 Added，`fix` 进 Fixed，`perf` 和其他破坏性提交（`type!:`）进 Changed，其余类型不写进去；已有的段落可以手改，以后只会在顶部加新段。0.x 阶段破坏性变更与新功能升 minor，修复升 patch。`make dist` 在打了 `v<版本>` 标签的提交上只接受干净的工作区，标签与 `Cargo.toml` 不一致时拒绝打包；没有标签的提交照常打包，但会提示这是快照。
+版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)，只写在 `Cargo.toml` 里。发布用 `make cut-release VERSION=x.y.z`（`scripts/release.sh`，不带版本号时打印 git-cliff 根据提交推荐的版本）：工作区必须干净；依次跑 `make check`、改 `Cargo.toml` 与 `Cargo.lock` 的版本号、用 [git-cliff](https://git-cliff.org)（`cargo install --locked git-cliff`，配置在 `cliff.toml`）把这一版的条目加到 `CHANGELOG.md` 顶部、提交 `chore(release): vx.y.z`、打带注释的标签 `vx.y.z`；不推送，最后打印推送命令 `git push --atomic origin main vx.y.z`。推送标签后由 GitHub Actions（`.github/workflows/release.yml`）发布：在打标签的提交上再跑一遍检查，在 x86_64 与 aarch64 的 Ubuntu 22.04 上各执行一次 `make dist`，汇总成一份 `SHA256SUMS`，给 tabby 的包生成构建来源证明（`gh attestation verify`），再以 `CHANGELOG.md` 里这一版的段落为说明创建 Release（版本号带 `-` 的标为预发布）。`CHANGELOG.md` 由 Conventional Commits 生成：`feat` 进 Added，`fix` 进 Fixed，`perf` 和其他破坏性提交（`type!:`）进 Changed，其余类型不写进去；已有的段落可以手改，以后只会在顶部加新段。0.x 阶段破坏性变更与新功能升 minor，修复升 patch。`make dist` 在打了 `v<版本>` 标签的提交上只接受干净的工作区，标签与 `Cargo.toml` 不一致时拒绝打包；没有标签的提交照常打包，但会提示这是快照。
+
+持续集成：每次推送到 `main` 和每个 PR 都跑 `make fmt-check`、`make lint`、`make test`（x86_64 与 aarch64），并用 [zizmor](https://docs.zizmor.sh) 检查 `.github/` 下的工作流；依赖或其设置变化时和每天一次跑 `make audit`：[cargo-deny](https://github.com/EmbarkStudios/cargo-deny) 查 RustSec 安全公告与依赖来源（`deny.toml`），`cargo-about` 查许可证（`packaging/about.toml`）。Dependabot 每周提 actions 与依赖的更新，新版本发布满 7 天才会提。
 
 ## 许可证
 
