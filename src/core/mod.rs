@@ -87,10 +87,18 @@ impl Paths {
         self.root.join("settings.toml")
     }
 
-    /// The kernel tabby downloads.
+    /// The kernel tabby keeps: downloaded, or copied from the one shipped
+    /// with tabby.
     fn bin(&self) -> PathBuf {
         self.root.join("bin").join("mihomo")
     }
+
+    /// Which copy of the shipped kernel `bin` is, when it is one (see
+    /// [`ManagedCore::seed`]).
+    fn seeded(&self) -> PathBuf {
+        self.root.join("bin").join("mihomo.shipped")
+    }
+
     /// What the system proxy was before tabby pointed it at the kernel.
     fn system_proxy(&self) -> PathBuf {
         self.root.join("system-proxy.toml")
@@ -247,6 +255,9 @@ pub struct ManagedCore {
     /// `$PATH`, where a `mihomo` installed on the system is looked for when
     /// there is neither `[core].binary` nor a kernel tabby keeps.
     search_path: Option<OsString>,
+    /// Where the kernel shipped with tabby would be
+    /// (`<prefix>/lib/tabby/mihomo`).
+    shipped: Option<PathBuf>,
     state: State,
     /// What `settings.toml` says, and what is changed since.
     settings: Mutex<CoreSettings>,
@@ -287,6 +298,9 @@ impl ManagedCore {
         let mut core = Self::with(binary, data_dir, Arc::new(System), runtime_dir)?;
         delay_url.clone_into(&mut core.delay_url);
         core.search_path = env::var_os("PATH");
+        core.shipped = env::current_exe()
+            .ok()
+            .and_then(|exe| install::shipped_next_to(&exe));
         Ok(core)
     }
 
@@ -309,6 +323,7 @@ impl ManagedCore {
             paths,
             binary,
             search_path: None,
+            shipped: None,
             state,
             settings: Mutex::new(settings),
             client,
@@ -467,8 +482,9 @@ impl ManagedCore {
     }
 
     /// Makes sure the kernel runs and its controller answers: attaches to
-    /// one that is already there, else starts one (plan §5.2). `progress`
-    /// hears what it is doing.
+    /// one that is already there, else starts one (plan §5.2), copying in
+    /// the kernel shipped with tabby first. `progress` hears what it is
+    /// doing.
     pub async fn ensure_running(&self, progress: impl Fn(Step)) -> Result<(), CoreError> {
         match self.probe().await {
             Probe::Ready => return Ok(()),
@@ -480,6 +496,7 @@ impl ManagedCore {
             return self.wait_ready().await;
         }
         progress(Step::Starting);
+        self.seed().await?;
         let binary = self.binary()?;
         self.write_config()?;
         self.launch(&binary).await?;
@@ -488,8 +505,9 @@ impl ManagedCore {
     }
 
     /// Restarts the kernel on a freshly written config, and waits for its
-    /// controller.
+    /// controller. A kernel shipped with a newer tabby is copied in first.
     pub async fn restart(&self) -> Result<(), CoreError> {
+        self.seed().await?;
         let binary = self.binary()?;
         self.write_config()?;
         self.relaunch(&binary).await?;

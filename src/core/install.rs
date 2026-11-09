@@ -1,12 +1,13 @@
 //! Getting the kernel: the release to take, the file to download from it,
-//! and the replacement of the installed binary (plan §6).
+//! the replacement of the installed binary (plan §6), and the copy of the
+//! kernel shipped with tabby.
 
 use std::{
     fmt::Write as _,
     fs::{self, File},
     io::{self, Write},
-    path::Path,
-    time::Duration,
+    path::{Path, PathBuf},
+    time::{Duration, UNIX_EPOCH},
 };
 
 use flate2::read::GzDecoder;
@@ -71,6 +72,37 @@ pub(super) fn describe(err: &reqwest::Error) -> String {
         source = cause.source();
     }
     message
+}
+
+/// Where a release of tabby that ships a kernel puts it, given where tabby
+/// itself is: `<prefix>/lib/tabby/mihomo` for `<prefix>/bin/tabby`.
+pub fn shipped_next_to(exe: &Path) -> Option<PathBuf> {
+    Some(exe.parent()?.parent()?.join("lib/tabby/mihomo"))
+}
+
+/// What tells one copy of the shipped kernel from another without reading
+/// it: its size and when it was written. `None` when it is not a file.
+fn fingerprint(path: &Path) -> Option<String> {
+    let meta = fs::metadata(path).ok().filter(fs::Metadata::is_file)?;
+    let written = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+    Some(format!("{} {}", meta.len(), written.as_nanos()))
+}
+
+/// Copies `shipped` over `kept` in one step, through `kept.new`.
+fn copy_in(shipped: &Path, kept: &Path) -> io::Result<()> {
+    let dir = kept.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(dir)?;
+    let new = dir.join("mihomo.new");
+    let result = fs::copy(shipped, &new)
+        .and_then(|_| {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&new, fs::Permissions::from_mode(0o755))
+        })
+        .and_then(|()| fs::rename(&new, kept));
+    if result.is_err() {
+        let _ = fs::remove_file(&new);
+    }
+    result
 }
 
 /// The x86-64 microarchitecture level the CPU in `cpuinfo` (the text of
@@ -228,6 +260,43 @@ pub enum Upgrade {
 }
 
 impl ManagedCore {
+    /// Puts the kernel shipped with tabby where tabby keeps its own: tabby
+    /// can update that one and give it capabilities, which it cannot do to a
+    /// file of the installed package (and an update of the package would
+    /// take the capabilities away again).
+    ///
+    /// Done when there is no kernel there yet, and again when the shipped
+    /// one is another than the one copied (tabby was updated). A kernel
+    /// tabby downloaded is left alone, and so is `[core].binary`.
+    pub(super) async fn seed(&self) -> Result<(), CoreError> {
+        if self.binary.is_some() {
+            return Ok(());
+        }
+        let Some(shipped) = self.shipped.clone() else {
+            return Ok(());
+        };
+        let Some(mark) = fingerprint(&shipped) else {
+            return Ok(());
+        };
+        let (kept, record) = (self.paths.bin(), self.paths.seeded());
+        if kept.is_file() {
+            match fs::read_to_string(&record) {
+                Ok(copied) if copied == mark => return Ok(()),
+                Ok(_) => {}
+                // Not a copy of the shipped kernel: downloaded.
+                Err(_) => return Ok(()),
+            }
+        }
+        let into = kept.clone();
+        tokio::task::spawn_blocking(move || copy_in(&shipped, &into))
+            .await
+            .map_err(io::Error::other)
+            .and_then(std::convert::identity)
+            .map_err(|err| CoreError::io("cannot copy the kernel shipped with tabby", err))?;
+        fs::write(&record, mark)
+            .map_err(|err| CoreError::io("cannot note where the kernel came from", err))
+    }
+
     /// The ways to reach GitHub, in the order to try them: through the
     /// managed kernel's mixed port when it runs (GitHub cannot be reached
     /// without a proxy in some places), then directly. The controller's own
@@ -343,7 +412,11 @@ impl ManagedCore {
             .map_err(|err| CoreError::io("cannot unpack the kernel", err))?;
         self.verify(new, &release.tag).await?;
         fs::rename(new, self.paths.bin())
-            .map_err(|err| CoreError::io("cannot put the kernel in place", err))
+            .map_err(|err| CoreError::io("cannot put the kernel in place", err))?;
+        // A downloaded kernel is not a copy of the shipped one: an update of
+        // tabby does not put the shipped one back over it.
+        let _ = fs::remove_file(self.paths.seeded());
+        Ok(())
     }
 
     /// Runs `binary -v` and requires it to be the release `tag`: a file that
@@ -689,5 +762,88 @@ mod tests {
     /// older.
     fn core_older(dir: &Path, server: &MockServer) -> (ManagedCore, Arc<Recorder>) {
         core(dir, server, 0, "Mihomo Meta v1.2.2 linux amd64\n")
+    }
+
+    /// Ships a kernel of content `content` with the tabby whose core is in
+    /// `dir`.
+    fn ship(dir: &Path, content: &str) -> PathBuf {
+        let shipped = shipped_next_to(&dir.join("prefix/bin/tabby")).unwrap();
+        fs::create_dir_all(shipped.parent().unwrap()).unwrap();
+        fs::write(&shipped, content).unwrap();
+        shipped
+    }
+
+    #[tokio::test]
+    async fn the_shipped_kernel_is_copied_in_once_and_again_only_when_tabby_brings_another() {
+        let dir = scratch("seed");
+        let server = server(None, vec![]).await;
+        let (mut core, _) = core(&dir, &server, 0, SAYS_TAG);
+        core.shipped = Some(ship(&dir, "v1"));
+        let kept = dir.join("core/bin/mihomo");
+
+        core.seed().await.unwrap();
+
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "v1");
+        assert_eq!(
+            fs::metadata(&kept).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert_eq!(core.binary().unwrap(), kept);
+        assert!(!core.is_user_binary());
+
+        // The same shipped kernel again: the copy, which may have been given
+        // capabilities since, stays as it is.
+        fs::write(&kept, "authorized").unwrap();
+        core.seed().await.unwrap();
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "authorized");
+
+        // A newer tabby ships another one.
+        ship(&dir, "v2, a newer one");
+        core.seed().await.unwrap();
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "v2, a newer one");
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_downloaded_kernel_is_never_replaced_by_the_shipped_one() {
+        let dir = scratch("seed-downloaded");
+        let packed = gzip(KERNEL);
+        let server = server(Some(format!("sha256:{}", sha256(&packed))), packed).await;
+        let (mut core, _) = core(&dir, &server, 0, SAYS_TAG);
+
+        // Downloaded before tabby shipped any.
+        let kept = installed(&dir, "downloaded");
+        core.shipped = Some(ship(&dir, "v1"));
+        core.seed().await.unwrap();
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "downloaded");
+
+        // Downloaded over a copy of the shipped one.
+        fs::remove_file(&kept).unwrap();
+        core.seed().await.unwrap();
+        assert_eq!(fs::read_to_string(&kept).unwrap(), "v1");
+        let release = core.latest_release().await.unwrap();
+        core.install(&release, |_| {}).await.unwrap();
+        ship(&dir, "v2, a newer one");
+        core.seed().await.unwrap();
+
+        assert_eq!(fs::read(&kept).unwrap(), KERNEL);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_configured_kernel_leaves_the_shipped_one_unused() {
+        let dir = scratch("seed-configured");
+        let server = server(None, vec![]).await;
+        let (mut core, _) = core(&dir, &server, 0, SAYS_TAG);
+        core.shipped = Some(ship(&dir, "v1"));
+        let own = dir.join("own-mihomo");
+        fs::write(&own, "mine").unwrap();
+        core.binary = Some(own.clone());
+
+        core.seed().await.unwrap();
+
+        assert!(!dir.join("core/bin/mihomo").exists());
+        assert_eq!(core.binary().unwrap(), own);
+        fs::remove_dir_all(dir).unwrap();
     }
 }
