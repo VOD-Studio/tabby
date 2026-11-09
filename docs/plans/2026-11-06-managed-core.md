@@ -407,3 +407,27 @@ binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录�
       - AGENTS.md：项目概述改成八个页面并写明托管内核；数据流里加托管内核的一段（`ManagedCore`、`Runner`、`CoreEvent`/`SubEvent`、`lend_terminal`）；目录表加 `src/core/`、`src/app/`、`ui/subscriptions`；数据目录与 0600 约定；新增依赖；托管内核手动验证的规矩（临时 `XDG_*`、清理单元、不 `tmux kill-server`、`GSETTINGS_BACKEND=memory`、TUN 等先征得同意）；测试基线 391 passed, 1 ignored，以及 `core::testing` 的替身用法。
       - 本文件状态改为已完成，并在状态里列出没有验证的项：真实的 `pkexec` / `sudo setcap`、TUN 设备与路由（R8/R9，需要用户同意后才做）、GNOME / KDE 桌面本身、注销再登录。
       - 实施中偏离方案的地方，各项记录里都写了原因：`mihomo -t` 不打开 provider 文件，分享链接由 tabby 自己识别（第 3 项）；订阅的 ASCII 封装 age 文件也收（第 9 项）；改 Mixed 端口时系统代理跟着改（第 8 项）；`persist` 顺带重新生成 `config.yaml`（第 7 项）；到期判断不用 `start_paused`（第 6 项）。
+
+**M8 补全 M7 留下的界面项**
+
+M7 的两处“没有界面可改”：订阅的自动更新间隔和 age 私钥只能手改 `subscriptions.toml`，`settings.toml` 的 `[dns]` 只能手改文件、下次启动才生效。M8 把它们做成界面。范围由用户在 2026-11-09 选定，TUN 的真机验证不在其中。
+
+11. `feat(subscriptions): rename, set the interval and change the age key`
+    - 范围：订阅页 `e` 改名、`i` 改自动更新间隔、`K` 更换 age 私钥。
+    - 验收：改名与间隔写进 `subscriptions.toml` 且不碰任何订阅文件和 `config.yaml`；间隔只收数字，0 和超过 8760 的值留着输入框并提示；文件订阅按 `i` 提示它不自动更新；没有加密的订阅按 `K` 提示没有加密；新私钥打不开订阅时旧私钥和旧内容都保留，打得开才保存并（订阅在用时）让内核重载。
+    - 实现记录（2026-11-09）：
+      - 订阅页底栏原来有两个用途（过滤、导入）加一个导入时的私钥框，现在统一成 `SubscriptionsView.ask: Ask`（`Import`、`ImportKey(来源)`、`Name(id)`、`Interval(id)`、`Key(id)`），`Ask::prompt()` 给出提示符、按键说明、占位字和是否按密码显示（`Prompt`）；`App::subscription_prompt()` 取代 `adding_subscription` / `asking_age_key`，页脚只认它。`e` 与 `i` 打开时输入框里已经是现在的名字和间隔。
+      - `ManagedCore::{rename, set_interval, set_age_key}`。`set_age_key` 就是用给定私钥做一次 `update`（`update_with(id, Some(key))`）：私钥是否打得开用真实的下载和解密来回答，打不开时走与更新相同的失败路径，什么都不留下；这样不需要另写一套“试一试私钥”的逻辑。代价是每次更换私钥多一次网络请求。
+      - 改名只改列表里的名字：文件按 id 命名，分享链接包装里的 provider 名仍是导入时的名字，下次更新时才随新名字重新生成，两者都是有效配置。名字不要求唯一。
+      - `K` 要求订阅记有 `age_key`：没有记的订阅从没加密过。更换后订阅若已不再加密，`update` 的既有规则会把私钥清掉。
+      - 手动验证（真 mihomo v1.19.33，临时 `XDG_*`，托管内核）：导入文件订阅后 `e` 改名、`i` 与 `K` 的提示都出现；`K` 的成功路径只由测试覆盖（没有加密的真实订阅服务）。
+12. `feat(settings): edit the managed core's dns overrides`
+    - 范围：设置页托管内核组新增 `DNS 覆盖`，打开弹窗编辑 `[dns]` 的 11 个键。
+    - 验收：开关和固定取值逐项切换并以“跟随订阅”结束；文本和列表可输入；内核不接受的值被拒绝并给出它的原话，`settings.toml` 与 `config.yaml` 不变；接受的值写入后，关闭弹窗时内核重载一次。
+    - 实现记录（2026-11-09）：
+      - **先校验再保存**：`ManagedCore::set_dns` 用新的设置渲染出完整配置，交给 `mihomo -t` 检查，通过才写 `settings.toml` 并重写 `config.yaml`。不这样做的话，写进去的坏值会让下次启动内核失败（`mihomo -t` 对订阅的检查同理）。实测（v1.19.33）它会拒绝：不认识的 `nameserver` 协议（`DNS NameServer[0] unsupport scheme: xyz`）、格式错误的地址、未知的 `enhanced-mode` / `fake-ip-filter-mode`（`invalid mode`）、不是纯 IP 的 `default-nameserver`；退出码 1，错误在日志的 `level=error` 行，由既有的 `first_error` 取出。它不会拒绝的：`listen` 写成无效地址（`-t` 不绑定端口），所以 `listen` 的写错要到重载或启动时才暴露。
+      - 弹窗（`Overlay::Dns`，`src/app/dns.rs`、`src/ui/components/dns.rs`）按 `DnsKind` 决定 `Enter` 的行为：`Switch`（`ipv6`、`prefer-h3`）与 `Choice`（`enhanced-mode`：fake-ip / redir-host；`fake-ip-filter-mode`：blacklist / whitelist / rule）依次切换并以“跟随订阅”结束；`Text`（`listen`）和 `List`（其余六项，逗号、空格或全角逗号分隔）打开输入框，留空即恢复跟随订阅，没有改动就不发校验。值写在文件里而不在内存快照里：弹窗每次绘制读 `ManagedCore::settings()`，没有第二份状态要同步。
+      - 校验在后台进行（`CoreEvent::Dns`），期间标题栏写 `校验中…`，再按 `Enter` 被忽略。关闭弹窗时有修改就走 `Change::Reload`（与 `重载配置` 同一路径：`PUT /configs`，成功弹 `已重载配置`），所以连续改几项只重载一次；校验还在进行时关掉弹窗，结果回来后再重载。
+      - 设置页的 `DNS 覆盖` 行显示“跟随订阅”或“N 项已覆盖”。`Setting::ALL` 变成 21 项，托管内核组 6 行。
+      - 手动验证（真 mihomo v1.19.33，临时 `XDG_*`，tmux 100×30）：打开弹窗，`ipv6` 切到开；`nameserver` 输入 `xyz://bad` 被拒绝，toast 为 `内核不接受 nameserver：DNS NameServer[0] unsupport scheme: xyz`，该行仍是“跟随订阅”；输入 `tls://1.1.1.1, 8.8.8.8` 被接受，`settings.toml` 的 `[dns]` 与 `config.yaml` 末尾的 `"dns": {"enable":true,"ipv6":true,"nameserver":["tls://1.1.1.1","8.8.8.8"]}` 一致，`Esc` 关闭后 toast `已重载配置`。80×24、60×20、50×15 下弹窗都画得下（宽度不够时去掉键名列）。结束后单元已停，临时目录已删。
+      - 没有做：弹窗没有鼠标点选（滚轮和点击背景关闭走通用路径）；`[dns]` 的其他键（`nameserver-policy`、`hosts` 等）仍不能覆盖，范围照 FlClash 的 `normalProfileKeys`。
