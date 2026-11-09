@@ -73,7 +73,7 @@ impl ManagedCore {
 
     /// The profile the kernel runs: the subscription in use, or the one that
     /// sends everything out directly when there is none.
-    fn base_profile(&self, store: &Store) -> Result<String, CoreError> {
+    pub(super) fn base_profile(&self, store: &Store) -> Result<String, CoreError> {
         match store.active() {
             Some(sub) => fs::read_to_string(self.paths.profile(&sub.id))
                 .map_err(|err| CoreError::io("cannot read the subscription in use", err)),
@@ -140,7 +140,11 @@ impl ManagedCore {
     }
 
     /// [`ManagedCore::check`] of `text`, which is put in a file for it.
-    async fn check_text(&self, id: &str, text: &str) -> Result<Option<String>, CoreError> {
+    pub(super) async fn check_text(
+        &self,
+        id: &str,
+        text: &str,
+    ) -> Result<Option<String>, CoreError> {
         let candidate = self.paths.profiles().join(format!("{id}.check.yaml"));
         write_private(&candidate, text)
             .map_err(|err| CoreError::io("cannot write the subscription", err))?;
@@ -1189,6 +1193,74 @@ mod tests {
         );
         // It runs, so the kernel has to read it again.
         assert!(done.reload);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_dns_key_is_kept_only_if_the_kernel_accepts_the_config_made_with_it() {
+        let dir = scratch("dns-set");
+        let recorder = Recorder::new(|cmd| {
+            if cmd.args.first().map(String::as_str) != Some("-t") {
+                return answer(0, "");
+            }
+            let text = fs::read_to_string(cmd.args.last().unwrap()).unwrap();
+            if text.contains("bad.example") {
+                let mut output = answer(1, "");
+                output.stdout =
+                    b"time=\"t\" level=error msg=\"dns: bad.example is not a nameserver\"\n"
+                        .to_vec();
+                output
+            } else {
+                answer(0, "configuration file test is successful\n")
+            }
+        });
+        let core = Arc::new(core_at(&dir, free_port(), &recorder, false));
+        let server = serve(SUB, &[]).await;
+        core.import_url(&url(&server), None).await.unwrap();
+        let list = |items: &[&str]| {
+            toml::Value::Array(
+                items
+                    .iter()
+                    .map(|item| toml::Value::String((*item).to_owned()))
+                    .collect(),
+            )
+        };
+
+        core.set_dns("nameserver", Some(list(&["1.1.1.1"])))
+            .await
+            .unwrap();
+        assert_eq!(core.settings().dns["nameserver"], list(&["1.1.1.1"]));
+        assert!(config_of(&dir).contains(r#""nameserver":["1.1.1.1"]"#));
+        let settings_file = fs::read_to_string(dir.join("core/settings.toml")).unwrap();
+        assert!(settings_file.contains("1.1.1.1"), "{settings_file}");
+        let config = config_of(&dir);
+
+        // The kernel says no: the setting, its file and the config stay.
+        let err = core
+            .set_dns("nameserver", Some(list(&["bad.example"])))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Invalid(said) if said == "dns: bad.example is not a nameserver"),
+            "{err:?}"
+        );
+        assert_eq!(core.settings().dns["nameserver"], list(&["1.1.1.1"]));
+        assert_eq!(
+            fs::read_to_string(dir.join("core/settings.toml")).unwrap(),
+            settings_file
+        );
+        assert_eq!(config_of(&dir), config);
+        // The check left no candidate file behind.
+        assert!(
+            !everything_in(&dir)
+                .iter()
+                .any(|path| path.contains("check"))
+        );
+
+        // Clearing it lets the subscription's own stand.
+        core.set_dns("nameserver", None).await.unwrap();
+        assert!(core.settings().dns.is_empty());
+        assert!(!config_of(&dir).contains("nameserver"));
         fs::remove_dir_all(dir).unwrap();
     }
 }

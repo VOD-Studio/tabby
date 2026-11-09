@@ -10,6 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::{
     app::{App, Confirm, Gate, Overlay, Page, Pane, Setting},
+    core::{DNS_KEYS, DnsKind},
     ui::proxies,
 };
 
@@ -87,6 +88,29 @@ fn picker_hints() -> Vec<Hint> {
 /// Keys while a port is being typed on the settings page.
 fn port_hints() -> Vec<Hint> {
     vec![hint("Enter", "确定"), hint("Esc", "取消")]
+}
+
+/// Keys while the DNS popup is open: typing a value, or moving among the
+/// keys.
+fn dns_hints(app: &App) -> Vec<Hint> {
+    if app.dns_view.editing.is_some() {
+        return vec![
+            hint("Enter", "确定"),
+            hint("Esc", "取消"),
+            hint("空", "跟随订阅"),
+        ];
+    }
+    let key = DNS_KEYS[app.dns_view.cursor.min(DNS_KEYS.len() - 1)];
+    let description = match DnsKind::of(key) {
+        DnsKind::Switch | DnsKind::Choice(_) => "切换",
+        DnsKind::Text | DnsKind::List => "编辑",
+    };
+    vec![
+        hint("Enter", description),
+        hint("j/k", "移动"),
+        hint("Esc", "关闭"),
+        hint("q", "退出"),
+    ]
 }
 
 /// Keys that only work on the given page.
@@ -237,6 +261,7 @@ fn settings_hints(app: &App) -> Vec<Hint> {
         | Setting::Restart
         | Setting::Upgrade => "执行",
         Setting::StopCore => "停止",
+        Setting::Dns => "编辑",
         Setting::UpgradeCore => "升级",
         Setting::CoreBinary => "—",
     };
@@ -280,6 +305,7 @@ fn hints(app: &App) -> Vec<Hint> {
         Some(Overlay::Connection) => detail_hints(),
         Some(Overlay::Confirm) => confirm_hints(app),
         Some(Overlay::Profiles) => profile_hints(app),
+        Some(Overlay::Dns) => dns_hints(app),
         Some(Overlay::Themes) => theme_hints(),
         Some(Overlay::Groups) => picker_hints(),
         None if app.page == Page::Settings && app.typing() => port_hints(),

@@ -60,6 +60,12 @@ pub enum CoreEvent {
     Upgraded(Result<String, CoreError>),
     /// The config file was made again, for `重载配置`.
     Regenerated(Result<(), CoreError>),
+    /// A DNS key was set (or cleared) in the DNS popup, if the kernel took
+    /// it.
+    Dns {
+        key: &'static str,
+        result: Result<(), CoreError>,
+    },
     /// Whether the kernel's file has the capabilities, as `getcap` says.
     Authority(bool),
     /// What asking for them through the desktop's dialog came to.
@@ -104,7 +110,7 @@ impl App {
 
     /// Runs `work` on the managed core in the background; what it returns
     /// is reported as a [`CoreEvent`].
-    fn spawn_core<F, Fut>(&self, work: F)
+    pub(super) fn spawn_core<F, Fut>(&self, work: F)
     where
         F: FnOnce(Arc<ManagedCore>, Outbox) -> Fut,
         Fut: Future<Output = CoreEvent> + Send + 'static,
@@ -221,6 +227,7 @@ impl App {
             | CoreEvent::ProxyDangling(_)
             | CoreEvent::LoginStart(_)
             | CoreEvent::LoginStarted(_) => self.on_session(event),
+            CoreEvent::Dns { key, result } => self.on_dns(key, result),
             CoreEvent::Regenerated(Ok(())) => {
                 // The reload itself is the one every other kernel has.
                 self.changing.remove(&Setting::Reload);

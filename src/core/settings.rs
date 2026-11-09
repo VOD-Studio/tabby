@@ -35,6 +35,32 @@ pub const DNS_KEYS: [&str; 11] = [
     "direct-nameserver",
 ];
 
+/// What a `[dns]` key holds, and so how the settings page offers it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DnsKind {
+    /// `true` or `false`.
+    Switch,
+    /// One of these words.
+    Choice(&'static [&'static str]),
+    /// One string.
+    Text,
+    /// A list of strings.
+    List,
+}
+
+impl DnsKind {
+    /// The kind of `key`, one of [`DNS_KEYS`].
+    pub fn of(key: &str) -> Self {
+        match key {
+            "ipv6" | "prefer-h3" => Self::Switch,
+            "enhanced-mode" => Self::Choice(&["fake-ip", "redir-host"]),
+            "fake-ip-filter-mode" => Self::Choice(&["blacklist", "whitelist", "rule"]),
+            "listen" => Self::Text,
+            _ => Self::List,
+        }
+    }
+}
+
 /// The contents of `settings.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
@@ -134,6 +160,19 @@ impl CoreSettings {
             Persist::Ipv6(on) => self.ipv6 = on,
             Persist::MixedPort(port) => self.mixed_port = port,
             Persist::Tun(on) => self.tun.enable = on,
+        }
+    }
+
+    /// Sets `key` of `[dns]`, or lets the subscription's own value stand
+    /// again when `value` is `None`.
+    pub fn set_dns(&mut self, key: &str, value: Option<toml::Value>) {
+        match value {
+            Some(value) => {
+                self.dns.insert(key.to_owned(), value);
+            }
+            None => {
+                self.dns.remove(key);
+            }
         }
     }
 

@@ -128,6 +128,7 @@ fn draw_screen(frame: &mut Frame, app: &App) {
         Some(Overlay::Connection) => connections::render_detail(frame, frame.area(), app),
         Some(Overlay::Profiles) => components::profiles::render(frame, frame.area(), app),
         Some(Overlay::Themes) => components::themes::render(frame, frame.area(), app),
+        Some(Overlay::Dns) => components::dns::render(frame, frame.area(), app),
         Some(Overlay::Confirm) => components::confirm::render(frame, frame.area(), app),
         Some(Overlay::Groups) => proxies::render_picker(frame, regions.body, app),
         None => {}

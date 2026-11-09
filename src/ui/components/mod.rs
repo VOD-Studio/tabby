@@ -1,5 +1,6 @@
 pub mod banner;
 pub mod confirm;
+pub mod dns;
 pub mod footer;
 pub mod header;
 pub mod help;

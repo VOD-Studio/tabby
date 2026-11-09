@@ -264,6 +264,10 @@ fn value(
             Some(state) => vec![switch(app, state.enabled)],
             None => vec![Span::styled(NO_VALUE, muted)],
         },
+        Setting::Dns => match app.dns_overrides().len() {
+            0 => vec![Span::styled("跟随订阅", muted)],
+            count => vec![Span::styled(format!("{count} 项已覆盖"), fg)],
+        },
         Setting::CoreBinary => {
             let Some(path) = app.core_binary() else {
                 return vec![Span::styled(NO_VALUE, muted)];
@@ -360,7 +364,7 @@ mod tests {
         let (indices, titles) = headings(&Setting::ALL);
         assert_eq!(indices, (0..Setting::ALL.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护", "托管内核"]);
-        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 5].to_vec();
+        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 6].to_vec();
         let (indices, titles) = headings(&external);
         assert_eq!(indices, (0..external.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护"]);

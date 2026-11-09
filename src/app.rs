@@ -43,9 +43,11 @@ use crate::{
     },
 };
 
+pub mod dns;
 mod managed;
 mod subscriptions;
 
+pub use dns::DnsView;
 pub use managed::{CoreEvent, CorePhase, LoginStart};
 pub use subscriptions::{Ask, SubEvent, SubscriptionsView};
 
@@ -1644,6 +1646,9 @@ pub enum Overlay {
     Themes,
     /// The drop-down of the narrow proxies page's group picker.
     Groups,
+    /// The DNS keys of a managed core's settings, kept in
+    /// [`App::dns_view`].
+    Dns,
 }
 
 /// Which connections `X` closes.
@@ -1834,13 +1839,15 @@ pub enum Setting {
     LoginStart,
     /// Points the desktop's proxy at the managed core.
     SystemProxy,
+    /// Edits the DNS keys the managed core sets over the subscription's.
+    Dns,
     /// Stops the managed core.
     StopCore,
 }
 
 impl Setting {
     /// Top to bottom, as the page lists them.
-    pub const ALL: [Self; 20] = [
+    pub const ALL: [Self; 21] = [
         Self::Mode,
         Self::AllowLan,
         Self::LogLevel,
@@ -1860,6 +1867,7 @@ impl Setting {
         Self::UpgradeCore,
         Self::LoginStart,
         Self::SystemProxy,
+        Self::Dns,
         Self::StopCore,
     ];
 
@@ -1876,6 +1884,7 @@ impl Setting {
             | Self::UpgradeCore
             | Self::LoginStart
             | Self::SystemProxy
+            | Self::Dns
             | Self::StopCore => "托管内核",
         }
     }
@@ -1895,6 +1904,7 @@ impl Setting {
             Self::StopCore => "停止内核",
             Self::LoginStart => "登录时启动",
             Self::SystemProxy => "系统代理",
+            Self::Dns => "DNS 覆盖",
             Self::CoreBinary => "内核",
             Self::Upgrade | Self::UpgradeCore => "升级内核",
         }
@@ -1932,6 +1942,7 @@ impl Setting {
                 | Self::UpgradeCore
                 | Self::LoginStart
                 | Self::SystemProxy
+                | Self::Dns
                 | Self::StopCore
         )
     }
@@ -2259,6 +2270,8 @@ pub struct App {
     pub settings_view: SettingsView,
     /// The subscriptions page.
     pub subscriptions_view: SubscriptionsView,
+    /// The popup that edits the managed core's DNS overrides.
+    pub dns_view: DnsView,
     /// Nodes with a delay test in flight.
     pub testing: HashSet<String>,
     /// `/proxies` fetches issued so far; numbers them.
@@ -2390,6 +2403,7 @@ impl App {
             changing: HashMap::new(),
             settings_view: SettingsView::default(),
             subscriptions_view: SubscriptionsView::default(),
+            dns_view: DnsView::default(),
             proxies_view: ProxiesView::default(),
             testing: HashSet::new(),
             fetches: 0,
@@ -2570,6 +2584,7 @@ impl App {
             _ if self.overlay == Some(Overlay::Profiles) => self.pick_profile(&action),
             _ if self.overlay == Some(Overlay::Themes) => self.pick_theme(&action),
             _ if self.overlay == Some(Overlay::Groups) => self.pick_group(&action),
+            _ if self.overlay == Some(Overlay::Dns) => self.pick_dns(&action),
             Action::ToggleHelp => {
                 // The connection popup is not swapped for the help.
                 self.overlay = match self.overlay {
@@ -2992,9 +3007,12 @@ impl App {
         self.dirty = true;
     }
 
-    /// Whether the current page's input box has the keyboard: a filter, or
-    /// the port being edited on the settings page.
+    /// Whether the current page's input box has the keyboard: a filter, the
+    /// port being edited on the settings page, or a DNS key in its popup.
     pub fn typing(&self) -> bool {
+        if self.overlay == Some(Overlay::Dns) {
+            return self.dns_view.editing.is_some();
+        }
         match self.page {
             Page::Proxies => self.proxies_view.typing,
             Page::Providers => self.providers_view.typing,
@@ -3495,6 +3513,7 @@ impl App {
             | Setting::CoreBinary
             | Setting::LoginStart
             | Setting::SystemProxy
+            | Setting::Dns
             | Setting::UpgradeCore => true,
         };
         match (reported, clash) {
@@ -3530,6 +3549,7 @@ impl App {
             | Setting::CoreBinary
             | Setting::LoginStart
             | Setting::SystemProxy
+            | Setting::Dns
             | Setting::UpgradeCore => None,
             Setting::AllowLan => Some(Change::Patch(Patch::AllowLan(flip(configs.allow_lan)))),
             Setting::LogLevel => Some(Change::Patch(Patch::LogLevel(next_kernel_log_level(
@@ -3583,6 +3603,7 @@ impl App {
             (Setting::StopCore, _) => self.ask_stop_core(),
             (Setting::LoginStart, _) => self.toggle_login_start(),
             (Setting::SystemProxy, _) => self.toggle_system_proxy(),
+            (Setting::Dns, _) => self.open_dns(),
             // The kernel needs the capabilities before it can run a TUN.
             (Setting::Tun, Some(change @ Change::Patch(Patch::Tun(true)))) if self.is_managed() => {
                 self.ask_enable_tun(change);
@@ -3679,6 +3700,7 @@ impl App {
         match self.overlay.take() {
             Some(Overlay::Connection) => self.connections_view.detail = None,
             Some(Overlay::Confirm) => self.pending = None,
+            Some(Overlay::Dns) => self.close_dns(),
             Some(Overlay::Help | Overlay::Profiles | Overlay::Themes | Overlay::Groups) | None => {}
         }
         self.dirty = true;
@@ -9252,6 +9274,7 @@ secret = "b-secret"
                         | Setting::UpgradeCore
                         | Setting::LoginStart
                         | Setting::SystemProxy
+                        | Setting::Dns
                         | Setting::StopCore
                 )
             })
@@ -10037,6 +10060,83 @@ secret = "b-secret"
             "{config_now}"
         );
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_dns_popup_keeps_what_the_kernel_accepts_and_the_kernel_reads_it_when_it_closes() {
+        let dir = testing::scratch("app-dns");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = managed_settings_on(Arc::clone(&core), Setting::Dns).await;
+        assert!(draw(&app).contains("DNS 覆盖"));
+
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.overlay, Some(Overlay::Dns));
+        let screen = draw(&app);
+        assert!(
+            screen.contains("主 DNS") && screen.contains("nameserver"),
+            "{screen}"
+        );
+
+        // A switch goes round: the subscription's own, on, off.
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.dns_view.checking);
+        pump_until(&mut app, &mut rx, |app| !app.dns_view.checking).await;
+        assert_eq!(core.settings().dns["ipv6"], toml::Value::Boolean(true));
+
+        // A list is typed, commas or spaces between its items.
+        for _ in 0..6 {
+            key_press(&mut app, KeyCode::Char('j'));
+        }
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.typing());
+        type_text(&mut app, "1.1.1.1, tls://8.8.8.8");
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| !app.dns_view.checking).await;
+        let screen = draw(&app);
+        assert!(screen.contains("1.1.1.1, tls://8.8.8.8"), "{screen}");
+        // The config is written from the settings by the core, which the
+        // core's own tests look at.
+        assert!(settings_toml(&dir).contains("tls://8.8.8.8"));
+
+        // `Esc` while typing drops the typing, and not the popup.
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.typing());
+        key_press(&mut app, KeyCode::Esc);
+        assert!(!app.typing() && app.overlay == Some(Overlay::Dns));
+
+        // Closed, the kernel is asked to read the file again, once.
+        let before = testing::requests_to(port).len();
+        key_press(&mut app, KeyCode::Esc);
+        assert_eq!(app.overlay, None);
+        requested(&mut app, &mut rx, port, |requests| {
+            requests[before..]
+                .iter()
+                .any(|request| request.starts_with("PUT /configs"))
+        })
+        .await;
+        assert!(draw(&app).contains("2 项已覆盖"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_dns_value_the_kernel_refuses_is_said_in_its_words() {
+        let (mut app, _rx) = app_without_controller();
+        app.dns_view.checking = true;
+
+        app.on_dns(
+            "nameserver",
+            Err(crate::core::CoreError::Invalid("bad.example".to_owned())),
+        );
+
+        assert!(!app.dns_view.checking);
+        assert!(
+            toasted(&app, "内核不接受 nameserver：bad.example"),
+            "{:?}",
+            app.toasts
+        );
     }
 
     #[tokio::test]

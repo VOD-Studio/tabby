@@ -37,7 +37,7 @@ pub use profiles::Outcome;
 use runner::Runner;
 pub use runner::System;
 use settings::CoreSettings;
-pub use settings::Persist;
+pub use settings::{DNS_KEYS, DnsKind, Persist};
 use state::State;
 pub use subscription::{Kind, Store, Subscription};
 use supervisor::Mode;
@@ -370,6 +370,37 @@ impl ManagedCore {
         }
         if self.paths.config().exists() {
             self.write_config_for(&self.subscriptions()?)?;
+        }
+        Ok(())
+    }
+
+    /// Sets `key` of the `[dns]` overrides (or, with `None`, lets the
+    /// subscription's own value stand), and writes it down like
+    /// [`ManagedCore::persist`].
+    ///
+    /// The kernel checks the config it would be run with first
+    /// (`mihomo -t`): a value it does not accept would otherwise be kept
+    /// and stop the kernel from starting next time. Nothing is changed
+    /// when it complains.
+    pub async fn set_dns(&self, key: &str, value: Option<toml::Value>) -> Result<(), CoreError> {
+        let _guard = self.lock.lock().await;
+        let mut next = self.settings();
+        next.set_dns(key, value);
+        let store = self.subscriptions()?;
+        let text = runtime::render(&self.base_profile(&store)?, &next, &self.state)
+            .map_err(|_| CoreError::UnsupportedProfile)?;
+        if let Some(complaint) = self.check_text("dns", &text).await? {
+            return Err(CoreError::Invalid(complaint));
+        }
+        {
+            let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
+            *settings = next;
+            settings
+                .save(&self.paths.settings())
+                .map_err(|err| CoreError::io("cannot write settings.toml", err))?;
+        }
+        if self.paths.config().exists() {
+            self.write_config_for(&store)?;
         }
         Ok(())
     }
