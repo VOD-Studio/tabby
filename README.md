@@ -41,7 +41,14 @@ Enter 选组   t 测速   T 整组测速   s 排序   / 过滤   …   ? 帮助 
 
 ## 安装
 
-需要 Rust 1.95 或更新版本（edition 2024）。开发与测试在 Linux 上进行，其他平台未验证。
+**发布包**（Linux x86_64）：`tabby-<版本>-<平台>.tar.gz` 只有 tabby；`tabby-<版本>-<平台>-with-mihomo.tar.gz` 另带一个固定版本的 mihomo（`lib/tabby/mihomo`），托管内核不需要再下载。两种包的目录结构都和安装前缀一致，解压到 `~/.local` 或 `/usr/local`：
+
+```sh
+tar -xzf tabby-0.1.0-x86_64-unknown-linux-gnu-with-mihomo.tar.gz -C ~/.local --strip-components=1
+# 得到 ~/.local/bin/tabby、~/.local/lib/tabby/mihomo、~/.local/share/licenses/tabby/…
+```
+
+**从源码**：需要 Rust 1.95 或更新版本（edition 2024）。开发与测试在 Linux 上进行，其他平台未验证。
 
 ```sh
 cargo install --path .      # 安装到 ~/.cargo/bin/tabby
@@ -105,10 +112,18 @@ bg = "reset"
 default = "core"             # 可选：启动时直接用托管内核
 
 [core]                       # 有这一段才显示“托管内核”
-binary = "/usr/bin/mihomo"   # 可选；不写则由 tabby 下载到数据目录并负责更新
+binary = "/usr/bin/mihomo"   # 可选；不写则按下面的顺序找，都没有就由 tabby 下载
 ```
 
-`binary` 已设置时 tabby 直接用它，不下载也不升级（设置页 `升级内核` 显示“由你自己管理”）。未设置且数据目录里还没有内核时，tabby 询问后从 GitHub 下载最新的 mihomo（校验 sha256，按 CPU 选 amd64 的 v1/v2/v3 构建）；托管内核运行时之后的升级经它自己的 mixed 端口下载。没有 `[core]` 段时，托管内核的功能都不会出现（订阅页只显示一句说明），其余行为不变。
+**内核从哪里来**，依次：
+
+1. `[core].binary`：直接用它，不下载也不升级（设置页 `升级内核` 显示“由你自己管理”）。
+2. 数据目录里 tabby 自己的 `bin/mihomo`：下载来的，或从随包内核复制来的。tabby 可以升级它、给它授权 TUN。
+3. 随包内核 `<前缀>/lib/tabby/mihomo`（`<前缀>/bin/tabby` 旁边，发布包 `with-mihomo` 里的那个）：启动内核时复制到数据目录再运行，而不是直接运行安装目录里的文件（那里通常属于 root，tabby 改不了，包更新也会抹掉 `setcap`）。tabby 更新后随包内核变了，下次启动或重启内核时再复制一次；用 `升级内核` 下载过的不会被它覆盖。
+4. `PATH` 里的 `mihomo`（例如发行版的包）：同 `binary`，不升级（“由你自己管理”）。只找绝对路径的目录。
+5. 都没有：询问后从 GitHub 下载最新的 mihomo（校验 sha256，按 CPU 选 amd64 的 v1/v2/v3 构建）。托管内核运行时之后的升级经它自己的 mixed 端口下载。
+
+没有 `[core]` 段时，托管内核的功能都不会出现（订阅页只显示一句说明），其余行为不变。
 
 **数据目录**：`$XDG_DATA_HOME/tabby/core/`（默认 `~/.local/share/tabby/core/`）。内核和它的 `home/`（`config.yaml`、geo 数据、provider 文件）、订阅原文 `profiles/`、订阅列表 `subscriptions.toml`、托管内核的设置 `settings.toml`、`state.toml`（控制器端口与 secret）都在这里；含 secret、订阅 URL 或 age 密钥的文件权限是 0600。这些都由 tabby 维护，不要手动改 `config.yaml`：它是每次从当前订阅和 `settings.toml` 重新生成的。
 
@@ -280,6 +295,8 @@ XDG_CONFIG_HOME="$(mktemp -d)" cargo test
 
 测试请使用临时 `XDG_CONFIG_HOME`，避免触碰真实配置。设计与决策记录见 [`docs/plans/2026-11-05-tabby-tui.md`](docs/plans/2026-11-05-tabby-tui.md)。
 
+发布包由 `make dist`（`scripts/dist.sh [<目标三元组>]`）生成到 `dist/`：两种 `tar.gz`、mihomo 的源码包 `mihomo-<tag>-source.tar.gz` 和 `SHA256SUMS`。随包的 mihomo 版本和两种架构的 sha256 固定在 `packaging/mihomo.env`，下载后不符就失败；amd64 用 `v1` 构建，任何 x86-64 CPU 都能运行（有新版本时 `升级内核` 按 CPU 选 v3/v2/v1）。依赖的许可证由 `cargo-about`（`cargo install --locked --features cli cargo-about`）生成 `THIRD-PARTY-LICENSES`。在同一台机器上，同一个提交打出的包逐字节相同（文件时间取最后一次提交的时间）。
+
 ## 许可证
 
-[MIT](LICENSE)。托管内核下载的 mihomo 是独立程序，遵循它自己的许可证（GPL-3.0）。
+[MIT](LICENSE)。mihomo 是独立程序，遵循它自己的许可证（GPL-3.0）：托管内核下载的、`PATH` 里的都是如此；发布包 `with-mihomo` 带的那份未经修改，它的许可证和源码说明在 `share/licenses/tabby/mihomo/`，源码包与发布包一起发布。Rust 依赖的许可证见发布包里的 `share/licenses/tabby/THIRD-PARTY-LICENSES`。

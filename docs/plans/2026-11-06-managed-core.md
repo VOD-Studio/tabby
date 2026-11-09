@@ -1,7 +1,7 @@
 # tabby：托管内核实施方案
 
 - 日期：2026-11-06
-- 状态：已完成（2026-11-06）。实现记录见 §15 各项；TUN 的真机授权与路由、真实的 pkexec / sudo、GNOME / KDE 桌面、注销再登录没有验证，见各项记录里的“没有验证”。
+- 状态：已完成（2026-11-06）。实现记录见 §15 各项；TUN 的真机授权与路由、真实的 pkexec / sudo、GNOME / KDE 桌面、注销再登录没有验证，见各项记录里的“没有验证”。M8（2026-11-09）补了订阅与 DNS 的界面；M9（2026-11-09）加了 `PATH` 查找、随包内核与发布包，见 §15 第 13–16 项。
 - 前置：主方案 `2026-11-05-tabby-tui.md`（M0–M6）。本方案取代其 §1 中“不管理内核进程”“不编辑订阅或 YAML 配置文件”两条非目标。
 - 参照：FlClash（`chen08209/FlClash`，2026-11-06 的 main 分支），下文引用的路径都相对于它的仓库根目录。
 
@@ -148,6 +148,7 @@ flowchart LR
   4. 用 `flate2` 解压到 `bin/mihomo.new`，设 0755，执行 `mihomo.new -v` 做健全检查，然后 `rename` 替换旧文件（原子操作）。
 - 更新：设置页 `升级内核`（托管模式下替代 `POST /upgrade`；`/upgrade` 会原地替换二进制，绕过校验，也绕过这里的版本记录）。`-v` 显示的版本与 `tag_name` 相同时提示 `已是最新`；否则下载、替换，再重启单元。替换后文件能力丢失，TUN 授权状态重新判定（§8）。
 - 网络：GitHub 请求不走控制器客户端的 `no_proxy`（那条规则是为了防止控制器请求被绕回内核，主方案 R1）。托管内核正在运行时，经它的 mixed-port 下载；没有运行时直连。`reqwest` 没有开 `system-proxy`，实施时显式构造 `Proxy`。
+- 内核的查找顺序（M9 补充，第 13、14 项）：`[core].binary` → `<data>/core/bin/mihomo` → 随包内核 `<prefix>/lib/tabby/mihomo`（先复制到 `bin/mihomo` 再运行）→ `PATH` 里的 `mihomo`（与 `[core].binary` 同样不升级）→ 询问后下载。
 
 ## 7. 订阅与运行配置
 
@@ -431,3 +432,28 @@ M7 的两处“没有界面可改”：订阅的自动更新间隔和 age 私钥
       - 设置页的 `DNS 覆盖` 行显示“跟随订阅”或“N 项已覆盖”。`Setting::ALL` 变成 21 项，托管内核组 6 行。
       - 手动验证（真 mihomo v1.19.33，临时 `XDG_*`，tmux 100×30）：打开弹窗，`ipv6` 切到开；`nameserver` 输入 `xyz://bad` 被拒绝，toast 为 `内核不接受 nameserver：DNS NameServer[0] unsupport scheme: xyz`，该行仍是“跟随订阅”；输入 `tls://1.1.1.1, 8.8.8.8` 被接受，`settings.toml` 的 `[dns]` 与 `config.yaml` 末尾的 `"dns": {"enable":true,"ipv6":true,"nameserver":["tls://1.1.1.1","8.8.8.8"]}` 一致，`Esc` 关闭后 toast `已重载配置`。80×24、60×20、50×15 下弹窗都画得下（宽度不够时去掉键名列）。结束后单元已停，临时目录已删。
       - 没有做：弹窗没有鼠标点选（滚轮和点击背景关闭走通用路径）；`[dns]` 的其他键（`nameserver-policy`、`hosts` 等）仍不能覆盖，范围照 FlClash 的 `normalProfileKeys`。
+
+**M9 随包内核与发布包**
+
+M7 的内核只有两种来源：`[core].binary`，或 tabby 下载。2026-11-09 用户确定 tabby 用 MIT（`chore: license under mit`），并要求按“随包附带 mihomo”的做法落地：发行版的包依赖系统的 `mihomo`，自己的发布包可以带一份内核。FlClash 的做法（本机 `flclash-bin` 0.9.3：`/usr/lib/flclash/FlClashCore`，一个 72 MB 的 Go 程序，经 Unix socket 与界面通信，TUN 由特权的 `FlClashHelperService` 拉起）也是把内核当作包里的独立程序，而不是编进界面。tabby 不把 mihomo 编进自己（`include_bytes!`）：那样就成了含 GPL-3.0 代码的整体；每次运行解压出来的文件也留不住 `setcap`。
+
+13. `feat(core): run a mihomo found on path`
+    - 范围：没有 `[core].binary`、数据目录里也没有内核时，用 `PATH` 里的 `mihomo`。
+    - 实现记录（2026-11-09）：`ManagedCore.search_path`（`open()` 取 `$PATH`；`with()` 和测试里是 `None`，测试不受跑测试的机器上有没有 `mihomo` 影响）。`on_path()` 取第一个可执行的普通文件，跳过相对路径的目录（它们指向 tabby 启动时所在的目录，不是安装位置）。`binary_path()` 的顺序：`[core].binary` → `bin/mihomo`（存在时）→ `PATH` → `bin/mihomo`（下载目标）。`PATH` 里的内核和 `[core].binary` 一样算“用户自己的”（`is_user_binary`）：`升级内核` 置灰并写 `由你自己管理`，因为它属于系统包，tabby 下载的新内核会放进数据目录并从此盖过它，与用户装包的意图不符。`NoBinary { path: None }` 的含义随之变成“没下载，`PATH` 里也没有”，下载询问的流程不变。
+    - 测试：跳过不可执行的文件、取第一个；数据目录里的内核优先于 `PATH`；从当前目录出发确实能找到内核的相对路径条目也不查。
+14. `feat(core): seed the kernel from the one shipped with tabby`
+    - 范围：发布包把内核放在 `<prefix>/lib/tabby/mihomo`（`<prefix>/bin/tabby` 旁边，FHS 的位置；不认 `bin/` 里 tabby 的同目录，否则 `/usr/bin/tabby` 会把发行版的 `/usr/bin/mihomo` 当成随包内核）。
+    - 实现记录（2026-11-09）：`ManagedCore.shipped`（`open()` 由 `current_exe()` 推出；Linux 上它已解开符号链接）。随包内核不直接运行，而是在 `ensure_running` 真要启动内核时、以及 `restart` 时（`seed()`）复制到 `bin/mihomo`：安装目录通常属于 root，tabby 不能升级它，包更新会抹掉 `setcap`；复制到数据目录后，下载升级、`setcap`、`nosuid` 检查都照旧作用在这一份上。旁边的 `bin/mihomo.shipped` 记下复制时随包内核的大小和修改时间（不读整个 60 MB 文件）；随包内核变了（tabby 更新了）就再复制一次，没变就不碰（那份可能已经授权过 TUN）。`bin/mihomo` 存在而没有记录的，是下载来的，不覆盖；`install()` 成功后删掉记录，所以下载过的内核以后也不会被随包内核覆盖。`[core].binary` 存在时不复制。复制走 `mihomo.new` 再 `rename`，在 `spawn_blocking` 里做。重新复制同样会让 `setcap` 失效，由既有的 TUN 降级提示处理（§8）。
+    - 测试：第一次复制且是 0755；同一份随包内核不再复制（复制后的文件保持原样）；换了随包内核再复制；早先下载的内核不被覆盖；在随包复制品上下载升级之后，换了随包内核也不覆盖；有 `[core].binary` 时不复制。
+15. `build: package releases with and without mihomo`
+    - 范围：`scripts/dist.sh`（`make dist`，`TARGET=<三元组>` 交叉），`packaging/mihomo.env`（随包版本与两种架构的 sha256），`packaging/about.{toml,hbs}`（`cargo-about` 的许可证清单）。
+    - 实现记录（2026-11-09）：
+      - 产物（`dist/`）：`tabby-<版本>-<三元组>.tar.gz`、`…-with-mihomo.tar.gz`、`mihomo-<tag>-source.tar.gz`、`SHA256SUMS`。包里是一个和安装前缀同样结构的目录：`bin/tabby`、`share/doc/tabby/README.md`、`share/licenses/tabby/{LICENSE,THIRD-PARTY-LICENSES}`；`with-mihomo` 另有 `lib/tabby/mihomo` 和 `share/licenses/tabby/mihomo/{LICENSE,SOURCE}`（GPL-3.0 全文取自源码包，`SOURCE` 写明版本、原始文件名、未修改、源码包名与上游地址）。
+      - 内核的 sha256 写死在仓库里，而不是在构建时信任 GitHub API 的 `digest`；不符就删掉缓存并失败。amd64 用 `v1` 构建（运行时下载按 CPU 选级别，随包的一份要在任何 x86-64 上都能运行）。下载缓存在 `target/dist-cache/`。
+      - 源码：GitHub 的 tag 归档。GPL-3.0 §6 要求提供对应源码，只给上游链接要依赖上游一直保留，所以源码包和发布包放在一起发布。归档不含 Go 模块依赖的源码（未 `go mod vendor`），这是发行版常见的做法，没有做得更多。
+      - `THIRD-PARTY-LICENSES`：`cargo about generate --locked --fail --target <三元组>`（不含 dev 依赖；`A OR B` 取 `accepted` 里排前面的），纯文本模板，用 `{{{…}}}` 免得许可证里的引号被转成 HTML 实体。依赖里没有只能选 GPL/LGPL 的（`Apache-2.0 OR GPL-2.0-only` 之类都选到前者），`MPL-2.0` 只是文件级的 copyleft，原样附上许可证即可。
+      - 可重复：`tar --sort=name --owner=0 --group=0 --numeric-owner --mtime=@<最后一次提交的时间>`，再 `gzip -n`。文件时间固定也是随包内核“变没变”的依据：两个 tabby 版本带同一个内核时大小相同而时间不同，会多复制一次，但不会漏掉一次。
+      - 实测（x86_64）：`make dist` 产出三个包；`lib/tabby/mihomo -v` 是 `Mihomo Meta v1.19.33 linux amd64`；连跑两次 `SHA256SUMS` 相同；THIRD-PARTY-LICENSES 184 段，没有 HTML 实体。把 `with-mihomo` 包解到临时前缀，临时 `XDG_*`、`[core]`、Mixed 17890：启动后没有下载询问，`bin/mihomo` 与随包内核逐字节相同，`mihomo.shipped` 是 `62079102 <时间>`，systemd 单元的 `ExecStart` 是数据目录里的那份，设置页 `升级内核` 可用。再把内核挪进一个只在 `PATH` 里的目录、删掉数据目录的 `bin/`：内核行显示 `PATH` 里的路径，`升级内核` 显示 `由你自己管理`，单元运行的是它。之后单元已停，临时目录已删。
+      - 没有做：aarch64 的包（本机没有交叉工具链，脚本的分支和 sha256 已备好）；发行版的包（PKGBUILD 等）和 CI。
+16. `docs: record M9 shipped kernel decisions`
+    - README：安装一节加发布包与解压方式；托管内核一节写内核的查找顺序；开发一节写 `make dist`；许可证一节写 mihomo 与依赖的许可证位置。AGENTS.md：目录表、命令、测试基线（405 passed, 1 ignored）。
