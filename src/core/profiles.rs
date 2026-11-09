@@ -25,6 +25,17 @@ use super::{
 /// What a list of share links is wrapped into: the group the nodes go in.
 const GROUP: &str = "节点选择";
 
+/// How many times a subscription download is tried before it fails.
+const TRIES: u32 = 3;
+
+/// Why one try at a download failed: whether another may go better.
+enum Failed {
+    /// The network or the server: the next try may get through.
+    Again(CoreError),
+    /// The answer will not change (a 404, an address that is not one).
+    ForGood(CoreError),
+}
+
 /// What an operation on the subscriptions did.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Outcome {
@@ -90,13 +101,54 @@ impl ManagedCore {
             .map_err(|err| CoreError::io("cannot write the kernel's config", err))
     }
 
-    /// Downloads the subscription at `url`.
+    /// Downloads the subscription at `url`, trying again (after
+    /// `fetch_pause`, then twice that) when the network or the server
+    /// failed: up to [`TRIES`] times in all.
     async fn fetch(&self, url: &str) -> Result<Fetched, CoreError> {
-        let failed = |err: reqwest::Error| CoreError::Fetch(install::describe(&err.without_url()));
-        let response = self.http.get(url).send().await.map_err(failed)?;
+        let mut tries = 1;
+        loop {
+            match self.fetch_once(url).await {
+                Ok(fetched) => return Ok(fetched),
+                Err(Failed::Again(err)) if tries < TRIES => {
+                    tracing::warn!(try = tries, "subscription download failed, trying again: {err}");
+                    tokio::time::sleep(self.timing.fetch_pause * tries).await;
+                    tries += 1;
+                }
+                Err(Failed::Again(err) | Failed::ForGood(err)) => return Err(err),
+            }
+        }
+    }
+
+    /// One try at downloading the subscription at `url`. It is given up
+    /// when nothing comes for `fetch_idle`, while the answer is awaited or
+    /// between two pieces of it, however long the whole takes.
+    async fn fetch_once(&self, url: &str) -> Result<Fetched, Failed> {
+        let idle = self.timing.fetch_idle;
+        let stalled = || Failed::Again(CoreError::Fetch(format!("no data for {idle:?}")));
+        let failed = |err: reqwest::Error| {
+            let builder = err.is_builder();
+            let message = CoreError::Fetch(install::describe(&err.without_url()));
+            if builder {
+                Failed::ForGood(message)
+            } else {
+                Failed::Again(message)
+            }
+        };
+        let mut response = tokio::time::timeout(idle, self.http.get(url).send())
+            .await
+            .map_err(|_| stalled())?
+            .map_err(failed)?;
         let status = response.status();
         if !status.is_success() {
-            return Err(CoreError::Fetch(format!("HTTP {status}")));
+            let err = CoreError::Fetch(format!("HTTP {status}"));
+            let again = status.is_server_error()
+                || status == reqwest::StatusCode::REQUEST_TIMEOUT
+                || status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            return Err(if again {
+                Failed::Again(err)
+            } else {
+                Failed::ForGood(err)
+            });
         }
         let header = |name: &str| {
             response
@@ -107,7 +159,14 @@ impl ManagedCore {
         };
         let name = header("content-disposition").and_then(|value| parse_filename(&value));
         let usage = header("subscription-userinfo").and_then(|value| parse_usage(&value));
-        let bytes = response.bytes().await.map_err(failed)?.to_vec();
+        let mut bytes = Vec::new();
+        while let Some(chunk) = tokio::time::timeout(idle, response.chunk())
+            .await
+            .map_err(|_| stalled())?
+            .map_err(failed)?
+        {
+            bytes.extend_from_slice(&chunk);
+        }
         Ok(Fetched { bytes, name, usage })
     }
 
@@ -495,7 +554,16 @@ impl super::Paths {
 
 #[cfg(test)]
 mod tests {
-    use std::{os::unix::fs::PermissionsExt, sync::Arc};
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        os::unix::fs::PermissionsExt,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use base64::{Engine as _, engine::general_purpose::STANDARD};
     use wiremock::{
@@ -570,6 +638,118 @@ mod tests {
             .unwrap_or_default();
         names.sort();
         names
+    }
+
+    /// A server that sends [`SUB`] in four pieces, `gap` apart; with
+    /// `stall_after`, it goes quiet for good after that many. Its address,
+    /// and how many times it was asked.
+    fn dribble(gap: Duration, stall_after: Option<usize>) -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = format!("http://{}/sub?token=SECRET", listener.local_addr().unwrap());
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&asked);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                count.fetch_add(1, Ordering::SeqCst);
+                std::thread::spawn(move || {
+                    let mut request = Vec::new();
+                    let mut byte = [0; 1];
+                    while !request.ends_with(b"\r\n\r\n")
+                        && stream.read(&mut byte).unwrap_or(0) == 1
+                    {
+                        request.push(byte[0]);
+                    }
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        SUB.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    for (sent, piece) in SUB.as_bytes().chunks(SUB.len().div_ceil(4)).enumerate() {
+                        if stall_after == Some(sent) {
+                            std::thread::sleep(Duration::from_secs(3));
+                            return;
+                        }
+                        let _ = stream.write_all(piece);
+                        let _ = stream.flush();
+                        std::thread::sleep(gap);
+                    }
+                });
+            }
+        });
+        (address, asked)
+    }
+
+    /// [`core`] that gives a download up after `idle` without a byte.
+    fn core_idle(name: &str, idle: Duration) -> (Arc<ManagedCore>, PathBuf) {
+        let dir = scratch(name);
+        let mut core = core_at(&dir, free_port(), &kernel(), false);
+        core.timing.fetch_idle = idle;
+        (Arc::new(core), dir)
+    }
+
+    #[tokio::test]
+    async fn a_slow_download_that_keeps_coming_is_waited_for_past_the_idle_limit() {
+        let (core, dir) = core_idle("sub-slow", Duration::from_millis(400));
+        // Over a second in all, never 400 ms without a byte.
+        let (address, asked) = dribble(Duration::from_millis(250), None);
+
+        let outcome = core.import_url(&address, None).await.unwrap();
+
+        let id = &outcome.store.subscriptions[0].id;
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("core/profiles/{id}.yaml"))).unwrap(),
+            SUB
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 1);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_download_that_goes_quiet_is_given_up_and_tried_three_times_in_all() {
+        let (core, dir) = core_idle("sub-stall", Duration::from_millis(300));
+        let (address, asked) = dribble(Duration::ZERO, Some(1));
+
+        let err = core.import_url(&address, None).await.unwrap_err();
+
+        assert!(
+            matches!(&err, CoreError::Fetch(message) if message.contains("no data for 300ms")),
+            "{err:?}"
+        );
+        assert_eq!(asked.load(Ordering::SeqCst), 3);
+        assert_eq!(core.subscriptions().unwrap(), Store::default());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_server_error_is_tried_again_and_a_missing_subscription_is_not() {
+        let (core, _, dir) = core("sub-retry");
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(503))
+            .up_to_n_times(2)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(SUB))
+            .mount(&server)
+            .await;
+
+        core.import_url(&url(&server), None).await.unwrap();
+        assert_eq!(server.received_requests().await.unwrap().len(), 3);
+
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let err = core.import_url(&url(&server), None).await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Fetch(message) if message.contains("404")),
+            "{err:?}"
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

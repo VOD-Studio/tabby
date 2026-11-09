@@ -170,6 +170,8 @@ fn core_in(
         ready: Duration::from_secs(3),
         poll: Duration::from_millis(20),
         stop_grace: Duration::from_secs(2),
+        fetch_idle: Duration::from_secs(5),
+        fetch_pause: Duration::ZERO,
     };
     core
 }

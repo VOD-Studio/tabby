@@ -54,6 +54,15 @@ const READY_POLL: Duration = Duration::from_millis(200);
 /// How long a kernel asked to stop has before it is killed.
 const STOP_GRACE: Duration = Duration::from_secs(5);
 
+/// How long a subscription download may go without a byte before it is
+/// given up: a slow server that keeps sending is waited for, one that went
+/// quiet is not.
+const FETCH_IDLE: Duration = Duration::from_secs(20);
+
+/// The wait before the first retry of a subscription download; the next
+/// one waits twice as long.
+const FETCH_PAUSE: Duration = Duration::from_secs(1);
+
 /// Where the managed core keeps its files, under `<data>/core/`.
 #[derive(Debug, Clone)]
 struct Paths {
@@ -244,6 +253,10 @@ struct Timing {
     ready: Duration,
     poll: Duration,
     stop_grace: Duration,
+    /// [`FETCH_IDLE`].
+    fetch_idle: Duration,
+    /// [`FETCH_PAUSE`].
+    fetch_pause: Duration,
 }
 
 /// The kernel tabby runs for the user.
@@ -340,8 +353,9 @@ impl ManagedCore {
                     env!("CARGO_PKG_VERSION"),
                     env::consts::OS
                 ))
+                // No overall limit: a download is given up when it goes
+                // quiet for `fetch_idle` (`profiles::fetch_once`).
                 .connect_timeout(Duration::from_secs(10))
-                .timeout(Duration::from_secs(60))
                 .build()
                 .wrap_err("cannot build HTTP client")?,
             delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
@@ -356,6 +370,8 @@ impl ManagedCore {
                 ready: READY_TIMEOUT,
                 poll: READY_POLL,
                 stop_grace: STOP_GRACE,
+                fetch_idle: FETCH_IDLE,
+                fetch_pause: FETCH_PAUSE,
             },
         })
     }
