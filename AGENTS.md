@@ -76,6 +76,7 @@ Per-commit gate: build + clippy `-D warnings` + test must all pass. `make check`
 
 ## Important Files
 - `src/main.rs` — CLI parse, logging, config → `resolve` → `themes::load` → `ApiClient::new` → `App::new` → `event::run`.
+- `build.rs` — sets `TABBY_LONG_VERSION` (`0.1.0 (<hash>[-dirty] <date>)`, plain version outside tabby's own git checkout) for `--version` and the startup log line; `-V` stays `CARGO_PKG_VERSION`. Reruns on `src`, `build.rs`, `Cargo.toml`, `Cargo.lock`, `HEAD` and its reflog; `-dirty` = `git status` non-empty for those paths. No new deps.
 - `src/app.rs` (~10.8k lines, ~2/3 is tests) — `Page`, `Action`, `Msg`, `Envelope`, `Outbox`, `action_for`, `App`, `handle_msg`, `on_tick`, `set_page`, `switch_profile`. Most state logic lives here.
 - `src/event.rs` — main loop (`TICK` 100 ms).
 - `src/config.rs` — `Config`, `Overrides`, `resolve`, `Palette`/`[theme_overrides]`, `IconSet`, `parse_color` (`#rrggbb`, 16 ANSI names, `reset`).

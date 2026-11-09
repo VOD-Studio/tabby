@@ -73,6 +73,8 @@ TABBY_SECRET=xxx tabby --theme tokyo-night
 
 优先级：命令行 > 环境变量 > `config.toml` > 内置默认值；空字符串等同于未设置。命令行参数会出现在进程列表中，secret 建议放在环境变量或配置文件里。tabby 访问控制器时忽略 `HTTP_PROXY` 等系统代理变量，避免请求绕回被控制的内核。
 
+`tabby -V` 显示版本号；`tabby --version` 还带上构建所用的提交与提交日期，如 `tabby 0.1.0 (4ecf936 2026-11-09)`，源码与该提交不同时哈希后带 `-dirty`，不在 git 仓库里构建时只有版本号。
+
 ## 配置
 
 `config.toml` 位于 `$XDG_CONFIG_HOME/tabby/`（默认 `~/.config/tabby/`）。文件不存在时使用默认值；内容无法识别（未知的 `icons`、缺少 `url` 的 profile、非法颜色等）时，tabby 在进入全屏前报错退出，并指出出错的键。

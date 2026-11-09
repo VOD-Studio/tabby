@@ -29,7 +29,7 @@ use tracing_subscriber::EnvFilter;
 
 /// Terminal UI for the Clash / mihomo External Controller.
 #[derive(Debug, Parser)]
-#[command(version, about)]
+#[command(version, long_version = env!("TABBY_LONG_VERSION"), about)]
 struct Cli {
     #[command(flatten)]
     overrides: Overrides,
@@ -59,7 +59,7 @@ async fn main() -> Result<()> {
         url = %settings.url,
         theme = %settings.theme,
         "starting tabby {}",
-        env!("CARGO_PKG_VERSION"),
+        env!("TABBY_LONG_VERSION"),
     );
     let client = ApiClient::new(&settings.url, settings.secret.as_deref())?;
     let (msg_tx, msg_rx) = mpsc::channel(event::MSG_BUFFER);
