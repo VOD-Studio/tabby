@@ -78,7 +78,7 @@ Versioning: SemVer, version only in `Cargo.toml`, tags `vX.Y.Z`. While 0.x, brea
 
 ## Important Files
 - `src/main.rs` — CLI parse, logging, config → `resolve` → `themes::load` → `ApiClient::new` → `App::new` → `event::run`.
-- `build.rs` — sets `TABBY_LONG_VERSION` (`0.1.0 (<hash>[-dirty] <date>)`, plain version outside tabby's own git checkout) for `--version` and the startup log line; `-V` stays `CARGO_PKG_VERSION`. Reruns on `src`, `build.rs`, `Cargo.toml`, `Cargo.lock`, `HEAD` and its reflog; `-dirty` = `git status` non-empty for those paths. No new deps.
+- `build.rs` — sets `TABBY_LONG_VERSION` (`0.1.0 (<hash>[-dirty] <date>)`, plain version outside tabby's own git checkout) for `--version`, the startup log line and the help popup's bottom border (`help::version`, falls back to `CARGO_PKG_VERSION` when narrow); `-V` stays `CARGO_PKG_VERSION`. Reruns on `src`, `build.rs`, `Cargo.toml`, `Cargo.lock`, `HEAD` and its reflog; `-dirty` = `git status` non-empty for those paths. No new deps.
 - `src/app.rs` (~10.8k lines, ~2/3 is tests) — `Page`, `Action`, `Msg`, `Envelope`, `Outbox`, `action_for`, `App`, `handle_msg`, `on_tick`, `set_page`, `switch_profile`. Most state logic lives here.
 - `src/event.rs` — main loop (`TICK` 100 ms).
 - `src/config.rs` — `Config`, `Overrides`, `resolve`, `Palette`/`[theme_overrides]`, `IconSet`, `parse_color` (`#rrggbb`, 16 ANSI names, `reset`).
@@ -97,7 +97,7 @@ Versioning: SemVer, version only in `Cargo.toml`, tags `vX.Y.Z`. While 0.x, brea
 
 ## Testing & QA
 - Inline `#[cfg(test)] mod tests` per module (no `tests/*.rs` integration crate). Frameworks: built-in `#[test]`/`#[tokio::test]`, `wiremock` (REST), real `TcpListener::bind("127.0.0.1:0")` + `accept_hdr_async` (WS), tokio `test-util` (`#[tokio::test(start_paused = true)]`), ratatui `TestBackend`. No snapshot crates.
-- Current baseline (verified): `cargo fmt --check` clean, clippy `-D warnings` clean, **413 passed, 1 ignored**.
+- Current baseline (verified): `cargo fmt --check` clean, clippy `-D warnings` clean, **414 passed, 1 ignored**.
 - Managed-core tests never run real programs or touch the host: `core::testing` has `Recorder` (a `Runner` that records `Cmd`s and answers from a closure; `.without("prog")` = not found), `scratch`, `free_port`, `serve` (a stand-in mihomo controller thread), `core_at(dir, port, &recorder, systemd)` (seams `mountinfo`, `unit_dir`, `desktop` point at temp values; `search_path` and `shipped` are `None`, set them per test), and `core_on_nosuid_mount`. App-level helpers in `app.rs` tests: `managed_app`, `managed_settings_on`, `pump_until`, `subscriptions_app`, `updating_systemd`, `tun_machine`, `toasted`, `type_text`. `#[test]` fake kernels are `#!/bin/sh` scripts in the temp dir. Subscription servers are `wiremock`.
 - App tests: `app_without_controller()` targets closed `http://127.0.0.1:1`; build apps with `launch(...)`/`app_with_proxies()`; inject via `handle_msg`/`key_press`; assert on `screen_text(app, w, h)` (renders to `TestBackend`, substring/exact checks). Test names are long descriptive snake_case sentences (`a_screen_too_small_only_says_so_and_keys_still_work`).
 - Config isolation is by construction: pass `Overrides{url: Some(..)}`, `Picker::default()`, or `Config::load(Some(&path))` on a scratch dir (`scratch(name)` → `temp_dir()/tabby-{pid}-{name}`; duplicated in `config.rs`/`themes.rs`/`app.rs`). Still export a temp `XDG_CONFIG_HOME`.

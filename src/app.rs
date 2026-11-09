@@ -8391,6 +8391,21 @@ secret = "b-secret"
         assert_eq!(app.help_scroll, 0);
     }
 
+    #[test]
+    fn the_help_shows_the_version_on_its_bottom_border_down_to_the_smallest_screen() {
+        let (mut app, _rx) = app_without_controller();
+        key_press(&mut app, KeyCode::Char('?'));
+        let version = format!(" tabby {} ─╯", env!("TABBY_LONG_VERSION"));
+        for (width, height) in [(120, 40), (50, 15)] {
+            let screen = screen_text(&app, width, height);
+            let bottom = screen.lines().rfind(|line| line.contains('╰')).unwrap();
+            // The corners stay, with a stretch of border on either side.
+            let bottom = bottom.trim();
+            assert!(bottom.starts_with("╰──"), "{bottom}");
+            assert!(bottom.ends_with(&version), "{bottom}");
+        }
+    }
+
     /// Draws `app` at its own size, which registers what the mouse can act
     /// on, as the event loop does before it reads one.
     fn draw(app: &App) -> String {

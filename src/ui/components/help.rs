@@ -1,7 +1,7 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout, Rect},
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
 };
@@ -206,6 +206,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     });
     app.hits.add(sheet.rect, Target::Popup);
     let inner = popup::panel(frame, sheet.rect, theme.accent, Some("帮助"), status);
+    version(frame, sheet.rect, theme.muted);
 
     let heading =
         |text: String| Line::styled(text, Style::new().fg(theme.fg).add_modifier(Modifier::BOLD));
@@ -255,6 +256,25 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         global.push(Line::raw(""));
         global.extend(current);
         frame.render_widget(Paragraph::new(global).scroll(scroll), inner);
+    }
+}
+
+/// `tabby <version> (<commit> <date>)` on the bottom border of `panel`, at
+/// the right; just the version when the commit does not fit, nothing when
+/// that does not either. The border keeps a cell and its corner on each side.
+fn version(frame: &mut Frame, panel: Rect, color: Color) {
+    // Versions, hashes and dates are ASCII: a byte is a column.
+    let fits = |text: &String| text.len() + 4 <= usize::from(panel.width);
+    let text = [env!("TABBY_LONG_VERSION"), env!("CARGO_PKG_VERSION")]
+        .into_iter()
+        .map(|version| format!(" tabby {version} "))
+        .find(fits);
+    if let Some(text) = text
+        && panel.height >= 2
+        && let Ok(width) = u16::try_from(text.len())
+    {
+        let area = Rect::new(panel.right() - 2 - width, panel.bottom() - 1, width, 1);
+        frame.render_widget(Span::styled(text, Style::new().fg(color)), area);
     }
 }
 
