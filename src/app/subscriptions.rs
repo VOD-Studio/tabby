@@ -36,6 +36,69 @@ pub enum Work {
     /// Turning the automatic update of a subscription on (or off).
     Toggle(bool),
     Remove,
+    /// Giving a subscription another name.
+    Rename,
+    /// Setting the hours between the automatic updates of a subscription.
+    Interval(u32),
+    /// Reading subscription `id` again with the age key it was given.
+    Rekey(String),
+}
+
+/// What the box at the foot of the page is asked for while it is open.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum Ask {
+    /// The address or path of a subscription to import.
+    #[default]
+    Import,
+    /// The age key to open the encrypted subscription at the address or
+    /// path with.
+    ImportKey(String),
+    /// The new name of subscription `id`.
+    Name(String),
+    /// The hours between the automatic updates of subscription `id`.
+    Interval(String),
+    /// The age key of subscription `id` is to be another.
+    Key(String),
+}
+
+/// How the box at the foot of the screen looks while it asks `Ask`.
+#[derive(Debug, Clone, Copy)]
+pub struct Prompt {
+    pub glyph: &'static str,
+    /// What the keys do, after the text.
+    pub hint: &'static str,
+    /// Said where nothing is typed yet.
+    pub placeholder: &'static str,
+    /// What is typed is a secret, and shown as `*`.
+    pub secret: bool,
+}
+
+impl Ask {
+    pub fn prompt(&self) -> Prompt {
+        let (glyph, hint, placeholder, secret) = match self {
+            Self::Import => ("+ ", "  Enter 导入   Esc 取消", "订阅地址或文件路径", false),
+            Self::ImportKey(_) => (
+                "* ",
+                "  Enter 解密导入   Esc 取消",
+                "订阅已加密：输入 age 私钥",
+                true,
+            ),
+            Self::Name(_) => ("> ", "  Enter 改名   Esc 取消", "订阅名称", false),
+            Self::Interval(_) => (
+                "> ",
+                "  Enter 确定   Esc 取消",
+                "自动更新间隔（小时）",
+                false,
+            ),
+            Self::Key(_) => ("* ", "  Enter 更换   Esc 取消", "输入新的 age 私钥", true),
+        };
+        Prompt {
+            glyph,
+            hint,
+            placeholder,
+            secret,
+        }
+    }
 }
 
 /// News from the work started on the subscriptions.
@@ -63,12 +126,11 @@ pub struct SubscriptionsView {
     pub filter: Input,
     /// The filter box has the keyboard.
     pub typing: bool,
-    /// The address or path being typed to import a subscription, while one
-    /// is; it has the keyboard.
+    /// What is being typed in the box at the foot of the screen, while one
+    /// is open; it has the keyboard. What it is for is [`Self::ask`].
     pub adding: Option<Input>,
-    /// The address or path of an encrypted subscription, while the box asks
-    /// for the age key to open it with.
-    pub key_for: Option<String>,
+    /// What the open box asks for.
+    pub ask: Ask,
     /// Subscriptions being updated or switched to.
     pub busy: HashSet<String>,
     /// An import is under way.
@@ -155,16 +217,31 @@ fn path_of(text: &str) -> std::path::PathBuf {
     }
 }
 
-impl App {
-    /// Whether the box at the foot of the screen takes the address or path of
-    /// a subscription to import, rather than a filter.
-    pub fn adding_subscription(&self) -> bool {
-        self.page == super::Page::Subscriptions && self.subscriptions_view.adding.is_some()
+/// The hours typed as the interval between automatic updates: a whole
+/// number of hours, up to a year.
+fn parse_interval(text: &str) -> Result<u32, &'static str> {
+    const WHY: &str = "间隔须是 1–8760 小时";
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(WHY);
     }
+    // Four digits at most: no overflow whatever is typed.
+    let digits = text.trim_start_matches('0');
+    if digits.len() > 4 {
+        return Err(WHY);
+    }
+    match digits.parse::<u32>() {
+        Ok(hours @ 1..=8760) => Ok(hours),
+        _ => Err(WHY),
+    }
+}
 
-    /// Whether the box at the foot of the screen takes an age key.
-    pub fn asking_age_key(&self) -> bool {
-        self.adding_subscription() && self.subscriptions_view.key_for.is_some()
+impl App {
+    /// How the box at the foot of the screen looks, while it asks the
+    /// subscriptions page for something rather than filters.
+    pub fn subscription_prompt(&self) -> Option<Prompt> {
+        let view = &self.subscriptions_view;
+        (self.page == super::Page::Subscriptions && view.adding.is_some())
+            .then(|| view.ask.prompt())
     }
 
     /// The managed core, while the pages are talking to it.
@@ -197,37 +274,131 @@ impl App {
         self.spawn_subscription(|core| async move { SubEvent::Loaded(core.subscriptions()) });
     }
 
+    /// Opens the box at the foot of the screen to ask for `ask`, `text`
+    /// already in it.
+    fn open_box(&mut self, ask: Ask, text: &str) {
+        let view = &mut self.subscriptions_view;
+        view.typing = false;
+        view.ask = ask;
+        view.adding = Some(Input::new(text.to_owned()));
+        self.dirty = true;
+    }
+
     /// `a`: opens the box an address or a path is typed in.
     pub(super) fn add_subscription(&mut self) {
         if self.subscriptions_core().is_none() || self.subscriptions_view.adding.is_some() {
             return;
         }
-        self.subscriptions_view.typing = false;
-        self.subscriptions_view.adding = Some(Input::default());
-        self.dirty = true;
+        self.open_box(Ask::Import, "");
     }
 
-    /// `Enter` in the box: imports what was typed, an address or a file.
+    /// `e`: opens the box the name of the subscription under the cursor is
+    /// changed in.
+    pub(super) fn rename_subscription(&mut self) {
+        if self.subscriptions_core().is_none() || self.subscriptions_view.adding.is_some() {
+            return;
+        }
+        let Some(sub) = self.subscriptions_view.selected() else {
+            return;
+        };
+        let (id, name) = (sub.id.clone(), sub.name.clone());
+        self.open_box(Ask::Name(id), &name);
+    }
+
+    /// `i`: opens the box the hours between the automatic updates of the
+    /// subscription under the cursor are typed in.
+    pub(super) fn edit_interval(&mut self) {
+        if self.subscriptions_core().is_none() || self.subscriptions_view.adding.is_some() {
+            return;
+        }
+        let Some(sub) = self.subscriptions_view.selected() else {
+            return;
+        };
+        if sub.kind == Kind::File {
+            self.toast(
+                ToastKind::Error,
+                "文件订阅不自动更新，按 u 重新读取".to_owned(),
+            );
+            return;
+        }
+        let (id, hours) = (sub.id.clone(), sub.interval_hours.max(1).to_string());
+        self.open_box(Ask::Interval(id), &hours);
+    }
+
+    /// `K`: opens the box the subscription under the cursor is given
+    /// another age key in. Only an encrypted subscription has one.
+    pub(super) fn change_age_key(&mut self) {
+        if self.subscriptions_core().is_none() || self.subscriptions_view.adding.is_some() {
+            return;
+        }
+        let Some(sub) = self.subscriptions_view.selected() else {
+            return;
+        };
+        if sub.age_key.is_none() {
+            self.toast(ToastKind::Error, "这份订阅没有加密".to_owned());
+            return;
+        }
+        let id = sub.id.clone();
+        self.open_box(Ask::Key(id), "");
+    }
+
+    /// `Enter` in the box: does what the box asked for with what was typed.
+    /// A typed interval that is not one leaves the box open.
     pub(super) fn submit_subscription(&mut self) {
         let Some(input) = self.subscriptions_view.adding.take() else {
             return;
         };
         self.dirty = true;
         let text = input.value().trim().to_owned();
-        let key_for = self.subscriptions_view.key_for.take();
+        let ask = std::mem::take(&mut self.subscriptions_view.ask);
         if text.is_empty() {
             return;
         }
+        match ask {
+            Ask::Import => self.start_import(text, None),
+            Ask::ImportKey(source) => self.start_import(source, Some(text)),
+            Ask::Name(id) => self.spawn_subscription(move |core| async move {
+                SubEvent::Done {
+                    result: core.rename(&id, &text).await,
+                    work: Work::Rename,
+                }
+            }),
+            Ask::Interval(id) => match parse_interval(&text) {
+                Ok(hours) => self.spawn_subscription(move |core| async move {
+                    SubEvent::Done {
+                        result: core.set_interval(&id, hours).await,
+                        work: Work::Interval(hours),
+                    }
+                }),
+                Err(why) => {
+                    let view = &mut self.subscriptions_view;
+                    view.ask = Ask::Interval(id);
+                    view.adding = Some(input);
+                    self.toast(ToastKind::Error, why.to_owned());
+                }
+            },
+            Ask::Key(id) => {
+                if !self.subscriptions_view.busy.insert(id.clone()) {
+                    return;
+                }
+                self.spawn_subscription(move |core| async move {
+                    SubEvent::Done {
+                        result: core.set_age_key(&id, &text).await,
+                        work: Work::Rekey(id),
+                    }
+                });
+            }
+        }
+    }
+
+    /// Imports `source`, an address or a file, opening it with `key` when
+    /// there is one.
+    fn start_import(&mut self, source: String, key: Option<String>) {
         if self.subscriptions_view.importing {
             self.toast(ToastKind::Error, "正在导入另一个订阅".to_owned());
             return;
         }
         self.subscriptions_view.importing = true;
-        // What was typed is the key when the box was asking for one.
-        let (source, key) = match key_for {
-            Some(source) => (source, Some(text)),
-            None => (text, None),
-        };
         let is_url = source.starts_with("http://") || source.starts_with("https://");
         self.spawn_subscription(move |core| async move {
             let result = if is_url {
@@ -253,10 +424,7 @@ impl App {
             }
             _ => return false,
         }
-        let view = &mut self.subscriptions_view;
-        view.key_for = Some(source.to_owned());
-        view.adding = Some(Input::default());
-        view.typing = false;
+        self.open_box(Ask::ImportKey(source.to_owned()), "");
         true
     }
 
@@ -448,10 +616,10 @@ impl App {
         let view = &mut self.subscriptions_view;
         match work {
             Work::Import(_) => view.importing = false,
-            Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) => {
+            Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) | Work::Rekey(id) => {
                 view.busy.remove(id);
             }
-            Work::Remove | Work::Toggle(_) => {}
+            Work::Remove | Work::Toggle(_) | Work::Rename | Work::Interval(_) => {}
         }
         let outcome = match result {
             Ok(outcome) => outcome,
@@ -477,7 +645,9 @@ impl App {
                         format!("{verb}「{name}」失败")
                     }
                     Work::Remove => "删除失败".to_owned(),
-                    Work::Toggle(_) => "设置失败".to_owned(),
+                    Work::Toggle(_) | Work::Interval(_) => "设置失败".to_owned(),
+                    Work::Rename => "改名失败".to_owned(),
+                    Work::Rekey(_) => "更换密钥失败".to_owned(),
                 };
                 self.toast(ToastKind::Error, failure(&what, &err));
                 return;
@@ -502,6 +672,9 @@ impl App {
                 "「{name}」自动更新已{}",
                 if *on { "开启" } else { "关闭" }
             )),
+            Work::Rename => Some(format!("已改名为「{name}」")),
+            Work::Interval(hours) => Some(format!("「{name}」每 {hours} 小时自动更新")),
+            Work::Rekey(_) => Some(format!("已用新密钥更新「{name}」")),
         };
         if let Some(text) = text {
             self.toast(ToastKind::Success, text);

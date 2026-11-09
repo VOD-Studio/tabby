@@ -210,6 +210,8 @@ fn subscription_hints(app: &App) -> Vec<Hint> {
             },
         ),
         hint("t", "自动更新"),
+        hint("i", "间隔"),
+        hint("e", "改名"),
         hint("d", "删除"),
         hint("/", "过滤"),
         hint("j/k", "移动"),
@@ -386,15 +388,12 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 /// The filter box that replaces the hints while typing: `/ text`, with the
 /// terminal cursor at the insertion point.
 fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
-    // The same box takes the address or path of a subscription to import.
-    let adding = app.adding_subscription();
-    let secret = app.asking_age_key();
-    let (prompt, hint) = if secret {
-        ("* ", "  Enter 解密导入   Esc 取消")
-    } else if adding {
-        ("+ ", "  Enter 导入   Esc 取消")
-    } else {
-        ("/ ", "  Enter 确定   Esc 清除")
+    // The same box takes what the subscriptions page asks for.
+    let asked = app.subscription_prompt();
+    let secret = asked.is_some_and(|prompt| prompt.secret);
+    let (prompt, hint) = match asked {
+        Some(asked) => (asked.glyph, asked.hint),
+        None => ("/ ", "  Enter 确定   Esc 清除"),
     };
 
     let theme = app.theme;
@@ -415,12 +414,11 @@ fn render_filter(frame: &mut Frame, area: Rect, app: &App, input: &Input) {
         .map(|ch| if secret { '*' } else { ch })
         .collect();
 
-    let text = if secret && visible.is_empty() {
-        Span::styled("订阅已加密：输入 age 私钥", Style::new().fg(theme.muted))
-    } else if adding && visible.is_empty() {
-        Span::styled("订阅地址或文件路径", Style::new().fg(theme.muted))
-    } else {
-        Span::styled(visible, Style::new().fg(theme.fg))
+    let text = match asked {
+        Some(asked) if visible.is_empty() => {
+            Span::styled(asked.placeholder, Style::new().fg(theme.muted))
+        }
+        _ => Span::styled(visible, Style::new().fg(theme.fg)),
     };
     let line = Line::from(vec![
         Span::styled(

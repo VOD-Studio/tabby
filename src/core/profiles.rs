@@ -300,6 +300,16 @@ impl ManagedCore {
     /// Reads subscription `id` again from where it came from. What was
     /// there stays when that fails.
     pub async fn update(&self, id: &str) -> Result<Outcome, CoreError> {
+        self.update_with(id, None).await
+    }
+
+    /// Reads subscription `id` again, with `key` to open it in place of the
+    /// one kept with it; the key is kept when it does.
+    pub async fn set_age_key(&self, id: &str, key: &str) -> Result<Outcome, CoreError> {
+        self.update_with(id, Some(key)).await
+    }
+
+    async fn update_with(&self, id: &str, key: Option<&str>) -> Result<Outcome, CoreError> {
         let _guard = self.lock.lock().await;
         let mut store = self.subscriptions()?;
         let sub = store.get(id).cloned().ok_or(CoreError::NoSubscription)?;
@@ -311,7 +321,7 @@ impl ManagedCore {
                 usage: None,
             },
         };
-        let (text, age_key) = plain(&fetched.bytes, sub.age_key.as_deref())?;
+        let (text, age_key) = plain(&fetched.bytes, key.or(sub.age_key.as_deref()))?;
         let prepared = self.prepare(id, &sub.name, &text).await?;
         self.commit(id, &prepared)?;
         if let Some(entry) = store.get_mut(id) {
@@ -355,6 +365,38 @@ impl ManagedCore {
         Ok(Outcome {
             store,
             reload: true,
+            name,
+        })
+    }
+
+    /// Gives subscription `id` another name. The name is only what the
+    /// list shows: the files go by the id.
+    pub async fn rename(&self, id: &str, name: &str) -> Result<Outcome, CoreError> {
+        let _guard = self.lock.lock().await;
+        let mut store = self.subscriptions()?;
+        let entry = store.get_mut(id).ok_or(CoreError::NoSubscription)?;
+        name.trim().clone_into(&mut entry.name);
+        let name = entry.name.clone();
+        self.save_subscriptions(&store)?;
+        Ok(Outcome {
+            store,
+            reload: false,
+            name,
+        })
+    }
+
+    /// Sets how many hours pass between the automatic updates of
+    /// subscription `id`.
+    pub async fn set_interval(&self, id: &str, hours: u32) -> Result<Outcome, CoreError> {
+        let _guard = self.lock.lock().await;
+        let mut store = self.subscriptions()?;
+        let entry = store.get_mut(id).ok_or(CoreError::NoSubscription)?;
+        entry.interval_hours = hours;
+        let name = entry.name.clone();
+        self.save_subscriptions(&store)?;
+        Ok(Outcome {
+            store,
+            reload: false,
             name,
         })
     }
@@ -1059,6 +1101,94 @@ mod tests {
             Some(key.as_str())
         );
         assert!(config_of(&dir).contains("1.2.3.4"));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_subscription_is_renamed_and_given_an_interval_without_touching_its_files() {
+        let (core, _, dir) = core("sub-edit");
+        let server = serve(SUB, &[]).await;
+        let id = core
+            .import_url(&url(&server), None)
+            .await
+            .unwrap()
+            .store
+            .subscriptions[0]
+            .id
+            .clone();
+        let before = everything_in(&dir);
+        let config = config_of(&dir);
+
+        let renamed = core.rename(&id, "  家里的机场 ").await.unwrap();
+        assert_eq!(renamed.name, "家里的机场");
+        assert!(!renamed.reload);
+        let timed = core.set_interval(&id, 6).await.unwrap();
+        assert_eq!(timed.store.subscriptions[0].interval_hours, 6);
+
+        // Kept in the list, and nowhere else: not a file is made or changed.
+        let stored = core.subscriptions().unwrap();
+        assert_eq!(stored.subscriptions[0].name, "家里的机场");
+        assert_eq!(stored.subscriptions[0].interval_hours, 6);
+        assert_eq!(everything_in(&dir), before);
+        assert_eq!(config_of(&dir), config);
+        assert!(matches!(
+            core.rename("nope", "x").await,
+            Err(CoreError::NoSubscription)
+        ));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn another_key_is_tried_on_the_subscription_and_kept_only_if_it_opens_it() {
+        let (core, _, dir) = core("sub-rekey");
+        let (key, identity) = age_pair();
+        let server =
+            serve_bytes(age::encrypt(&identity.to_public(), SUB.as_bytes()).unwrap()).await;
+        let id = core
+            .import_url(&url(&server), Some(&key))
+            .await
+            .unwrap()
+            .store
+            .subscriptions[0]
+            .id
+            .clone();
+
+        // The server changed its key; the one kept with the subscription
+        // no longer opens it, and neither does a wrong or a bad one.
+        let (newer_key, newer) = age_pair();
+        server.reset().await;
+        Mock::given(method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_bytes(age::encrypt(&newer.to_public(), OTHER.as_bytes()).unwrap()),
+            )
+            .mount(&server)
+            .await;
+        let (wrong, _) = age_pair();
+        for bad in [wrong.as_str(), "hunter2"] {
+            assert!(core.set_age_key(&id, bad).await.is_err(), "{bad}");
+        }
+        let stored = core.subscriptions().unwrap();
+        assert_eq!(
+            stored.subscriptions[0].age_key.as_deref(),
+            Some(key.as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("core/profiles/{id}.yaml"))).unwrap(),
+            SUB
+        );
+
+        let done = core.set_age_key(&id, &newer_key).await.unwrap();
+        assert_eq!(
+            done.store.subscriptions[0].age_key.as_deref(),
+            Some(newer_key.as_str())
+        );
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("core/profiles/{id}.yaml"))).unwrap(),
+            OTHER
+        );
+        // It runs, so the kernel has to read it again.
+        assert!(done.reload);
         fs::remove_dir_all(dir).unwrap();
     }
 }

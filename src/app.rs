@@ -47,7 +47,7 @@ mod managed;
 mod subscriptions;
 
 pub use managed::{CoreEvent, CorePhase, LoginStart};
-pub use subscriptions::{SubEvent, SubscriptionsView};
+pub use subscriptions::{Ask, SubEvent, SubscriptionsView};
 
 /// The eight top-level pages, in tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1312,6 +1312,15 @@ pub enum Action {
     /// `t` on the subscriptions page: turn the automatic update of the
     /// subscription under the cursor on or off.
     ToggleAutoUpdate,
+    /// `e` on the subscriptions page: type another name for the
+    /// subscription under the cursor.
+    RenameSubscription,
+    /// `i` on the subscriptions page: type the hours between the automatic
+    /// updates of the subscription under the cursor.
+    EditInterval,
+    /// `K` on the subscriptions page: type another age key for the
+    /// encrypted subscription under the cursor.
+    ChangeAgeKey,
     /// `h` on the providers page: health-check the proxy provider under the
     /// cursor.
     HealthCheck,
@@ -1577,6 +1586,11 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                     Some(Action::DeleteSubscription)
                 }
                 KeyCode::Char('t') if page == Page::Subscriptions => Some(Action::ToggleAutoUpdate),
+                KeyCode::Char('e') if page == Page::Subscriptions => {
+                    Some(Action::RenameSubscription)
+                }
+                KeyCode::Char('i') if page == Page::Subscriptions => Some(Action::EditInterval),
+                KeyCode::Char('K') if page == Page::Subscriptions => Some(Action::ChangeAgeKey),
                 // Only lowercase: the dialog says `y`, and a dangerous action
                 // should not go ahead on a Shift slip.
                 KeyCode::Char('y') => Some(Action::Accept),
@@ -2634,6 +2648,9 @@ impl App {
             Action::UpdateSubscriptions => self.ask_update_subscriptions(),
             Action::DeleteSubscription => self.ask_delete_subscription(),
             Action::ToggleAutoUpdate => self.toggle_auto_update(),
+            Action::RenameSubscription => self.rename_subscription(),
+            Action::EditInterval => self.edit_interval(),
+            Action::ChangeAgeKey => self.change_age_key(),
             Action::Refresh => self.refresh(),
         }
     }
@@ -3213,7 +3230,7 @@ impl App {
             Page::Settings => self.settings_view.editing = None,
             Page::Subscriptions => {
                 self.subscriptions_view.adding = None;
-                self.subscriptions_view.key_for = None;
+                self.subscriptions_view.ask = Ask::Import;
                 self.set_typing(false);
             }
             _ => self.set_typing(false),
@@ -3259,6 +3276,14 @@ impl App {
             Page::Subscriptions => {
                 let view = &mut self.subscriptions_view;
                 match &mut view.adding {
+                    // Hours are digits.
+                    Some(_)
+                        if matches!(view.ask, Ask::Interval(_))
+                            && matches!(key.code, KeyCode::Char(ch)
+                            if !ch.is_ascii_digit()
+                                && !key.modifiers.intersects(
+                                    KeyModifiers::CONTROL | KeyModifiers::ALT,
+                                )) => {}
                     Some(input) => {
                         input.handle_event(&event);
                     }
@@ -3318,7 +3343,7 @@ impl App {
             Page::Settings => self.settings_view.editing = None,
             Page::Subscriptions => {
                 // The box of an import first, then the filter.
-                self.subscriptions_view.key_for = None;
+                self.subscriptions_view.ask = Ask::Import;
                 if self.subscriptions_view.adding.take().is_none() {
                     self.subscriptions_view.clear_filter();
                 }
@@ -9055,6 +9080,12 @@ secret = "b-secret"
         matches!(app.core_phase, Some(CorePhase::Running))
     }
 
+    /// The box at the foot of the subscriptions page asks for a secret key.
+    fn asking_age_key(app: &App) -> bool {
+        app.subscription_prompt()
+            .is_some_and(|prompt| prompt.secret)
+    }
+
     #[tokio::test]
     async fn the_pages_wait_for_the_managed_kernel_and_load_once_it_is_up() {
         let dir = testing::scratch("app-start");
@@ -9683,7 +9714,7 @@ secret = "b-secret"
         let (mut app, mut rx, dir, _) = subscriptions_app("subs-add", &server).await;
 
         key_press(&mut app, KeyCode::Char('a'));
-        assert!(app.typing() && app.adding_subscription());
+        assert!(app.typing() && app.subscription_prompt().is_some());
         // Keys that mean something elsewhere are text in the box.
         type_text(&mut app, &format!("{}/sub?x=1", server.uri()));
         assert_eq!(app.page, Page::Subscriptions);
@@ -9847,6 +9878,9 @@ secret = "b-secret"
             ('u', Action::UpdateSubscription),
             ('U', Action::UpdateSubscriptions),
             ('d', Action::DeleteSubscription),
+            ('e', Action::RenameSubscription),
+            ('i', Action::EditInterval),
+            ('K', Action::ChangeAgeKey),
             ('/', Action::StartFilter),
         ] {
             assert_eq!(
@@ -9874,6 +9908,62 @@ secret = "b-secret"
                 KeyModifiers::NONE
             )))
         );
+    }
+
+    #[tokio::test]
+    async fn a_subscription_is_renamed_and_given_an_interval_in_the_box_at_the_foot() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, mut rx, dir, _) = subscriptions_app("subs-edit", &server).await;
+        let typed = |app: &App| {
+            app.subscriptions_view
+                .adding
+                .as_ref()
+                .unwrap()
+                .value()
+                .to_owned()
+        };
+
+        // The name comes up in the box, to be changed.
+        key_press(&mut app, KeyCode::Char('e'));
+        assert!(app.typing());
+        assert_eq!(typed(&app), "机场");
+        for _ in 0..2 {
+            key_press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "家里");
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| toasted(app, "已改名为「家里」")).await;
+        assert_eq!(app.subscriptions_view.selected().unwrap().name, "家里");
+
+        // Hours are digits; one that is not a number of hours keeps the box
+        // open with what was typed.
+        key_press(&mut app, KeyCode::Char('i'));
+        assert_eq!(typed(&app), "24");
+        type_text(&mut app, "ab");
+        assert_eq!(typed(&app), "24");
+        for _ in 0..2 {
+            key_press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "0");
+        key_press(&mut app, KeyCode::Enter);
+        assert!(toasted(&app, "间隔须是 1–8760 小时"), "{:?}", app.toasts);
+        assert!(app.typing());
+        assert_eq!(typed(&app), "0");
+        key_press(&mut app, KeyCode::Backspace);
+        type_text(&mut app, "6");
+        key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, |app| toasted(app, "每 6 小时自动更新")).await;
+        assert_eq!(app.subscriptions_view.selected().unwrap().interval_hours, 6);
+
+        // A file is read by hand, so it has no interval; a subscription
+        // that is not encrypted has no key to change.
+        key_press(&mut app, KeyCode::Char('j'));
+        key_press(&mut app, KeyCode::Char('i'));
+        assert!(!app.typing() && toasted(&app, "文件订阅不自动更新"));
+        key_press(&mut app, KeyCode::Char('k'));
+        key_press(&mut app, KeyCode::Char('K'));
+        assert!(!app.typing() && toasted(&app, "这份订阅没有加密"));
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     /// Waits until `reached` holds of the stand-in controller's requests.
@@ -10724,7 +10814,7 @@ secret = "b-secret"
         key_press(&mut app, KeyCode::Char('a'));
         type_text(&mut app, &format!("{}/sub", encrypted.uri()));
         key_press(&mut app, KeyCode::Enter);
-        pump_until(&mut app, &mut rx, App::asking_age_key).await;
+        pump_until(&mut app, &mut rx, asking_age_key).await;
         assert!(!app.subscriptions_view.importing);
         assert!(draw(&app).contains("订阅已加密：输入 age 私钥"));
 
@@ -10735,7 +10825,7 @@ secret = "b-secret"
         assert!(!screen.contains("AGE-SECRET-KEY"), "{screen}");
         assert!(screen.contains("*****"), "{screen}");
         key_press(&mut app, KeyCode::Enter);
-        pump_until(&mut app, &mut rx, App::asking_age_key).await;
+        pump_until(&mut app, &mut rx, asking_age_key).await;
         assert!(
             toasted(&app, "导入失败：age 密钥打不开这份订阅"),
             "{:?}",
@@ -10747,7 +10837,7 @@ secret = "b-secret"
         key_press(&mut app, KeyCode::Enter);
         pump_until(&mut app, &mut rx, |app| !app.subscriptions_view.importing).await;
 
-        assert!(!app.asking_age_key());
+        assert!(!asking_age_key(&app));
         assert_eq!(app.subscriptions_view.visible().len(), 3);
         assert_eq!(
             app.subscriptions_view
@@ -10762,9 +10852,9 @@ secret = "b-secret"
         key_press(&mut app, KeyCode::Char('a'));
         type_text(&mut app, &format!("{}/sub", encrypted.uri()));
         key_press(&mut app, KeyCode::Enter);
-        pump_until(&mut app, &mut rx, App::asking_age_key).await;
+        pump_until(&mut app, &mut rx, asking_age_key).await;
         key_press(&mut app, KeyCode::Esc);
-        assert!(!app.asking_age_key() && !app.typing());
+        assert!(!asking_age_key(&app) && !app.typing());
         assert_eq!(app.subscriptions_view.visible().len(), 3);
         std::fs::remove_dir_all(dir).unwrap();
     }
