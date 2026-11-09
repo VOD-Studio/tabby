@@ -1,7 +1,8 @@
-# The per-commit gate of AGENTS.md (make fmt-check, lint, test) on every push
-# to main and every pull request; release.yml runs it on the tagged commit
-# before building. Actions are pinned to full commit SHAs (Dependabot keeps
-# them current) and every job gets a read-only token.
+# The per-commit gate of AGENTS.md (make fmt-check, lint, test) and a zizmor
+# audit of .github/ on every push to main and every pull request; release.yml
+# runs it on the tagged commit before building. Actions are pinned to full
+# commit SHAs (Dependabot keeps them current) and every job gets a read-only
+# token.
 name: CI
 
 on:
@@ -67,3 +68,19 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: make test
+
+  workflows:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Lints .github/ (workflows and dependabot.yml): unpinned actions,
+      # excessive permissions, template injection, cache poisoning, … Findings
+      # stay in the log: no code-scanning upload, no security-events token.
+      - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          advanced-security: false
