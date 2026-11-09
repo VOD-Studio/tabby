@@ -1,0 +1,13 @@
+tabby includes the following Rust crates. Their licenses follow.
+{{#each licenses}}
+
+================================================================================
+{{{name}}} ({{{id}}})
+
+Used by:
+{{#each used_by}}
+  - {{{crate.name}}} {{{crate.version}}}{{#if crate.repository}} ({{{crate.repository}}}){{/if}}
+{{/each}}
+
+{{{text}}}
+{{/each}}

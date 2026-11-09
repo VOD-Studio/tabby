@@ -9,6 +9,8 @@ CARGO ?= cargo
 CARGO_FLAGS ?= --locked
 # Arguments forwarded to the binary by `make run`, e.g. `make run ARGS="--url http://127.0.0.1:9090"`.
 ARGS ?=
+# Rust target triple for `make dist`; empty means the host's.
+TARGET ?=
 
 # Run a command with config/state dirs redirected to a throwaway directory so
 # nothing can ever read or write ~/.config/tabby (see AGENTS.md).
@@ -18,7 +20,7 @@ tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 XDG_CONFIG_HOME="$$tmp/config" XDG_STATE_HOME="$$tmp/state" XDG_DATA_HOME="$$tmp/data" $(1)
 endef
 
-.PHONY: help build release run fmt fmt-check lint test check install uninstall clean
+.PHONY: help build release run fmt fmt-check lint test check install uninstall dist clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -51,6 +53,9 @@ install: ## Install tabby into ~/.cargo/bin
 
 uninstall: ## Remove the installed binary
 	$(CARGO) uninstall tabby
+
+dist: ## Release archives in dist/, with and without mihomo; TARGET=<triple> to cross
+	scripts/dist.sh $(TARGET)
 
 clean: ## Remove build artifacts
 	$(CARGO) clean
