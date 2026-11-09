@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Cuts release <version> on a clean tree: runs the gate (make check), sets the
 # version in Cargo.toml and Cargo.lock, adds its section to CHANGELOG.md
-# (git-cliff, cliff.toml), commits `chore(release): v<version>`, tags that
-# commit `v<version>` (annotated) and builds the archives (scripts/dist.sh).
-# Nothing is pushed.
+# (git-cliff, cliff.toml), commits `chore(release): v<version>` and tags that
+# commit `v<version>` (annotated). Nothing is pushed: pushing the tag makes
+# .github/workflows/release.yml build the archives and publish the release.
 #
 # usage: scripts/release.sh <version>      e.g. 0.2.0 or 1.0.0-rc.1
 #        scripts/release.sh                prints the version git-cliff suggests
-# needs: what scripts/dist.sh needs, and git-cliff (cargo install --locked git-cliff)
+# needs: git-cliff (cargo install --locked git-cliff)
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -58,7 +58,5 @@ git add Cargo.toml Cargo.lock CHANGELOG.md
 git commit --quiet -m "chore(release): $tag"
 git tag -a "$tag" -m "tabby $version" -m "The -with-mihomo archives ship mihomo $MIHOMO_TAG."
 
-scripts/dist.sh
-
 branch=$(git symbolic-ref --short HEAD)
-echo "release: $tag is committed, tagged and built; publish with: git push origin $branch $tag"
+echo "release: $tag is committed and tagged; publish with: git push --atomic origin $branch $tag"

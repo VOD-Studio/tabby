@@ -1,0 +1,139 @@
+# Publishes the GitHub release of every pushed v* tag (made by
+# `make cut-release`, scripts/release.sh): the gate (ci.yml) on the tagged
+# commit, `make dist` on native x86_64 and aarch64 runners, then one job that
+# checks what the builds uploaded, writes SHA256SUMS, attests the tabby
+# archives (`gh attestation verify`) and creates the release with the tag's
+# CHANGELOG.md section. Only that job can write. No cache is restored by the
+# builds: a poisoned cache must not reach a release.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions: {}
+
+# A tag pushed again waits for the run before it instead of racing it.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    uses: $/.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  build:
+    name: build (${{ matrix.target }})
+    needs: check
+    strategy:
+      matrix:
+        include:
+          # The oldest images there are: the binary needs the glibc it was
+          # linked against, or a newer one (Ubuntu 22.04: 2.35).
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - runner: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-about
+      - name: Check the tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(cargo pkgid | sed 's/.*[#@]//')
+          if [ "$TAG" != "v$version" ]; then
+              echo "::error::the tag is $TAG, but Cargo.toml says $version"
+              exit 1
+          fi
+          # scripts/dist.sh packs a release only when it sees the tag on
+          # HEAD; without it, it would pack a snapshot and only warn.
+          git tag --points-at HEAD | grep -qxF "$TAG"
+      - run: make dist TARGET="$TARGET"
+        env:
+          TARGET: ${{ matrix.target }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dist-${{ matrix.target }}
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: publish
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the release
+      id-token: write # the Sigstore certificate of the attestation
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: dist-*
+          path: artifacts
+      - name: Collect the archives
+        run: |
+          mkdir dist
+          for dir in artifacts/dist-*/; do
+              (cd "$dir" && sha256sum --check --strict SHA256SUMS)
+              cp "$dir"tabby-*.tar.gz dist/
+          done
+          # Every build fetched the same mihomo source archive.
+          set -- artifacts/dist-*/mihomo-*-source.tar.gz
+          for source; do cmp "$1" "$source"; done
+          cp "$1" dist/
+          (cd dist && sha256sum -- *.tar.gz >SHA256SUMS)
+          cat dist/SHA256SUMS
+      # mihomo's source archive is upstream's, not built here: not attested.
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: dist/tabby-*.tar.gz
+      - name: Create the release
+        env:
+          TAG: ${{ github.ref_name }}
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${TAG#v}
+          awk -v head="## [$version]" '
+              index($0, head) == 1 { on = 1; next }
+              on && /^## \[/ { exit }
+              on
+          ' CHANGELOG.md >notes.md
+          if ! grep -q '[^[:space:]]' notes.md; then
+              echo "::error::CHANGELOG.md has no section for $version"
+              exit 1
+          fi
+          {
+              echo
+              echo "### Verifying"
+              echo
+              echo '```sh'
+              echo 'sha256sum --check --ignore-missing SHA256SUMS'
+              echo "gh attestation verify tabby-$version-<target>.tar.gz --repo $GH_REPO"
+              echo '```'
+          } >>notes.md
+          prerelease=()
+          case $version in *-*) prerelease=(--prerelease) ;; esac
+          gh release create "$TAG" --verify-tag --title "tabby $version" \
+              --notes-file notes.md "${prerelease[@]}" dist/*.tar.gz dist/SHA256SUMS

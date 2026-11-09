@@ -63,7 +63,7 @@ uninstall: ## Remove the installed binary
 dist: ## Release archives in dist/, with and without mihomo; TARGET=<triple> to cross
 	scripts/dist.sh $(TARGET)
 
-cut-release: ## Gate, bump, CHANGELOG, commit and tag VERSION=x.y.z, then dist (no push)
+cut-release: ## Gate, bump, CHANGELOG, commit and tag VERSION=x.y.z (no push; the tag push publishes)
 	scripts/release.sh $(VERSION)
 
 clean: ## Remove build artifacts
