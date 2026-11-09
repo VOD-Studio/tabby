@@ -159,6 +159,7 @@ flowchart LR
   - UA 用 `tabby/v<版本> clash-verge Platform/<os>`。服务端多半按 UA 里是否有 `clash` 字样决定返回 clash-meta 格式；带上 `clash-verge` 是照 FlClash 的做法。
   - 名字：先取 `content-disposition` 的 `filename*=UTF-8''…`（按百分号解码），再取 `filename=`，都没有就用 URL 的 host。
   - 用量：解析 `subscription-userinfo`，复用 Providers 页解析订阅用量的规则（全零读成 `None`）。
+  - 下载（第 17–20 项）：走 `settings.toml` 的 `[subscription-download]` 选的方式（直连 / 托管内核的 Mixed 端口 / 用户给的 http、https、socks5 代理），不读代理环境变量，失败后不换方式。没有总时长上限，连续 20 秒（`FETCH_IDLE`）收不到数据才放弃；网络错误、无数据、5xx、408、429 最多共试 3 次（间隔 1 秒、2 秒），其余 4xx 不重试。下载进度经 `SubEvent::Progress` 报给订阅页。
 - 导入文件：复制到 `profiles/<id>.yaml`。之后手动更新时重新读原路径；原文件不在了就保留副本并提示。
 - 校验（对应 FlClash 的 `validateProfile`）：
   1. 开头是 `age-encryption.org/v1`：要求输入 age 密钥（第 9 项），解密后进入第 2 步。
@@ -203,6 +204,7 @@ flowchart LR
 
 - `settings.toml` 的默认值：`mixed-port = 7890`、`allow-lan = false`、`ipv6 = false`、`log-level = "info"`、`mode = "rule"`；`[tun]` 为 `enable = false`、`stack = "mixed"`、`auto-route = true`、`auto-detect-interface = true`、`dns-hijack = ["any:53"]`、`mtu = 9000`。
 - 设置页和 `m` 在托管模式下的修改：照旧 `PATCH /configs`，成功后再写进 `settings.toml`，所以重启后仍然生效（外部控制器模式下仍然只改运行时）。在途保护和乱序处理照旧（主方案第 42 项）。
+- `[subscription-download]`：`via = "direct" | "core" | "proxy"`（默认 `direct`），`proxy` 为经代理时的地址，切走后仍保留。只影响订阅下载，不进 `config.yaml`。`via = "proxy"` 而没有 `proxy`、或 `proxy` 不是 http/https/socks5/socks5h 地址时，读文件即报错。
 - 托管模式下的 `重载配置` = 用当前订阅重新生成配置再重载；确认框正文改为 `用当前订阅重新生成配置？`。
 
 ## 8. TUN 授权
@@ -457,3 +459,13 @@ M7 的内核只有两种来源：`[core].binary`，或 tabby 下载。2026-11-09
       - 没有做：aarch64 的包（本机没有交叉工具链，脚本的分支和 sha256 已备好）；发行版的包（PKGBUILD 等）和 CI。
 16. `docs: record M9 shipped kernel decisions`
     - README：安装一节加发布包与解压方式；托管内核一节写内核的查找顺序；开发一节写 `make dist`；许可证一节写 mihomo 与依赖的许可证位置。AGENTS.md：目录表、命令、测试基线（405 passed, 1 ignored）。
+17. `feat(subscriptions): log why an import or update failed`
+    - 起因：用户导入 `yun7.de` 的订阅一直失败，界面只有一闪而过的 toast，日志里什么也没有。实测订阅本身没问题（`mihomo -t` 通过），是下载经 FlClash 的 TUN 时快时慢，有一次 90 秒只收到 8 KB，而当时的客户端总时限是 60 秒。
+    - 实现记录（2026-11-09）：`finish_subscription` 失败时 `tracing::warn!`，带 `work`（import / update / auto-update / switch / …）和对象：导入记 `loggable(source)`（URL 只留 scheme、主机、端口，token 在路径或 query 里都不记；文件路径原样），其余记 `名字 (id)`。`AgeKeyNeeded` 是在要密钥，不算失败、不记。
+18. `feat(core): give up a subscription download when it goes quiet, and retry it`
+    - 实现记录（2026-11-09）：去掉 `reqwest` 的 60 秒总时限，保留 10 秒连接时限；等应答和每两块数据之间各自套 `tokio::time::timeout(FETCH_IDLE)`。`fetch_once` 返回 `Failed::Again` / `Failed::ForGood`：构造请求失败（地址无效）和 408/429 以外的 4xx 不重试。间隔与时限放进 `Timing`（`fetch_idle`、`fetch_pause`），测试里改短。测试用一个线程里的假服务器分四块慢慢发：总时长超过时限但每块间隔短于时限的能下完、只请求一次；发一块后不再发的三次都放弃；503 两次后成功、404 只请求一次。
+19. `feat(subscriptions): show how much a download got and how fast`
+    - 实现记录（2026-11-09）：`import_url` / `update` / `set_age_key` 多一个 `progress: impl Fn(Progress)`；`Progress { attempt, answered, received, total, done }`，接收中最多每 100 ms 报一次，开始、应答、收完各报一次。App 侧 `report()` 用 `Outbox::try_send`（通道满就丢，下一次会更新），`SubscriptionsView.transfers` 按 `Fetching::{Import, Subscription(id)}` 存 `Transfer`；完成（`SubEvent::Done`）时删除。速度取最近 2 秒（`RATE_WINDOW`）的增量，应答之前的等待不计，应答后不足 0.5 秒不显示，断流时逐渐降到 0，换一次尝试重新计。导入显示在标题栏右侧，更新显示在那一行的用量列（有下载时这一列让给进度）。
+20. `feat(settings): choose how subscriptions are downloaded`
+    - 实现记录（2026-11-09）：`Setting::SubscriptionDownload`（托管内核组，`DNS 覆盖` 之后）。`Enter` 直连 → 经托管内核 → 弹框输入代理 → 直连；框里预填上次的代理，没有就是 `http://127.0.0.1:7890`。设置页的输入框从“只有端口”改成 `Field::{Port, Proxy}`：端口只收数字，代理什么都收；代理的框占满这一行剩下的宽度。写入走 `ManagedCore::persist(Persist::SubscriptionDownload)`。`ManagedCore.http` 仍是直连的客户端，经代理时每次下载临时建一个（`subscription_http(Some(proxy))`，同样 `no_proxy()` 之后只加这一个代理）。`reqwest` 加 `socks` feature（`Cargo.lock` 不变，没有新 crate）。显示与日志里的代理用 `shown_proxy`，去掉 `user:pass@`。经代理失败时报错前加 `through <代理>: `，toast 被截断时也能看到是哪个代理。测试：一个记录请求行的假 HTTP 代理，经托管内核（Mixed 端口指向它）和经代理都请求了 `http://subscription.invalid/…`（直连不可能成功）；不存在的 socks5 代理报错以 `through socks5://127.0.0.1:<port>: ` 开头且不含密码。
+    - 手动验证（真 mihomo v1.19.33，临时 `XDG_*`，托管内核 Mixed 27891，tmux 80×24 与 60×20；没有碰 FlClash 与用户自己的托管内核）：设置页切换三种方式，`settings.toml` 随之变化，无效地址被拒、框不关；经 `http://127.0.0.1:1` 导入：`连接中…` → `第 2 次 · 连接中…` → `导入失败：through http://127.0.0.1:1: …`，`tabby.log` 有两条重试和一条失败，订阅 token 出现 0 次；经托管内核导入用户的真实订阅（63.5 KB）成功，中间两次约 3 秒断流；直连 `u` 更新：约 3 秒 `连接中…`，51.5 KB 处断流约 9 秒后继续，`检查中…`，随后恢复用量显示。结束后临时单元已停，临时目录已删。
