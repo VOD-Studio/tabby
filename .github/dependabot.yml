@@ -1,0 +1,30 @@
+# Weekly update pull requests for the pinned actions (SHA and version
+# comment) and for Cargo.lock / Cargo.toml. A release is taken only after a
+# week, so a compromised one has time to be found and pulled first.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      # Majors stay one pull request each: they may need code changes.
+      compatible:
+        update-types: [minor, patch]
