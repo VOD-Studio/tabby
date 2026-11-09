@@ -16,6 +16,7 @@ use super::{
     install,
     runner::Cmd,
     runtime,
+    settings::{Route, proxy_url},
     state::random_hex,
     subscription::{
         DEFAULT_INTERVAL_HOURS, Kind, Store, Subscription, Usage, first_error, link_count,
@@ -116,30 +117,77 @@ impl ManagedCore {
             .map_err(|err| CoreError::io("cannot write the kernel's config", err))
     }
 
+    /// The client a subscription is downloaded with, the way
+    /// `[subscription-download]` says, and that way as the log says it.
+    fn subscription_client(&self) -> Result<(reqwest::Client, String), CoreError> {
+        let settings = self.settings();
+        let download = settings.subscription_download;
+        let (proxy, via) = match download.via {
+            Route::Direct => return Ok((self.http.clone(), "direct".to_owned())),
+            Route::Core if settings.mixed_port == 0 => {
+                return Err(CoreError::Fetch(
+                    "the managed kernel's mixed port is off".to_owned(),
+                ));
+            }
+            Route::Core => {
+                let port = settings.mixed_port;
+                (
+                    format!("http://127.0.0.1:{port}"),
+                    format!("through the managed kernel (127.0.0.1:{port})"),
+                )
+            }
+            Route::Proxy => {
+                let via = format!("through {}", shown_proxy(&download.proxy));
+                (download.proxy, via)
+            }
+        };
+        let client = reqwest::Proxy::all(&proxy)
+            .and_then(|proxy| subscription_http(Some(proxy)))
+            .map_err(|err| {
+                CoreError::Fetch(format!("cannot use the proxy: {}", install::describe(&err)))
+            })?;
+        Ok((client, via))
+    }
+
     /// Downloads the subscription at `url`, trying again (after
     /// `fetch_pause`, then twice that) when the network or the server
-    /// failed: up to [`TRIES`] times in all. `progress` hears how far it
-    /// is.
+    /// failed: up to [`TRIES`] times in all, all the same way. `progress`
+    /// hears how far it is.
     async fn fetch(&self, url: &str, progress: &impl Fn(Progress)) -> Result<Fetched, CoreError> {
+        let (client, via) = self.subscription_client()?;
+        tracing::info!(via, "downloading a subscription");
         let mut attempt = 1;
-        loop {
-            match self.fetch_once(url, attempt, progress).await {
+        let err = loop {
+            match self.fetch_once(&client, url, attempt, progress).await {
                 Ok(fetched) => return Ok(fetched),
                 Err(Failed::Again(err)) if attempt < TRIES => {
-                    tracing::warn!(attempt, "subscription download failed, trying again: {err}");
+                    tracing::warn!(
+                        attempt,
+                        via,
+                        "subscription download failed, trying again: {err}"
+                    );
                     tokio::time::sleep(self.timing.fetch_pause * attempt).await;
                     attempt += 1;
                 }
-                Err(Failed::Again(err) | Failed::ForGood(err)) => return Err(err),
+                Err(Failed::Again(err) | Failed::ForGood(err)) => break err,
             }
-        }
+        };
+        // What failed through a proxy may be the proxy: it says which.
+        Err(match err {
+            CoreError::Fetch(message) if via != "direct" => {
+                CoreError::Fetch(format!("{message} ({via})"))
+            }
+            other => other,
+        })
     }
 
-    /// Try `attempt` at downloading the subscription at `url`. It is given
-    /// up when nothing comes for `fetch_idle`, while the answer is awaited
-    /// or between two pieces of it, however long the whole takes.
+    /// Try `attempt` at downloading the subscription at `url` with
+    /// `client`. It is given up when nothing comes for `fetch_idle`, while
+    /// the answer is awaited or between two pieces of it, however long the
+    /// whole takes.
     async fn fetch_once(
         &self,
+        client: &reqwest::Client,
         url: &str,
         attempt: u32,
         progress: &impl Fn(Progress),
@@ -161,7 +209,7 @@ impl ManagedCore {
                 Failed::Again(message)
             }
         };
-        let mut response = tokio::time::timeout(idle, self.http.get(url).send())
+        let mut response = tokio::time::timeout(idle, client.get(url).send())
             .await
             .map_err(|_| stalled())?
             .map_err(failed)?;
@@ -564,6 +612,39 @@ impl ManagedCore {
     }
 }
 
+/// The client subscriptions are downloaded with, through `proxy` when
+/// given. It does not read the proxy variables: which way a download goes
+/// is what `[subscription-download]` says. There is no overall time limit;
+/// a download is given up when it goes quiet ([`ManagedCore::fetch_once`]).
+/// It asks as a client of the kind that gets a clash config.
+pub(super) fn subscription_http(proxy: Option<reqwest::Proxy>) -> reqwest::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .no_proxy()
+        .user_agent(format!(
+            "tabby/v{} clash-verge Platform/{}",
+            env!("CARGO_PKG_VERSION"),
+            std::env::consts::OS
+        ))
+        .connect_timeout(Duration::from_secs(10));
+    if let Some(proxy) = proxy {
+        builder = builder.proxy(proxy);
+    }
+    builder.build()
+}
+
+/// The proxy `text` as it may be shown and logged: its scheme, host and
+/// port, without a user name or password it carries.
+pub fn shown_proxy(text: &str) -> String {
+    let Some(url) = proxy_url(text) else {
+        return "(an unusable proxy)".to_owned();
+    };
+    let host = url.host_str().unwrap_or_default();
+    match url.port_or_known_default() {
+        Some(port) => format!("{}://{host}:{port}", url.scheme()),
+        None => format!("{}://{host}", url.scheme()),
+    }
+}
+
 /// The text `bytes` hold, and the key that opened it: an age file is read
 /// with `key` (as the user typed it), anything else is text as it is.
 fn plain(bytes: &[u8], key: Option<&str>) -> Result<(String, Option<String>), CoreError> {
@@ -627,7 +708,10 @@ mod tests {
     };
 
     use super::*;
-    use crate::core::testing::{Recorder, answer, core_at, free_port, scratch};
+    use crate::core::{
+        DownloadSettings, Persist,
+        testing::{Recorder, answer, core_at, free_port, scratch},
+    };
 
     const SUB: &str = "proxies:\n  - {name: a, type: ss, server: 1.2.3.4, port: 1, cipher: aes-128-gcm, password: p}\nrules:\n  - MATCH,DIRECT\n";
     const OTHER: &str = "proxies:\n  - {name: b, type: ss, server: 5.6.7.8, port: 2, cipher: aes-128-gcm, password: q}\nrules:\n  - MATCH,DIRECT\n";
@@ -785,6 +869,83 @@ mod tests {
                 .all(|progress| progress.total == Some(SUB.len() as u64)),
             "{heard:?}"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A stand-in HTTP proxy that answers every request with [`SUB`]: its
+    /// port, and the request lines it got.
+    fn proxy() -> (u16, Arc<std::sync::Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let lines = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = Arc::clone(&lines);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut request = Vec::new();
+                let mut byte = [0; 1];
+                while !request.ends_with(b"\r\n\r\n") && stream.read(&mut byte).unwrap_or(0) == 1 {
+                    request.push(byte[0]);
+                }
+                let text = String::from_utf8_lossy(&request);
+                seen.lock()
+                    .unwrap()
+                    .push(text.lines().next().unwrap_or_default().to_owned());
+                let answer = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{SUB}",
+                    SUB.len()
+                );
+                let _ = stream.write_all(answer.as_bytes());
+            }
+        });
+        (port, lines)
+    }
+
+    #[tokio::test]
+    async fn a_subscription_goes_the_way_the_settings_say_and_a_proxy_that_fails_is_named() {
+        let (core, _, dir) = core("sub-route");
+        // Not a host there is: only a proxy gets it.
+        let address = "http://subscription.invalid/sub?token=SECRET";
+        let (port, lines) = proxy();
+
+        core.persist(Persist::MixedPort(port)).unwrap();
+        core.persist(Persist::SubscriptionDownload(DownloadSettings {
+            via: Route::Core,
+            proxy: String::new(),
+        }))
+        .unwrap();
+        core.import_url(address, None, |_| {}).await.unwrap();
+
+        core.persist(Persist::MixedPort(7890)).unwrap();
+        core.persist(Persist::SubscriptionDownload(DownloadSettings {
+            via: Route::Proxy,
+            proxy: format!("http://127.0.0.1:{port}"),
+        }))
+        .unwrap();
+        core.import_url(address, None, |_| {}).await.unwrap();
+        assert_eq!(
+            *lines.lock().unwrap(),
+            [
+                format!("GET {address} HTTP/1.1"),
+                format!("GET {address} HTTP/1.1")
+            ]
+        );
+
+        // A proxy that is not there: said which, without its password.
+        let gone = free_port();
+        core.persist(Persist::SubscriptionDownload(DownloadSettings {
+            via: Route::Proxy,
+            proxy: format!("socks5://me:hunter2@127.0.0.1:{gone}"),
+        }))
+        .unwrap();
+        let err = core.import_url(address, None, |_| {}).await.unwrap_err();
+        assert!(
+            matches!(&err, CoreError::Fetch(message)
+                if message.ends_with(&format!("(through socks5://127.0.0.1:{gone})"))
+                    && !message.contains("hunter2")),
+            "{err:?}"
+        );
+        assert_eq!(core.subscriptions().unwrap().subscriptions.len(), 2);
         fs::remove_dir_all(dir).unwrap();
     }
 

@@ -1770,6 +1770,24 @@ impl Confirm {
     }
 }
 
+/// What the box on the settings page is typed into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Field {
+    Port(Port),
+    /// The proxy subscriptions are downloaded through.
+    Proxy,
+}
+
+impl Field {
+    /// The row it is typed on.
+    pub fn setting(self) -> Setting {
+        match self {
+            Self::Port(port) => Setting::Port(port),
+            Self::Proxy => Setting::SubscriptionDownload,
+        }
+    }
+}
+
 /// A port the kernel takes proxy clients on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Port {
@@ -1841,13 +1859,15 @@ pub enum Setting {
     SystemProxy,
     /// Edits the DNS keys the managed core sets over the subscription's.
     Dns,
+    /// The way subscriptions are downloaded.
+    SubscriptionDownload,
     /// Stops the managed core.
     StopCore,
 }
 
 impl Setting {
     /// Top to bottom, as the page lists them.
-    pub const ALL: [Self; 21] = [
+    pub const ALL: [Self; 22] = [
         Self::Mode,
         Self::AllowLan,
         Self::LogLevel,
@@ -1868,6 +1888,7 @@ impl Setting {
         Self::LoginStart,
         Self::SystemProxy,
         Self::Dns,
+        Self::SubscriptionDownload,
         Self::StopCore,
     ];
 
@@ -1885,6 +1906,7 @@ impl Setting {
             | Self::LoginStart
             | Self::SystemProxy
             | Self::Dns
+            | Self::SubscriptionDownload
             | Self::StopCore => "托管内核",
         }
     }
@@ -1905,6 +1927,7 @@ impl Setting {
             Self::LoginStart => "登录时启动",
             Self::SystemProxy => "系统代理",
             Self::Dns => "DNS 覆盖",
+            Self::SubscriptionDownload => "订阅下载",
             Self::CoreBinary => "内核",
             Self::Upgrade | Self::UpgradeCore => "升级内核",
         }
@@ -1943,6 +1966,7 @@ impl Setting {
                 | Self::LoginStart
                 | Self::SystemProxy
                 | Self::Dns
+                | Self::SubscriptionDownload
                 | Self::StopCore
         )
     }
@@ -2151,22 +2175,22 @@ fn parse_port(text: &str) -> Result<Option<u16>, &'static str> {
         .map_err(|_| "端口须在 0–65535 之间")
 }
 
-/// Cursor and the port being typed on the settings page.
+/// Cursor and the box being typed into on the settings page.
 #[derive(Debug, Default)]
 pub struct SettingsView {
     /// Index into [`Setting::ALL`].
     pub cursor: usize,
     pub scroll: Scroll,
-    /// The port being edited and what has been typed, while one is. It has
+    /// What is being typed and into what, while the box is open. It has
     /// the keyboard meanwhile, as a filter box does.
-    pub editing: Option<(Port, Input)>,
+    pub editing: Option<(Field, Input)>,
 }
 
 impl SettingsView {
-    /// A key typed into the port box: digits, and the keys that edit or
-    /// move; other characters are not taken.
+    /// A key typed into the box: a port takes digits and the keys that
+    /// edit or move, an address anything.
     fn type_key(&mut self, key: KeyEvent) {
-        let Some((_, input)) = &mut self.editing else {
+        let Some((field, input)) = &mut self.editing else {
             return;
         };
         let plain = !key
@@ -2174,6 +2198,7 @@ impl SettingsView {
             .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT);
         if let KeyCode::Char(ch) = key.code
             && plain
+            && matches!(field, Field::Port(_))
             && !ch.is_ascii_digit()
         {
             return;
@@ -3330,10 +3355,15 @@ impl App {
         self.dirty = true;
     }
 
-    /// `Enter` in the input box: keeps the filter, or sends the port typed.
+    /// `Enter` in the input box: keeps the filter, or sends what was typed
+    /// on the settings page.
     fn accept_input(&mut self) {
         if self.page == Page::Settings {
-            self.submit_port();
+            match self.settings_view.editing.as_ref().map(|(field, _)| *field) {
+                Some(Field::Port(_)) => self.submit_port(),
+                Some(Field::Proxy) => self.submit_proxy(),
+                None => {}
+            }
         } else if self.subscriptions_view.adding.is_some() && self.page == Page::Subscriptions {
             self.submit_subscription();
         } else {
@@ -3515,6 +3545,7 @@ impl App {
             | Setting::LoginStart
             | Setting::SystemProxy
             | Setting::Dns
+            | Setting::SubscriptionDownload
             | Setting::UpgradeCore => true,
         };
         match (reported, clash) {
@@ -3551,6 +3582,7 @@ impl App {
             | Setting::LoginStart
             | Setting::SystemProxy
             | Setting::Dns
+            | Setting::SubscriptionDownload
             | Setting::UpgradeCore => None,
             Setting::AllowLan => Some(Change::Patch(Patch::AllowLan(flip(configs.allow_lan)))),
             Setting::LogLevel => Some(Change::Patch(Patch::LogLevel(next_kernel_log_level(
@@ -3605,6 +3637,7 @@ impl App {
             (Setting::LoginStart, _) => self.toggle_login_start(),
             (Setting::SystemProxy, _) => self.toggle_system_proxy(),
             (Setting::Dns, _) => self.open_dns(),
+            (Setting::SubscriptionDownload, _) => self.cycle_subscription_download(),
             // The kernel needs the capabilities before it can run a TUN.
             (Setting::Tun, Some(change @ Change::Patch(Patch::Tun(true)))) if self.is_managed() => {
                 self.ask_enable_tun(change);
@@ -3624,7 +3657,7 @@ impl App {
                     .filter(|number| *number != 0)
                     .map(|number| number.to_string())
                     .unwrap_or_default();
-                self.settings_view.editing = Some((port, Input::new(typed)));
+                self.settings_view.editing = Some((Field::Port(port), Input::new(typed)));
                 self.dirty = true;
             }
             (_, Some(change)) if setting.asks() => {
@@ -3641,7 +3674,7 @@ impl App {
     /// current one and closes the box; empty closes it without a word;
     /// anything else is refused with the box left open to fix it.
     fn submit_port(&mut self) {
-        let Some((port, input)) = self.settings_view.editing.take() else {
+        let Some((Field::Port(port), input)) = self.settings_view.editing.take() else {
             return;
         };
         self.dirty = true;
@@ -3657,7 +3690,7 @@ impl App {
                 }
             }
             Err(why) => {
-                self.settings_view.editing = Some((port, input));
+                self.settings_view.editing = Some((Field::Port(port), input));
                 self.toast(ToastKind::Error, why.to_owned());
             }
         }
@@ -4954,7 +4987,7 @@ fn healthcheck_timeout(delay_timeout_ms: u32) -> Duration {
 mod tests {
     use super::*;
     use crate::api::models::{Connection, ConnectionSnapshot, Memory};
-    use crate::core::{ManagedCore, Step, testing};
+    use crate::core::{ManagedCore, Route, Step, testing};
     use std::sync::Arc;
 
     /// 10 cards, 3 per row: the last row holds only card 9.
@@ -9276,6 +9309,7 @@ secret = "b-secret"
                         | Setting::LoginStart
                         | Setting::SystemProxy
                         | Setting::Dns
+                        | Setting::SubscriptionDownload
                         | Setting::StopCore
                 )
             })
@@ -10108,6 +10142,85 @@ secret = "b-secret"
                 && config_now.contains("\"allow-lan\": true"),
             "{config_now}"
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_subscription_download_row_steps_through_its_ways_and_asks_for_a_proxy() {
+        let dir = testing::scratch("app-download-way");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, _rx) =
+            managed_settings_on(Arc::clone(&core), Setting::SubscriptionDownload).await;
+        let row = |app: &App| {
+            draw(app)
+                .lines()
+                .find(|line| line.contains("订阅下载"))
+                .unwrap()
+                .to_owned()
+        };
+        assert!(row(&app).contains("直连"), "{}", row(&app));
+
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(core.settings().subscription_download.via, Route::Core);
+        assert!(
+            row(&app).contains("经托管内核  127.0.0.1:7890"),
+            "{}",
+            row(&app)
+        );
+
+        // Next is a proxy: the box asks which, with the usual one in it.
+        key_press(&mut app, KeyCode::Enter);
+        assert!(app.typing());
+        assert!(row(&app).contains("http://127.0.0.1:7890"), "{}", row(&app));
+        assert_eq!(core.settings().subscription_download.via, Route::Core);
+        // Not an address: refused, the box stays.
+        for _ in 0.."http://127.0.0.1:7890".len() {
+            key_press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "127.0.0.1:7890");
+        key_press(&mut app, KeyCode::Enter);
+        assert!(
+            app.typing() && toasted(&app, "代理须是"),
+            "{:?}",
+            app.toasts
+        );
+        // Letters are typed, not taken as keys of the page.
+        for _ in 0.."127.0.0.1:7890".len() {
+            key_press(&mut app, KeyCode::Backspace);
+        }
+        type_text(&mut app, "socks5://me:pw@127.0.0.1:1080");
+        key_press(&mut app, KeyCode::Enter);
+        assert!(!app.typing());
+        let download = core.settings().subscription_download;
+        assert_eq!(
+            (download.via, download.proxy.as_str()),
+            (Route::Proxy, "socks5://me:pw@127.0.0.1:1080")
+        );
+        // The password is not shown.
+        assert!(
+            row(&app).contains("经代理  socks5://127.0.0.1:1080"),
+            "{}",
+            row(&app)
+        );
+        assert!(settings_toml(&dir).contains("via = \"proxy\""));
+
+        // Then directly again; the proxy is kept for next time.
+        key_press(&mut app, KeyCode::Enter);
+        let download = core.settings().subscription_download;
+        assert_eq!(download.via, Route::Direct);
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Enter);
+        assert!(
+            row(&app).contains("socks5://me:pw@127.0.0.1:1080"),
+            "{}",
+            row(&app)
+        );
+        // Esc leaves it as it was.
+        key_press(&mut app, KeyCode::Esc);
+        assert!(!app.typing());
+        assert_eq!(core.settings().subscription_download.via, Route::Core);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

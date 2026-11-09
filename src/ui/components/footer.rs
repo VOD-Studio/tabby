@@ -254,7 +254,8 @@ fn settings_hints(app: &App) -> Vec<Hint> {
         | Setting::Ipv6
         | Setting::Tun
         | Setting::LoginStart
-        | Setting::SystemProxy => "切换",
+        | Setting::SystemProxy
+        | Setting::SubscriptionDownload => "切换",
         Setting::Reload
         | Setting::FlushFakeIp
         | Setting::UpdateGeo

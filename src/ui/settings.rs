@@ -11,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     api::models::Configs,
     app::{App, Gate, Setting},
+    core::{Route, shown_proxy},
     format,
     ui::{
         components::{states, title},
@@ -121,7 +122,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
                 let editing = view
                     .editing
                     .as_ref()
-                    .filter(|(port, _)| row == cursor && setting == Setting::Port(*port))
+                    .filter(|(field, _)| row == cursor && setting == field.setting())
                     .map(|(_, input)| input);
                 let (line, caret) = setting_line(app, configs, setting, width, editing);
                 if let Some(caret) = caret {
@@ -178,7 +179,13 @@ fn setting_line(
     let room = width.saturating_sub(used + 1 + RIGHT_PAD);
 
     if let Some(input) = editing {
-        let shown = room.min(PORT_BOX.max(input.value().width() + 1));
+        // A port is a few digits; an address takes what room there is.
+        let least = if setting == Setting::SubscriptionDownload {
+            room
+        } else {
+            PORT_BOX
+        };
+        let shown = room.min(least.max(input.value().width() + 1));
         let scroll = input.visual_scroll(shown.saturating_sub(1));
         let text: String = input.value().chars().skip(scroll).collect();
         let field = format!("{text:<shown$}");
@@ -267,6 +274,20 @@ fn value(
         Setting::Dns => match app.dns_overrides().len() {
             0 => vec![Span::styled("跟随订阅", muted)],
             count => vec![Span::styled(format!("{count} 项已覆盖"), fg)],
+        },
+        Setting::SubscriptionDownload => match app.subscription_download() {
+            None => vec![Span::styled(NO_VALUE, muted)],
+            Some((download, port)) => match download.via {
+                Route::Direct => vec![Span::styled("直连", fg)],
+                Route::Core => vec![
+                    Span::styled("经托管内核", fg),
+                    Span::styled(format!("  127.0.0.1:{port}"), muted),
+                ],
+                Route::Proxy => vec![
+                    Span::styled("经代理", fg),
+                    Span::styled(format!("  {}", shown_proxy(&download.proxy)), muted),
+                ],
+            },
         },
         Setting::CoreBinary => {
             let Some(path) = app.core_binary() else {
@@ -364,7 +385,7 @@ mod tests {
         let (indices, titles) = headings(&Setting::ALL);
         assert_eq!(indices, (0..Setting::ALL.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护", "托管内核"]);
-        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 6].to_vec();
+        let external: Vec<Setting> = Setting::ALL[..Setting::ALL.len() - 7].to_vec();
         let (indices, titles) = headings(&external);
         assert_eq!(indices, (0..external.len()).collect::<Vec<_>>());
         assert_eq!(titles, ["基础", "端口", "TUN", "维护"]);

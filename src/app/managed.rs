@@ -5,12 +5,20 @@
 use std::sync::Arc;
 
 use super::{
-    App, Change, Confirm, Msg, Outbox, Overlay, Patch, Port, Reconnect, Setting, Stage, ToastKind,
+    App, Change, Confirm, Field, Msg, Outbox, Overlay, Patch, Port, Reconnect, Setting, Stage,
+    ToastKind,
 };
 use crate::{
-    core::{CoreError, Graphical, ManagedCore, Persist, Release, Step, SystemProxy, Upgrade},
+    core::{
+        CoreError, DownloadSettings, Graphical, ManagedCore, Persist, Release, Route, Step,
+        SystemProxy, Upgrade, proxy_url, shown_proxy,
+    },
     ui::text::core_reason,
 };
+
+/// What the proxy box offers when no proxy was given before: where a
+/// desktop proxy client usually listens.
+const PROXY_SUGGESTION: &str = "http://127.0.0.1:7890";
 
 /// Where the managed kernel is, as far as the pages are concerned.
 #[derive(Debug)]
@@ -590,6 +598,84 @@ impl App {
                 CoreEvent::SystemProxySet(core.set_system_proxy(on, number).await.map(|()| on))
             });
         }
+    }
+
+    /// `订阅下载`: directly, then through the managed kernel, then through
+    /// a proxy (the box asks which), then directly again.
+    pub(super) fn cycle_subscription_download(&mut self) {
+        let Some(core) = self.managed_core() else {
+            return;
+        };
+        let download = core.settings().subscription_download;
+        match download.via {
+            Route::Direct => self.set_subscription_download(DownloadSettings {
+                via: Route::Core,
+                ..download
+            }),
+            Route::Core => {
+                let typed = if download.proxy.is_empty() {
+                    PROXY_SUGGESTION.to_owned()
+                } else {
+                    download.proxy
+                };
+                self.settings_view.editing = Some((Field::Proxy, tui_input::Input::new(typed)));
+                self.dirty = true;
+            }
+            Route::Proxy => self.set_subscription_download(DownloadSettings {
+                via: Route::Direct,
+                ..download
+            }),
+        }
+    }
+
+    /// `Enter` in the proxy box: a proxy address is kept, and downloads go
+    /// through it; nothing typed closes the box; anything else is refused
+    /// with the box left open to fix it.
+    pub(super) fn submit_proxy(&mut self) {
+        let Some((Field::Proxy, input)) = self.settings_view.editing.take() else {
+            return;
+        };
+        self.dirty = true;
+        let text = input.value().trim().to_owned();
+        if text.is_empty() {
+            return;
+        }
+        if proxy_url(&text).is_none() {
+            self.settings_view.editing = Some((Field::Proxy, input));
+            self.toast(
+                ToastKind::Error,
+                "代理须是 http://、https:// 或 socks5:// 开头的地址".to_owned(),
+            );
+            return;
+        }
+        self.set_subscription_download(DownloadSettings {
+            via: Route::Proxy,
+            proxy: text,
+        });
+    }
+
+    /// Writes down how subscriptions are downloaded, and says so.
+    fn set_subscription_download(&mut self, download: DownloadSettings) {
+        let Some(core) = self.managed_core() else {
+            return;
+        };
+        let said = match download.via {
+            Route::Direct => "订阅改为直连下载".to_owned(),
+            Route::Core => "订阅改为经托管内核下载".to_owned(),
+            Route::Proxy => format!("订阅改为经 {} 下载", shown_proxy(&download.proxy)),
+        };
+        match core.persist(Persist::SubscriptionDownload(download)) {
+            Ok(()) => self.toast(ToastKind::Success, said),
+            Err(err) => self.toast(ToastKind::Error, failure("没能保存", &err)),
+        }
+        self.dirty = true;
+    }
+
+    /// How subscriptions are downloaded, and the managed kernel's mixed
+    /// port they would go through; `None` on an external controller.
+    pub fn subscription_download(&self) -> Option<(DownloadSettings, u16)> {
+        let settings = self.managed_core()?.settings();
+        Some((settings.subscription_download, settings.mixed_port))
     }
 
     /// `y` to `重载配置` on a managed core: the config is written again

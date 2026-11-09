@@ -35,11 +35,11 @@ pub use encrypted::Fault;
 use install::Target;
 pub use install::{Release, Upgrade};
 pub use privilege::Graphical;
-pub use profiles::{Outcome, Progress};
+pub use profiles::{Outcome, Progress, shown_proxy};
 use runner::Runner;
 pub use runner::System;
 use settings::CoreSettings;
-pub use settings::{DNS_KEYS, DnsKind, Persist};
+pub use settings::{DNS_KEYS, DnsKind, DownloadSettings, Persist, Route, proxy_url};
 use state::State;
 pub use subscription::{Kind, Store, Subscription};
 use supervisor::Mode;
@@ -287,7 +287,7 @@ pub struct ManagedCore {
     /// Held across the operations that change the subscriptions, so that two
     /// do not write the list at once.
     lock: tokio::sync::Mutex<()>,
-    /// Downloads subscriptions.
+    /// Downloads subscriptions directly; a proxy gets a client of its own.
     http: reqwest::Client,
     /// What the nodes of a share-link subscription are tested with.
     delay_url: String,
@@ -346,18 +346,7 @@ impl ManagedCore {
             release_api: install::API_BASE.to_owned(),
             target: Target::current(),
             lock: tokio::sync::Mutex::new(()),
-            http: reqwest::Client::builder()
-                .no_proxy()
-                .user_agent(format!(
-                    "tabby/v{} clash-verge Platform/{}",
-                    env!("CARGO_PKG_VERSION"),
-                    env::consts::OS
-                ))
-                // No overall limit: a download is given up when it goes
-                // quiet for `fetch_idle` (`profiles::fetch_once`).
-                .connect_timeout(Duration::from_secs(10))
-                .build()
-                .wrap_err("cannot build HTTP client")?,
+            http: profiles::subscription_http(None).wrap_err("cannot build HTTP client")?,
             delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
             tun_dropped: AtomicBool::new(false),
             mountinfo: PathBuf::from("/proc/self/mountinfo"),

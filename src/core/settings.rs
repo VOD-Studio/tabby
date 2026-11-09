@@ -75,6 +75,39 @@ pub struct CoreSettings {
     /// Keys to set in the subscription's `dns` section, over its own.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub dns: BTreeMap<String, toml::Value>,
+    /// How subscriptions are downloaded.
+    pub subscription_download: DownloadSettings,
+}
+
+/// The way a subscription is downloaded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Route {
+    /// From this machine, past any proxy.
+    #[default]
+    Direct,
+    /// Through the managed kernel's mixed port.
+    Core,
+    /// Through the proxy the user gave.
+    Proxy,
+}
+
+/// The `[subscription-download]` table.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", default, deny_unknown_fields)]
+pub struct DownloadSettings {
+    pub via: Route,
+    /// The proxy of [`Route::Proxy`]; kept while another way is chosen.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub proxy: String,
+}
+
+/// `text` as the address of a proxy a subscription can be downloaded
+/// through: `http`, `https`, `socks5` or `socks5h`, with a host.
+pub fn proxy_url(text: &str) -> Option<reqwest::Url> {
+    let url = reqwest::Url::parse(text).ok()?;
+    let scheme = matches!(url.scheme(), "http" | "https" | "socks5" | "socks5h");
+    (scheme && url.host_str().is_some_and(|host| !host.is_empty())).then_some(url)
 }
 
 /// The `tun` block.
@@ -113,6 +146,7 @@ impl Default for CoreSettings {
             mode: "rule".to_owned(),
             tun: TunSettings::default(),
             dns: BTreeMap::new(),
+            subscription_download: DownloadSettings::default(),
         }
     }
 }
@@ -127,6 +161,7 @@ pub enum Persist {
     Ipv6(bool),
     MixedPort(u16),
     Tun(bool),
+    SubscriptionDownload(DownloadSettings),
 }
 
 impl CoreSettings {
@@ -160,6 +195,7 @@ impl CoreSettings {
             Persist::Ipv6(on) => self.ipv6 = on,
             Persist::MixedPort(port) => self.mixed_port = port,
             Persist::Tun(on) => self.tun.enable = on,
+            Persist::SubscriptionDownload(download) => self.subscription_download = download,
         }
     }
 
@@ -190,6 +226,19 @@ impl CoreSettings {
         one_of("log-level", &self.log_level, &LOG_LEVELS)?;
         one_of("mode", &self.mode, &MODES)?;
         one_of("tun.stack", &self.tun.stack, &STACKS)?;
+        let download = &self.subscription_download;
+        if !download.proxy.is_empty() && proxy_url(&download.proxy).is_none() {
+            return Err(format!(
+                "`subscription-download.proxy` is `{}`, not an http, https or socks5 address",
+                download.proxy
+            ));
+        }
+        if download.via == Route::Proxy && download.proxy.is_empty() {
+            return Err(
+                "`subscription-download.via` is `proxy`, but there is no `proxy` to go through"
+                    .to_owned(),
+            );
+        }
         for (key, value) in &self.dns {
             if !DNS_KEYS.contains(&key.as_str()) {
                 return Err(format!(
@@ -256,6 +305,10 @@ mod tests {
             Persist::LogLevel("debug".to_owned()),
             Persist::Ipv6(true),
             Persist::Tun(true),
+            Persist::SubscriptionDownload(DownloadSettings {
+                via: Route::Proxy,
+                proxy: "socks5://127.0.0.1:1080".to_owned(),
+            }),
         ] {
             settings.set(change);
         }
@@ -297,6 +350,15 @@ mod tests {
             ("mixed-port = 99999", "99999"),
             ("typo = 1", "typo"),
             ("mixed-port = ", "expected"),
+            (
+                "[subscription-download]\nvia = \"proxy\"",
+                "no `proxy` to go through",
+            ),
+            (
+                "[subscription-download]\nproxy = \"127.0.0.1:7890\"",
+                "not an http, https or socks5 address",
+            ),
+            ("[subscription-download]\nvia = \"tor\"", "tor"),
         ] {
             fs::write(&path, text).unwrap();
             let err = CoreSettings::load(&path).unwrap_err();
