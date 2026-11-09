@@ -279,3 +279,7 @@ XDG_CONFIG_HOME="$(mktemp -d)" cargo test
 ```
 
 测试请使用临时 `XDG_CONFIG_HOME`，避免触碰真实配置。设计与决策记录见 [`docs/plans/2026-11-05-tabby-tui.md`](docs/plans/2026-11-05-tabby-tui.md)。
+
+## 许可证
+
+[MIT](LICENSE)。托管内核下载的 mihomo 是独立程序，遵循它自己的许可证（GPL-3.0）。
