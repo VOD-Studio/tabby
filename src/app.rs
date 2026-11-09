@@ -1963,7 +1963,8 @@ pub enum Gate {
     Missing,
     /// Original Clash, which does not have it.
     NeedsMihomo,
-    /// The kernel is the user's own binary: tabby does not replace it.
+    /// The kernel is the user's own binary (`[core].binary`, or one on
+    /// `$PATH`): tabby does not replace it.
     SelfManaged,
     /// A managed core listens on its Mixed port alone.
     MixedOnly,

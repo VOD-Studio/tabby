@@ -384,3 +384,75 @@ fn a_configured_binary_that_is_not_a_file_is_named_in_the_error() {
     ));
     fs::remove_dir_all(dir).unwrap();
 }
+
+/// An executable `mihomo` in a directory of its own under `dir`.
+fn kernel_in(dir: &Path, name: &str) -> PathBuf {
+    let bin = dir.join(name);
+    fs::create_dir_all(&bin).unwrap();
+    let kernel = bin.join("mihomo");
+    fs::write(&kernel, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&kernel, fs::Permissions::from_mode(0o755)).unwrap();
+    kernel
+}
+
+#[test]
+fn without_a_kernel_of_its_own_tabby_runs_the_first_mihomo_on_path_and_does_not_replace_it() {
+    let dir = scratch("on-path");
+    let recorder = Recorder::new(|_| answer(0, ""));
+    let mut core = core_without_binary(&dir, free_port(), &recorder);
+    // Not executable, then executable: the first that can run is taken.
+    let plain = dir.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    fs::write(plain.join("mihomo"), "").unwrap();
+    let system = kernel_in(&dir, "system");
+    let later = kernel_in(&dir, "later");
+    core.search_path = Some(
+        env::join_paths([
+            plain,
+            system.parent().unwrap().to_owned(),
+            later.parent().unwrap().to_owned(),
+        ])
+        .unwrap(),
+    );
+
+    assert_eq!(core.binary().unwrap(), system);
+    assert!(core.is_user_binary());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn the_kernel_tabby_keeps_comes_before_one_on_path() {
+    let dir = scratch("kept-over-path");
+    let recorder = Recorder::new(|_| answer(0, ""));
+    let mut core = core_without_binary(&dir, free_port(), &recorder);
+    let system = kernel_in(&dir, "system");
+    core.search_path = Some(system.parent().unwrap().as_os_str().to_owned());
+    let kept = dir.join("core/bin/mihomo");
+    fs::create_dir_all(kept.parent().unwrap()).unwrap();
+    fs::write(&kept, "").unwrap();
+
+    assert_eq!(core.binary().unwrap(), kept);
+    assert!(!core.is_user_binary());
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn a_relative_path_entry_is_not_searched_for_a_kernel() {
+    let dir = scratch("relative-path");
+    let recorder = Recorder::new(|_| answer(0, ""));
+    let mut core = core_without_binary(&dir, free_port(), &recorder);
+    let kernel = kernel_in(&dir, "bin");
+    // A relative entry that does lead to it from where the tests run: it
+    // would be found if relative entries were searched.
+    let up = "../".repeat(env::current_dir().unwrap().components().count() - 1);
+    let relative = PathBuf::from(up).join(kernel.parent().unwrap().strip_prefix("/").unwrap());
+    assert!(relative.join("mihomo").is_file());
+    core.search_path = Some(relative.into_os_string());
+
+    assert!(matches!(
+        core.binary(),
+        Err(CoreError::NoBinary { path: None })
+    ));
+    assert!(!core.is_user_binary());
+    fs::remove_dir_all(dir).unwrap();
+}

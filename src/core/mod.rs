@@ -19,7 +19,9 @@ mod supervisor;
 mod sysproxy;
 
 use std::{
-    env, io,
+    env,
+    ffi::OsString,
+    io,
     path::{Path, PathBuf},
     sync::{Arc, Mutex, PoisonError, atomic::AtomicBool},
     time::{Duration, Instant},
@@ -148,7 +150,7 @@ impl std::fmt::Display for Action {
 pub enum CoreError {
     /// There is no kernel to run: `path` is where `[core].binary` points
     /// when it does not hold a file, `None` when tabby has not downloaded
-    /// one yet.
+    /// one yet and there is none on `$PATH`.
     #[error("no mihomo binary")]
     NoBinary { path: Option<PathBuf> },
     /// Something other than the managed kernel answers on its port.
@@ -242,6 +244,9 @@ pub struct ManagedCore {
     paths: Paths,
     /// `[core].binary`.
     binary: Option<PathBuf>,
+    /// `$PATH`, where a `mihomo` installed on the system is looked for when
+    /// there is neither `[core].binary` nor a kernel tabby keeps.
+    search_path: Option<OsString>,
     state: State,
     /// What `settings.toml` says, and what is changed since.
     settings: Mutex<CoreSettings>,
@@ -281,6 +286,7 @@ impl ManagedCore {
         let runtime_dir = env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
         let mut core = Self::with(binary, data_dir, Arc::new(System), runtime_dir)?;
         delay_url.clone_into(&mut core.delay_url);
+        core.search_path = env::var_os("PATH");
         Ok(core)
     }
 
@@ -302,6 +308,7 @@ impl ManagedCore {
         Ok(Self {
             paths,
             binary,
+            search_path: None,
             state,
             settings: Mutex::new(settings),
             client,
@@ -413,15 +420,38 @@ impl ManagedCore {
     }
 
     /// Where the kernel to run is, whether or not it is there yet:
-    /// `[core].binary`, else the one tabby keeps in its data directory.
+    /// `[core].binary`; else the one tabby keeps in its data directory; else
+    /// a `mihomo` on `$PATH`; else where tabby would download one to.
     pub fn binary_path(&self) -> PathBuf {
-        self.binary.clone().unwrap_or_else(|| self.paths.bin())
+        if let Some(binary) = &self.binary {
+            return binary.clone();
+        }
+        let kept = self.paths.bin();
+        if kept.is_file() {
+            return kept;
+        }
+        self.on_path().unwrap_or(kept)
     }
 
-    /// Whether `[core].binary` names the kernel: tabby neither downloads nor
-    /// replaces one that is the user's own.
+    /// Whether the kernel is not one tabby keeps (`[core].binary`, or a
+    /// `mihomo` on `$PATH`): tabby neither downloads nor replaces it.
     pub fn is_user_binary(&self) -> bool {
-        self.binary.is_some()
+        self.binary.is_some() || (!self.paths.bin().is_file() && self.on_path().is_some())
+    }
+
+    /// The first executable `mihomo` in an absolute directory of `$PATH`.
+    /// Relative entries are skipped: they name the working directory,
+    /// which is not where an installed kernel is.
+    fn on_path(&self) -> Option<PathBuf> {
+        use std::os::unix::fs::PermissionsExt;
+        env::split_paths(self.search_path.as_ref()?)
+            .filter(|dir| dir.is_absolute())
+            .map(|dir| dir.join("mihomo"))
+            .find(|candidate| {
+                candidate
+                    .metadata()
+                    .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+            })
     }
 
     /// The kernel binary to run, when there is one.
