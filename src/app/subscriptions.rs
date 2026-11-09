@@ -44,6 +44,23 @@ pub enum Work {
     Rekey(String),
 }
 
+impl Work {
+    /// What it is, in the log.
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Import(_) => "import",
+            Self::Update(_) => "update",
+            Self::Switch(_) => "switch",
+            Self::AutoUpdate(_) => "auto-update",
+            Self::Toggle(_) => "auto-update toggle",
+            Self::Remove => "remove",
+            Self::Rename => "rename",
+            Self::Interval(_) => "interval",
+            Self::Rekey(_) => "age key change",
+        }
+    }
+}
+
 /// What the box at the foot of the page is asked for while it is open.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Ask {
@@ -214,6 +231,25 @@ fn path_of(text: &str) -> std::path::PathBuf {
     match (text.strip_prefix("~/"), std::env::var_os("HOME")) {
         (Some(rest), Some(home)) => std::path::Path::new(&home).join(rest),
         _ => std::path::PathBuf::from(text),
+    }
+}
+
+/// `source` as the log may have it: an address carries its owner's token
+/// in its path or query, so only its scheme, host and port are kept. A path
+/// is kept whole.
+fn loggable(source: &str) -> String {
+    if !(source.starts_with("http://") || source.starts_with("https://")) {
+        return source.to_owned();
+    }
+    match reqwest::Url::parse(source) {
+        Ok(url) => {
+            let host = url.host_str().unwrap_or_default();
+            match url.port() {
+                Some(port) => format!("{}://{host}:{port}", url.scheme()),
+                None => format!("{}://{host}", url.scheme()),
+            }
+        }
+        Err(_) => "(an address that does not parse)".to_owned(),
     }
 }
 
@@ -624,6 +660,11 @@ impl App {
         let outcome = match result {
             Ok(outcome) => outcome,
             Err(err) => {
+                // Asking for a key is no failure; the rest outlives its toast
+                // in the log.
+                if !matches!(err, CoreError::AgeKeyNeeded) {
+                    self.log_failure(work, &err);
+                }
                 if let Work::Import(source) = work
                     && self.ask_age_key(source, &err)
                 {
@@ -682,5 +723,47 @@ impl App {
         if outcome.reload {
             self.reload_kernel();
         }
+    }
+
+    /// Writes down what failed and why, where it can be looked up after
+    /// the toast is gone.
+    fn log_failure(&self, work: &Work, err: &CoreError) {
+        let subject = match work {
+            Work::Import(source) => loggable(source),
+            Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) | Work::Rekey(id) => {
+                let name = self
+                    .subscriptions_view
+                    .store()
+                    .and_then(|store| store.get(id))
+                    .map_or("", |sub| sub.name.as_str());
+                format!("{name} ({id})")
+            }
+            Work::Remove | Work::Toggle(_) | Work::Rename | Work::Interval(_) => String::new(),
+        };
+        tracing::warn!(
+            work = work.label(),
+            subscription = %subject,
+            "subscription work failed: {err}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::loggable;
+
+    #[test]
+    fn an_address_is_logged_without_the_token_in_its_path_or_query() {
+        assert_eq!(
+            loggable("https://sub.example.test/q/93dd2ffe5fc44203?token=SECRET#frag"),
+            "https://sub.example.test"
+        );
+        assert_eq!(
+            loggable("http://127.0.0.1:8080/sub?token=SECRET"),
+            "http://127.0.0.1:8080"
+        );
+        // A path is the user's own and has no token: kept as typed.
+        assert_eq!(loggable("~/subs/home.yaml"), "~/subs/home.yaml");
+        assert!(!loggable("https://[bad/SECRET").contains("SECRET"));
     }
 }
