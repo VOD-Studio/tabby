@@ -46,6 +46,22 @@ done
 
 version=$(cargo pkgid | sed 's/.*[#@]//')
 name=tabby-$version-$target
+# A release is the commit tagged v<version>, built from a clean tree: a
+# released version must never be packed twice with different contents.
+# Anything else is a snapshot, packed with a warning.
+tags=$(git tag --points-at HEAD --list 'v*')
+if [ -n "$tags" ]; then
+    grep -qxF "v$version" <<<"$tags" || {
+        echo "dist: HEAD is tagged ${tags//$'\n'/ }, but Cargo.toml says $version" >&2
+        exit 1
+    }
+    [ -z "$(git status --porcelain)" ] || {
+        echo "dist: v$version is a release, but the working tree has changes" >&2
+        exit 1
+    }
+else
+    echo "dist: HEAD is not tagged v$version: packing a snapshot, not a release" >&2
+fi
 source_name=mihomo-$MIHOMO_TAG-source.tar.gz
 # The time of the last commit for every file: the same commit packs the same
 # archives, and the shipped kernel of two releases differs in its time.

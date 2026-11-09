@@ -11,6 +11,8 @@ CARGO_FLAGS ?= --locked
 ARGS ?=
 # Rust target triple for `make dist`; empty means the host's.
 TARGET ?=
+# Version for `make cut-release`, e.g. `make cut-release VERSION=0.2.0`.
+VERSION ?=
 
 # Run a command with config/state dirs redirected to a throwaway directory so
 # nothing can ever read or write ~/.config/tabby (see AGENTS.md).
@@ -20,7 +22,7 @@ tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 XDG_CONFIG_HOME="$$tmp/config" XDG_STATE_HOME="$$tmp/state" XDG_DATA_HOME="$$tmp/data" $(1)
 endef
 
-.PHONY: help build release run fmt fmt-check lint test check install uninstall dist clean
+.PHONY: help build release run fmt fmt-check lint test check install uninstall dist cut-release clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -56,6 +58,9 @@ uninstall: ## Remove the installed binary
 
 dist: ## Release archives in dist/, with and without mihomo; TARGET=<triple> to cross
 	scripts/dist.sh $(TARGET)
+
+cut-release: ## Gate, bump, CHANGELOG, commit and tag VERSION=x.y.z, then dist (no push)
+	scripts/release.sh $(VERSION)
 
 clean: ## Remove build artifacts
 	$(CARGO) clean

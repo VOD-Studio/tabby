@@ -35,7 +35,7 @@ mpsc Envelope{epoch,Msg}┘                                           (Msg only 
 | `src/ui/components/` | Reusable widgets/overlays: `header`, `tabs`, `footer`, `banner`, `states`, `toast`, `popup`, `help`, `profiles`, `themes`, `confirm`, `dns`, `title` |
 | `tests/fixtures/` | Real-shaped JSON from mihomo/clash (`mihomo_*.json`, `clash_*.json`); loaded with `include_str!` |
 | `docs/plans/` | Implementation plan `2026-11-05-tabby-tui.md` (milestones M0–M6, numbered items, decision records) and SVG assets |
-| `scripts/`, `packaging/` | `dist.sh` (`make dist`): release archives with/without mihomo, mihomo source tarball, `SHA256SUMS` into `dist/`; `mihomo.env` pins the shipped mihomo tag + sha256 per arch; `about.{toml,hbs}` for `cargo-about` (`THIRD-PARTY-LICENSES`) |
+| `scripts/`, `packaging/` | `dist.sh` (`make dist`): release archives with/without mihomo, mihomo source tarball, `SHA256SUMS` into `dist/`; refuses a `v*`-tagged HEAD whose tag ≠ `Cargo.toml` version or whose tree is dirty, warns on an untagged (snapshot) HEAD. `release.sh` (`make cut-release VERSION=x.y.z`): clean tree → `make check` → bump `Cargo.toml`/`Cargo.lock` → git-cliff prepends to `CHANGELOG.md` (`cliff.toml`) → commit `chore(release): vX.Y.Z` → annotated tag → `dist.sh`; never pushes. `mihomo.env` pins the shipped mihomo tag + sha256 per arch; `about.{toml,hbs}` for `cargo-about` (`THIRD-PARTY-LICENSES`) |
 
 ## Development Commands
 ```bash
@@ -50,7 +50,9 @@ RUST_LOG=tabby=debug tabby                    # log file: $XDG_STATE_HOME/tabby/
 ```
 CLI flags (each also an env var): `--profile/TABBY_PROFILE`, `--url/TABBY_URL` (default `http://127.0.0.1:9090`), `--secret/TABBY_SECRET`, `--theme/TABBY_THEME`. `--theme` pins the theme and is not persisted.
 
-Per-commit gate: build + clippy `-D warnings` + test must all pass. `make check` runs fmt-check + clippy + test (tests under a throwaway `XDG_*`); `make help` lists targets. `make dist` (needs `cargo-about`: `cargo install --locked --features cli cargo-about`) builds release archives into `dist/` (gitignored; downloads cached in `target/dist-cache/`).
+Per-commit gate: build + clippy `-D warnings` + test must all pass. `make check` runs fmt-check + clippy + test (tests under a throwaway `XDG_*`); `make help` lists targets. `make dist` (needs `cargo-about`: `cargo install --locked --features cli cargo-about`) builds release archives into `dist/` (gitignored; downloads cached in `target/dist-cache/`). `make cut-release VERSION=x.y.z` also needs `git-cliff` (`cargo install --locked git-cliff`; `GIT_CLIFF=<path>` overrides); without `VERSION` it prints git-cliff's suggestion.
+
+Versioning: SemVer, version only in `Cargo.toml`, tags `vX.Y.Z`. While 0.x, breaking changes and features bump minor, fixes bump patch (`cliff.toml [bump]`). Breaking commits use `type!:`. `CHANGELOG.md` is generated at release time (feat → Added, fix → Fixed, perf and other breaking → Changed; other types omitted); never re-generate it wholesale (earlier sections may be hand-edited).
 
 **Commit after every completed feature point.** One feature/fix = one commit, made as soon as it is done and the gate above passes — never batch several feature points into one commit, and never leave finished work uncommitted. Use a Conventional Commit message (e.g. `feat(connections): sort, filter and detail popup`). Stage only the files for that feature point.
 
@@ -87,7 +89,7 @@ Per-commit gate: build + clippy `-D warnings` + test must all pass. `make check`
 - `docs/plans/2026-11-05-tabby-tui.md` — design rationale, risks R1–R7; its §4 file tree is stale (omits `themes.rs`, `ui/icons.rs`, `shadow.rs`, `text.rs`, `scroll.rs`, `components/{themes,profiles}.rs`).
 
 ## Runtime/Tooling Preferences
-- Rust stable, edition 2024 (dev toolchain 1.99; no `rust-version`, no `rust-toolchain`). Cargo + a thin `Makefile` wrapping the commands above; `scripts/dist.sh` for release archives; no justfile/CI.
+- Rust stable, edition 2024 (dev toolchain 1.99; no `rust-version`, no `rust-toolchain`). Cargo + a thin `Makefile` wrapping the commands above; `scripts/dist.sh` for release archives, `scripts/release.sh` to cut a release; no justfile/CI.
 - Async runtime: tokio multi-thread. TLS: rustls only (reqwest, tokio-tungstenite) — do not add OpenSSL.
 - Commits: Conventional Commits, English, lowercase, imperative, no trailing period; scopes like `app`, `api`, `ui`, `config`, `proxies`, `logs`, `connections`, `settings`. Docs follow features with `docs: record M<n> <area> decisions`. Work on `main`; start from a clean tree.
 - **Never touch `~/.config/tabby`**. Any run that may read/write config must set a temp `XDG_CONFIG_HOME` (and `XDG_DATA_HOME`/`XDG_STATE_HOME` for the managed core). Manual checks must target a local throwaway mihomo (127.0.0.1, DIRECT-only, a non-default mixed port), never the user's live kernel or its ports (9090/7890).
