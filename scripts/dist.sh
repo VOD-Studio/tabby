@@ -14,7 +14,8 @@
 #
 # usage: scripts/dist.sh [<rust target triple>]   (default: the host's)
 # needs: cargo, cargo-about (cargo install --locked --features cli cargo-about),
-#        curl, sha256sum, gzip, GNU tar, git
+#        curl, sha256sum, gzip, GNU tar, git; gh too with GH_TOKEN set, which
+#        then fetches mihomo's release asset as a signed-in user
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -71,24 +72,57 @@ work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir -p dist "$cache"
 
-# Downloads $1 into $cache/$2 unless it is there already.
-fetch() {
-    [[ -s $cache/$2 ]] && return
-    curl --fail --location --silent --show-error -o "$cache/$2.part" "$1"
-    mv "$cache/$2.part" "$cache/$2"
+# Runs "$@" up to five times, 10 s apart: GitHub's downloads time out (504)
+# now and then, mostly for anonymous users when it is busy.
+retry() {
+    local try
+    for try in 1 2 3 4 5; do
+        "$@" && return
+        [ "$try" = 5 ] || sleep 10
+    done
+    return 1
 }
 
-echo "dist: building $target"
-cargo build --release --locked --target "$target"
+# Downloads $2 into $cache/$1 unless it is there already.
+fetch() {
+    [[ -s $cache/$1 ]] && return
+    retry curl --fail --location --silent --show-error -o "$cache/$1.part" "$2"
+    mv "$cache/$1.part" "$cache/$1"
+}
 
+# Downloads the asset $1 of mihomo's release $MIHOMO_TAG into $cache/$1.
+# With $GH_TOKEN set (the release workflow) it comes through gh, as a
+# signed-in user.
+fetch_asset() {
+    [[ -s $cache/$1 ]] && return
+    if [ -z "${GH_TOKEN:-}" ]; then
+        fetch "$1" "https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_TAG/$1"
+        return
+    fi
+    command -v gh >/dev/null || {
+        echo "dist: GH_TOKEN is set, so gh is needed" >&2
+        exit 1
+    }
+    retry gh release download "$MIHOMO_TAG" --repo MetaCubeX/mihomo \
+        --pattern "$1" --output "$cache/$1.part" --clobber
+    mv "$cache/$1.part" "$cache/$1"
+}
+
+# Before the build: a download that fails should not cost a build.
 echo "dist: fetching mihomo $MIHOMO_TAG"
-fetch "https://github.com/MetaCubeX/mihomo/releases/download/$MIHOMO_TAG/$asset" "$asset"
+fetch_asset "$asset"
 if ! echo "$sum  $cache/$asset" | sha256sum --check --quiet; then
     rm -f "$cache/$asset"
     echo "dist: $asset does not match the sha256 in packaging/mihomo.env" >&2
     exit 1
 fi
-fetch "https://github.com/MetaCubeX/mihomo/archive/refs/tags/$MIHOMO_TAG.tar.gz" "$source_name"
+fetch "$source_name" "https://github.com/MetaCubeX/mihomo/archive/refs/tags/$MIHOMO_TAG.tar.gz"
+# Nothing after this downloads: the build scripts of the dependencies and
+# cargo-about do not get the token.
+unset GH_TOKEN
+
+echo "dist: building $target"
+cargo build --release --locked --target "$target"
 
 # tabby alone.
 plain=$work/plain/$name
