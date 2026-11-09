@@ -1,0 +1,49 @@
+# `make audit`: RustSec advisories and crate sources (cargo-deny, deny.toml),
+# licenses (cargo-about, packaging/about.toml). On every change to the
+# dependencies or these settings, and daily, as advisories appear without
+# any commit.
+name: Audit
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - packaging/about.toml
+      - packaging/about.hbs
+      - .github/workflows/audit.yml
+  pull_request:
+    paths:
+      - Cargo.toml
+      - Cargo.lock
+      - deny.toml
+      - packaging/about.toml
+      - packaging/about.hbs
+      - .github/workflows/audit.yml
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: audit-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  audit:
+    name: cargo-deny, cargo-about
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install stable --profile minimal --no-self-update && rustup default stable
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: cargo-deny,cargo-about
+      - run: make audit

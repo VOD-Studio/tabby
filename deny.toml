@@ -1,0 +1,24 @@
+# cargo-deny (https://embarkstudios.github.io/cargo-deny): `make audit` runs
+# its advisories and sources checks, and so does .github/workflows/audit.yml,
+# on every lockfile change and daily. Licenses are cargo-about's job
+# (packaging/about.toml), so they are listed in one place only.
+
+[graph]
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+
+[advisories]
+# Vulnerabilities and unsound code always fail. Unmaintained only for direct
+# dependencies: those are the ones tabby can replace.
+unmaintained = "workspace"
+yanked = "deny"
+ignore = [
+    # crypto-bigint 0.5 under p256 under age 0.12.1 (the newest age): P-256
+    # is only for age's tag recipients. tabby decrypts with an X25519
+    # identity (core/encrypted.rs), which never runs P-256 arithmetic on a
+    # secret. Drop this once age moves to p256 0.14.
+    { id = "RUSTSEC-2026-0387", reason = "P-256 code is unreachable from tabby's X25519-only decryption" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

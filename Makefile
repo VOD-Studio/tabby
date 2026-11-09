@@ -22,7 +22,7 @@ tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 XDG_CONFIG_HOME="$$tmp/config" XDG_STATE_HOME="$$tmp/state" XDG_DATA_HOME="$$tmp/data" $(1)
 endef
 
-.PHONY: help build release run fmt fmt-check lint test check install uninstall dist cut-release clean
+.PHONY: help build release run fmt fmt-check lint test check audit install uninstall dist cut-release clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -49,6 +49,10 @@ test: ## Run tests with isolated config dirs
 	@$(call isolated,$(CARGO) test $(CARGO_FLAGS))
 
 check: fmt-check lint test ## Full per-commit gate: fmt + clippy + test
+
+audit: ## Advisories and sources (cargo-deny, deny.toml), licenses (cargo-about)
+	$(CARGO) deny $(CARGO_FLAGS) check advisories sources
+	$(CARGO) about generate $(CARGO_FLAGS) --fail --config packaging/about.toml packaging/about.hbs >/dev/null
 
 install: ## Install tabby into ~/.cargo/bin
 	$(CARGO) install --path . $(CARGO_FLAGS)
