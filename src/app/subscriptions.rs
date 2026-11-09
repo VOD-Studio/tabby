@@ -2,17 +2,17 @@
 //! subscriptions, and what its keys do.
 
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
 };
 
 use jiff::Timestamp;
 use tui_input::Input;
 
-use super::{App, Confirm, CorePhase, Msg, Overlay, ToastKind, managed::failure};
+use super::{App, Confirm, CorePhase, Msg, Outbox, Overlay, ToastKind, managed::failure};
 use crate::{
     api::error::ApiError,
-    core::{CoreError, Fault, Kind, ManagedCore, Outcome, Store, Subscription},
+    core::{CoreError, Fault, Kind, ManagedCore, Outcome, Progress, Store, Subscription},
     ui::{scroll::Scroll, text::reason},
 };
 
@@ -21,6 +21,13 @@ const AUTO_CHECK: Duration = Duration::from_secs(60);
 
 /// How long after a failed automatic update the next try waits.
 const AUTO_RETRY: Duration = Duration::from_mins(30);
+
+/// How far back the speed of a download is measured.
+const RATE_WINDOW: Duration = Duration::from_secs(2);
+
+/// Less time than this since a download began says nothing about its
+/// speed yet.
+const RATE_MIN: Duration = Duration::from_millis(500);
 
 /// What is being done to subscriptions, for the answer to say what it was.
 #[derive(Debug)]
@@ -118,11 +125,92 @@ impl Ask {
     }
 }
 
+/// What is being downloaded.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Fetching {
+    /// The subscription being imported.
+    Import,
+    /// Subscription `id`, read again.
+    Subscription(String),
+}
+
+/// A download under way, as far as it said.
+#[derive(Debug, Clone)]
+pub struct Transfer {
+    /// Which try it is, from 1.
+    pub attempt: u32,
+    pub received: u64,
+    pub total: Option<u64>,
+    /// When this try said how far it was, and what it said: those of the
+    /// last [`RATE_WINDOW`], and the one before them, where the window
+    /// starts.
+    samples: VecDeque<(Instant, u64)>,
+}
+
+impl Transfer {
+    fn new(progress: Progress, now: Instant) -> Self {
+        let mut transfer = Self {
+            attempt: progress.attempt,
+            received: 0,
+            total: None,
+            samples: VecDeque::new(),
+        };
+        transfer.record(progress, now);
+        transfer
+    }
+
+    /// Takes in what the download said at `now`. Another try starts the
+    /// count again.
+    fn record(&mut self, progress: Progress, now: Instant) {
+        if progress.attempt != self.attempt {
+            self.samples.clear();
+        }
+        self.attempt = progress.attempt;
+        self.received = progress.received;
+        self.total = progress.total;
+        self.samples.push_back((now, progress.received));
+        let start = now.checked_sub(RATE_WINDOW);
+        while self
+            .samples
+            .get(1)
+            .is_some_and(|(at, _)| start.is_some_and(|start| *at <= start))
+        {
+            self.samples.pop_front();
+        }
+    }
+
+    /// Bytes a second over the last [`RATE_WINDOW`] as of `now`; falls to 0
+    /// while nothing comes. `None` until the try has run [`RATE_MIN`].
+    pub fn rate(&self, now: Instant) -> Option<u64> {
+        let start = now.checked_sub(RATE_WINDOW);
+        let first = *self.samples.front()?;
+        // What had come when the window starts: the last report before
+        // then. A try younger than the window counts from its beginning.
+        let (from, base) = self
+            .samples
+            .iter()
+            .rev()
+            .find(|(at, _)| start.is_some_and(|start| *at <= start))
+            .map_or(first, |&(_, bytes)| (start.unwrap_or(first.0), bytes));
+        let elapsed = now.saturating_duration_since(from);
+        if elapsed < RATE_MIN {
+            return None;
+        }
+        let bytes = u128::from(self.received.saturating_sub(base));
+        Some(u64::try_from(bytes * 1000 / elapsed.as_millis()).unwrap_or(u64::MAX))
+    }
+}
+
 /// News from the work started on the subscriptions.
 #[derive(Debug)]
 pub enum SubEvent {
     /// The list, as the files have it.
     Loaded(Result<Store, CoreError>),
+    /// How far a download is.
+    Progress {
+        fetching: Fetching,
+        progress: Progress,
+    },
     Done {
         work: Work,
         result: Result<Outcome, CoreError>,
@@ -152,6 +240,8 @@ pub struct SubscriptionsView {
     pub busy: HashSet<String>,
     /// An import is under way.
     pub importing: bool,
+    /// The downloads under way.
+    pub transfers: HashMap<Fetching, Transfer>,
     /// When the subscriptions are looked at next for any that came due.
     next_auto: Option<Instant>,
     /// When an automatic update of each was last tried.
@@ -253,6 +343,18 @@ fn loggable(source: &str) -> String {
     }
 }
 
+/// What tells the page through `outbox` how far the download of
+/// `fetching` is. A report that does not fit is dropped: the next one
+/// says more.
+fn report(outbox: Outbox, fetching: Fetching) -> impl Fn(Progress) {
+    move |progress| {
+        outbox.try_send(Msg::Subscription(SubEvent::Progress {
+            fetching: fetching.clone(),
+            progress,
+        }));
+    }
+}
+
 /// The hours typed as the interval between automatic updates: a whole
 /// number of hours, up to a year.
 fn parse_interval(text: &str) -> Result<u32, &'static str> {
@@ -289,17 +391,18 @@ impl App {
     }
 
     /// Runs `work` on the managed core in the background; what it returns
-    /// is reported as a [`SubEvent`].
+    /// is reported as a [`SubEvent`]. `work` gets the outbox too, to say
+    /// how far a download is meanwhile.
     fn spawn_subscription<F, Fut>(&self, work: F)
     where
-        F: FnOnce(std::sync::Arc<ManagedCore>) -> Fut,
+        F: FnOnce(std::sync::Arc<ManagedCore>, Outbox) -> Fut,
         Fut: Future<Output = SubEvent> + Send + 'static,
     {
         let Some(core) = self.subscriptions_core() else {
             return;
         };
         let outbox = self.outbox.clone();
-        let event = work(core);
+        let event = work(core, outbox.clone());
         tokio::spawn(async move {
             outbox.send(Msg::Subscription(event.await)).await;
         });
@@ -307,7 +410,7 @@ impl App {
 
     /// Reads the list from its file.
     pub(super) fn load_subscriptions(&self) {
-        self.spawn_subscription(|core| async move { SubEvent::Loaded(core.subscriptions()) });
+        self.spawn_subscription(|core, _| async move { SubEvent::Loaded(core.subscriptions()) });
     }
 
     /// Opens the box at the foot of the screen to ask for `ask`, `text`
@@ -393,14 +496,14 @@ impl App {
         match ask {
             Ask::Import => self.start_import(text, None),
             Ask::ImportKey(source) => self.start_import(source, Some(text)),
-            Ask::Name(id) => self.spawn_subscription(move |core| async move {
+            Ask::Name(id) => self.spawn_subscription(move |core, _| async move {
                 SubEvent::Done {
                     result: core.rename(&id, &text).await,
                     work: Work::Rename,
                 }
             }),
             Ask::Interval(id) => match parse_interval(&text) {
-                Ok(hours) => self.spawn_subscription(move |core| async move {
+                Ok(hours) => self.spawn_subscription(move |core, _| async move {
                     SubEvent::Done {
                         result: core.set_interval(&id, hours).await,
                         work: Work::Interval(hours),
@@ -417,9 +520,10 @@ impl App {
                 if !self.subscriptions_view.busy.insert(id.clone()) {
                     return;
                 }
-                self.spawn_subscription(move |core| async move {
+                self.spawn_subscription(move |core, outbox| async move {
+                    let progress = report(outbox, Fetching::Subscription(id.clone()));
                     SubEvent::Done {
-                        result: core.set_age_key(&id, &text).await,
+                        result: core.set_age_key(&id, &text, progress).await,
                         work: Work::Rekey(id),
                     }
                 });
@@ -436,9 +540,10 @@ impl App {
         }
         self.subscriptions_view.importing = true;
         let is_url = source.starts_with("http://") || source.starts_with("https://");
-        self.spawn_subscription(move |core| async move {
+        self.spawn_subscription(move |core, outbox| async move {
             let result = if is_url {
-                core.import_url(&source, key.as_deref()).await
+                let progress = report(outbox, Fetching::Import);
+                core.import_url(&source, key.as_deref(), progress).await
             } else {
                 core.import_file(&path_of(&source), key.as_deref()).await
             };
@@ -478,7 +583,7 @@ impl App {
             return;
         }
         self.dirty = true;
-        self.spawn_subscription(move |core| async move {
+        self.spawn_subscription(move |core, _| async move {
             SubEvent::Done {
                 result: core.switch(&id).await,
                 work: Work::Switch(id),
@@ -505,8 +610,9 @@ impl App {
             return;
         }
         self.dirty = true;
-        self.spawn_subscription(move |core| async move {
-            let result = core.update(&id).await;
+        self.spawn_subscription(move |core, outbox| async move {
+            let progress = report(outbox, Fetching::Subscription(id.clone()));
+            let result = core.update(&id, progress).await;
             let work = if auto {
                 Work::AutoUpdate(id)
             } else {
@@ -530,7 +636,7 @@ impl App {
             return;
         }
         let (id, on) = (sub.id.clone(), !sub.auto_update);
-        self.spawn_subscription(move |core| async move {
+        self.spawn_subscription(move |core, _| async move {
             SubEvent::Done {
                 result: core.set_auto_update(&id, on).await,
                 work: Work::Toggle(on),
@@ -614,7 +720,7 @@ impl App {
     }
 
     pub(super) fn delete_subscription(&mut self, id: String) {
-        self.spawn_subscription(move |core| async move {
+        self.spawn_subscription(move |core, _| async move {
             SubEvent::Done {
                 result: core.remove(&id).await,
                 work: Work::Remove,
@@ -634,6 +740,14 @@ impl App {
         match event {
             SubEvent::Loaded(Ok(store)) => self.subscriptions_view.replace(store),
             SubEvent::Loaded(Err(err)) => self.subscriptions_view.list = Some(Err(err)),
+            SubEvent::Progress { fetching, progress } => {
+                let now = Instant::now();
+                self.subscriptions_view
+                    .transfers
+                    .entry(fetching)
+                    .and_modify(|transfer| transfer.record(progress, now))
+                    .or_insert_with(|| Transfer::new(progress, now));
+            }
             SubEvent::Done { work, result } => self.finish_subscription(&work, result),
             SubEvent::Reloaded(Ok(())) => {
                 self.fetch_configs(true);
@@ -651,9 +765,13 @@ impl App {
     fn finish_subscription(&mut self, work: &Work, result: Result<Outcome, CoreError>) {
         let view = &mut self.subscriptions_view;
         match work {
-            Work::Import(_) => view.importing = false,
+            Work::Import(_) => {
+                view.importing = false;
+                view.transfers.remove(&Fetching::Import);
+            }
             Work::Update(id) | Work::AutoUpdate(id) | Work::Switch(id) | Work::Rekey(id) => {
                 view.busy.remove(id);
+                view.transfers.remove(&Fetching::Subscription(id.clone()));
             }
             Work::Remove | Work::Toggle(_) | Work::Rename | Work::Interval(_) => {}
         }
@@ -750,7 +868,44 @@ impl App {
 
 #[cfg(test)]
 mod tests {
-    use super::loggable;
+    use std::time::{Duration, Instant};
+
+    use super::{Progress, Transfer, loggable};
+
+    fn said(attempt: u32, received: u64) -> Progress {
+        Progress {
+            attempt,
+            received,
+            total: None,
+        }
+    }
+
+    #[test]
+    fn the_speed_is_what_came_over_the_last_two_seconds_and_falls_to_nothing_in_a_stall() {
+        let start = Instant::now();
+        let at = |millis| start + Duration::from_millis(millis);
+        let mut transfer = Transfer::new(said(1, 0), at(0));
+        // Too early to say.
+        transfer.record(said(1, 4_000), at(300));
+        assert_eq!(transfer.rate(at(300)), None);
+
+        transfer.record(said(1, 10_000), at(1_000));
+        transfer.record(said(1, 20_000), at(2_000));
+        assert_eq!(transfer.rate(at(2_000)), Some(10_000));
+        // Faster now: only the last two seconds count.
+        transfer.record(said(1, 60_000), at(3_000));
+        assert_eq!(transfer.rate(at(3_000)), Some(25_000));
+        // Nothing more comes: the speed falls, then is nothing.
+        assert_eq!(transfer.rate(at(4_000)), Some(20_000));
+        assert_eq!(transfer.rate(at(5_000)), Some(0));
+
+        // Another try counts from its own start.
+        transfer.record(said(2, 0), at(6_000));
+        transfer.record(said(2, 1_000), at(6_200));
+        assert_eq!((transfer.attempt, transfer.received), (2, 1_000));
+        assert_eq!(transfer.rate(at(6_200)), None);
+        assert_eq!(transfer.rate(at(7_000)), Some(1_000));
+    }
 
     #[test]
     fn an_address_is_logged_without_the_token_in_its_path_or_query() {

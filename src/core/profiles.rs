@@ -4,6 +4,7 @@
 use std::{
     fs, io,
     path::{Path, PathBuf},
+    time::{Duration, Instant},
 };
 
 use jiff::Timestamp;
@@ -34,6 +35,20 @@ enum Failed {
     Again(CoreError),
     /// The answer will not change (a 404, an address that is not one).
     ForGood(CoreError),
+}
+
+/// How often a download says how far it is, at most.
+const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+
+/// How far a subscription download is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Progress {
+    /// Which try this is, from 1.
+    pub attempt: u32,
+    /// Bytes of the subscription received in this try.
+    pub received: u64,
+    /// Bytes the server said it would send, when it did.
+    pub total: Option<u64>,
 }
 
 /// What an operation on the subscriptions did.
@@ -103,26 +118,38 @@ impl ManagedCore {
 
     /// Downloads the subscription at `url`, trying again (after
     /// `fetch_pause`, then twice that) when the network or the server
-    /// failed: up to [`TRIES`] times in all.
-    async fn fetch(&self, url: &str) -> Result<Fetched, CoreError> {
-        let mut tries = 1;
+    /// failed: up to [`TRIES`] times in all. `progress` hears how far it
+    /// is.
+    async fn fetch(&self, url: &str, progress: &impl Fn(Progress)) -> Result<Fetched, CoreError> {
+        let mut attempt = 1;
         loop {
-            match self.fetch_once(url).await {
+            match self.fetch_once(url, attempt, progress).await {
                 Ok(fetched) => return Ok(fetched),
-                Err(Failed::Again(err)) if tries < TRIES => {
-                    tracing::warn!(try = tries, "subscription download failed, trying again: {err}");
-                    tokio::time::sleep(self.timing.fetch_pause * tries).await;
-                    tries += 1;
+                Err(Failed::Again(err)) if attempt < TRIES => {
+                    tracing::warn!(attempt, "subscription download failed, trying again: {err}");
+                    tokio::time::sleep(self.timing.fetch_pause * attempt).await;
+                    attempt += 1;
                 }
                 Err(Failed::Again(err) | Failed::ForGood(err)) => return Err(err),
             }
         }
     }
 
-    /// One try at downloading the subscription at `url`. It is given up
-    /// when nothing comes for `fetch_idle`, while the answer is awaited or
-    /// between two pieces of it, however long the whole takes.
-    async fn fetch_once(&self, url: &str) -> Result<Fetched, Failed> {
+    /// Try `attempt` at downloading the subscription at `url`. It is given
+    /// up when nothing comes for `fetch_idle`, while the answer is awaited
+    /// or between two pieces of it, however long the whole takes.
+    async fn fetch_once(
+        &self,
+        url: &str,
+        attempt: u32,
+        progress: &impl Fn(Progress),
+    ) -> Result<Fetched, Failed> {
+        let mut report = Progress {
+            attempt,
+            received: 0,
+            total: None,
+        };
+        progress(report);
         let idle = self.timing.fetch_idle;
         let stalled = || Failed::Again(CoreError::Fetch(format!("no data for {idle:?}")));
         let failed = |err: reqwest::Error| {
@@ -159,13 +186,21 @@ impl ManagedCore {
         };
         let name = header("content-disposition").and_then(|value| parse_filename(&value));
         let usage = header("subscription-userinfo").and_then(|value| parse_usage(&value));
+        report.total = response.content_length();
+        progress(report);
         let mut bytes = Vec::new();
+        let mut reported = Instant::now();
         while let Some(chunk) = tokio::time::timeout(idle, response.chunk())
             .await
             .map_err(|_| stalled())?
             .map_err(failed)?
         {
             bytes.extend_from_slice(&chunk);
+            if reported.elapsed() >= PROGRESS_EVERY {
+                report.received = bytes.len() as u64;
+                progress(report);
+                reported = Instant::now();
+            }
         }
         Ok(Fetched { bytes, name, usage })
     }
@@ -314,14 +349,19 @@ impl ManagedCore {
     }
 
     /// Imports the subscription at `url`; `age_key` is what opens it when
-    /// it is encrypted with age.
-    pub async fn import_url(&self, url: &str, age_key: Option<&str>) -> Result<Outcome, CoreError> {
+    /// it is encrypted with age. `progress` hears how far the download is.
+    pub async fn import_url(
+        &self,
+        url: &str,
+        age_key: Option<&str>,
+        progress: impl Fn(Progress),
+    ) -> Result<Outcome, CoreError> {
         let parsed = reqwest::Url::parse(url)
             .ok()
             .filter(|parsed| matches!(parsed.scheme(), "http" | "https"))
             .ok_or_else(|| CoreError::Fetch("not an http or https address".to_owned()))?;
         let _guard = self.lock.lock().await;
-        let fetched = self.fetch(url).await?;
+        let fetched = self.fetch(url, &progress).await?;
         let name = fetched
             .name
             .clone()
@@ -361,23 +401,38 @@ impl ManagedCore {
     }
 
     /// Reads subscription `id` again from where it came from. What was
-    /// there stays when that fails.
-    pub async fn update(&self, id: &str) -> Result<Outcome, CoreError> {
-        self.update_with(id, None).await
+    /// there stays when that fails. `progress` hears how far a download
+    /// is.
+    pub async fn update(
+        &self,
+        id: &str,
+        progress: impl Fn(Progress),
+    ) -> Result<Outcome, CoreError> {
+        self.update_with(id, None, &progress).await
     }
 
     /// Reads subscription `id` again, with `key` to open it in place of the
     /// one kept with it; the key is kept when it does.
-    pub async fn set_age_key(&self, id: &str, key: &str) -> Result<Outcome, CoreError> {
-        self.update_with(id, Some(key)).await
+    pub async fn set_age_key(
+        &self,
+        id: &str,
+        key: &str,
+        progress: impl Fn(Progress),
+    ) -> Result<Outcome, CoreError> {
+        self.update_with(id, Some(key), &progress).await
     }
 
-    async fn update_with(&self, id: &str, key: Option<&str>) -> Result<Outcome, CoreError> {
+    async fn update_with(
+        &self,
+        id: &str,
+        key: Option<&str>,
+        progress: &impl Fn(Progress),
+    ) -> Result<Outcome, CoreError> {
         let _guard = self.lock.lock().await;
         let mut store = self.subscriptions()?;
         let sub = store.get(id).cloned().ok_or(CoreError::NoSubscription)?;
         let fetched = match sub.kind {
-            Kind::Url => self.fetch(&sub.source).await?,
+            Kind::Url => self.fetch(&sub.source, progress).await?,
             Kind::File => Fetched {
                 bytes: read_source(Path::new(&sub.source))?,
                 name: None,
@@ -694,7 +749,13 @@ mod tests {
         // Over a second in all, never 400 ms without a byte.
         let (address, asked) = dribble(Duration::from_millis(250), None);
 
-        let outcome = core.import_url(&address, None).await.unwrap();
+        let heard = std::sync::Mutex::new(Vec::new());
+        let outcome = core
+            .import_url(&address, None, |progress| {
+                heard.lock().unwrap().push(progress);
+            })
+            .await
+            .unwrap();
 
         let id = &outcome.store.subscriptions[0].id;
         assert_eq!(
@@ -702,6 +763,28 @@ mod tests {
             SUB
         );
         assert_eq!(asked.load(Ordering::SeqCst), 1);
+        // It said how far it was as the pieces came, of the size announced.
+        let heard = heard.into_inner().unwrap();
+        assert_eq!(
+            heard[0],
+            Progress {
+                attempt: 1,
+                received: 0,
+                total: None
+            }
+        );
+        let received: Vec<u64> = heard.iter().map(|progress| progress.received).collect();
+        assert!(received.is_sorted(), "{heard:?}");
+        assert!(
+            received.iter().filter(|bytes| **bytes > 0).count() >= 2,
+            "{heard:?}"
+        );
+        assert!(
+            heard[1..]
+                .iter()
+                .all(|progress| progress.total == Some(SUB.len() as u64)),
+            "{heard:?}"
+        );
         fs::remove_dir_all(dir).unwrap();
     }
 
@@ -710,13 +793,28 @@ mod tests {
         let (core, dir) = core_idle("sub-stall", Duration::from_millis(300));
         let (address, asked) = dribble(Duration::ZERO, Some(1));
 
-        let err = core.import_url(&address, None).await.unwrap_err();
+        let heard = std::sync::Mutex::new(Vec::new());
+        let err = core
+            .import_url(&address, None, |progress| {
+                heard.lock().unwrap().push(progress);
+            })
+            .await
+            .unwrap_err();
 
         assert!(
             matches!(&err, CoreError::Fetch(message) if message.contains("no data for 300ms")),
             "{err:?}"
         );
         assert_eq!(asked.load(Ordering::SeqCst), 3);
+        // Each try starts again from nothing.
+        let starts: Vec<u32> = heard
+            .into_inner()
+            .unwrap()
+            .iter()
+            .filter(|progress| progress.received == 0 && progress.total.is_none())
+            .map(|progress| progress.attempt)
+            .collect();
+        assert_eq!(starts, [1, 2, 3]);
         assert_eq!(core.subscriptions().unwrap(), Store::default());
         fs::remove_dir_all(dir).unwrap();
     }
@@ -735,7 +833,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        core.import_url(&url(&server), None).await.unwrap();
+        core.import_url(&url(&server), None, |_| {}).await.unwrap();
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
 
         server.reset().await;
@@ -743,7 +841,10 @@ mod tests {
             .respond_with(ResponseTemplate::new(404))
             .mount(&server)
             .await;
-        let err = core.import_url(&url(&server), None).await.unwrap_err();
+        let err = core
+            .import_url(&url(&server), None, |_| {})
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, CoreError::Fetch(message) if message.contains("404")),
             "{err:?}"
@@ -770,7 +871,7 @@ mod tests {
         )
         .await;
 
-        let outcome = core.import_url(&url(&server), None).await.unwrap();
+        let outcome = core.import_url(&url(&server), None, |_| {}).await.unwrap();
 
         assert!(outcome.reload && outcome.name == "机场");
         let sub = &outcome.store.subscriptions[0];
@@ -832,11 +933,11 @@ mod tests {
     async fn a_second_import_does_not_take_the_place_of_the_one_running() {
         let (core, _, dir) = core("sub-second");
         let server = serve(SUB, &[]).await;
-        let first = core.import_url(&url(&server), None).await.unwrap();
+        let first = core.import_url(&url(&server), None, |_| {}).await.unwrap();
         // No name from the server: the host's.
         assert_eq!(first.name, "127.0.0.1");
 
-        let second = core.import_url(&url(&server), None).await.unwrap();
+        let second = core.import_url(&url(&server), None, |_| {}).await.unwrap();
 
         assert!(!second.reload);
         assert_eq!(second.store.subscriptions.len(), 2);
@@ -858,7 +959,7 @@ mod tests {
         )
         .await;
 
-        let outcome = core.import_url(&url(&server), None).await.unwrap();
+        let outcome = core.import_url(&url(&server), None, |_| {}).await.unwrap();
 
         let id = &outcome.store.subscriptions[0].id;
         // The links as they came, where the kernel may read them.
@@ -889,7 +990,10 @@ mod tests {
         // would pass its check: tabby has to look itself.
         for body in ["<html>login page</html>", "aGVsbG8gd29ybGQ=", ""] {
             let server = serve(body, &[]).await;
-            let err = core.import_url(&url(&server), None).await.unwrap_err();
+            let err = core
+                .import_url(&url(&server), None, |_| {})
+                .await
+                .unwrap_err();
             assert!(
                 matches!(&err, CoreError::Invalid(said) if said == "yaml: unmarshal errors: not a config"),
                 "{body:?}: {err:?}"
@@ -908,7 +1012,10 @@ mod tests {
         // The kernel reads it; tabby cannot take the keys it sets out of it.
         let server = serve("{proxies: [], rules: [\"MATCH,DIRECT\"]}", &[]).await;
 
-        let err = core.import_url(&url(&server), None).await.unwrap_err();
+        let err = core
+            .import_url(&url(&server), None, |_| {})
+            .await
+            .unwrap_err();
 
         assert!(matches!(err, CoreError::UnsupportedProfile), "{err:?}");
         assert_eq!(core.subscriptions().unwrap(), Store::default());
@@ -920,7 +1027,7 @@ mod tests {
     async fn a_download_that_fails_says_why_without_the_address_that_has_a_token_in_it() {
         let (core, _, dir) = core("sub-down");
         let refused = format!("http://127.0.0.1:{}/sub?token=SECRET", free_port());
-        let err = core.import_url(&refused, None).await.unwrap_err();
+        let err = core.import_url(&refused, None, |_| {}).await.unwrap_err();
         assert!(
             matches!(&err, CoreError::Fetch(message) if !message.contains("SECRET")),
             "{err:?}"
@@ -931,14 +1038,17 @@ mod tests {
             .respond_with(ResponseTemplate::new(503))
             .mount(&server)
             .await;
-        let err = core.import_url(&url(&server), None).await.unwrap_err();
+        let err = core
+            .import_url(&url(&server), None, |_| {})
+            .await
+            .unwrap_err();
         assert!(
             matches!(&err, CoreError::Fetch(message) if message.contains("503")),
             "{err:?}"
         );
 
         let err = core
-            .import_url("ftp://example.test/sub", None)
+            .import_url("ftp://example.test/sub", None, |_| {})
             .await
             .unwrap_err();
         assert!(matches!(err, CoreError::Fetch(_)), "{err:?}");
@@ -950,7 +1060,7 @@ mod tests {
     async fn an_update_replaces_the_content_and_reloads_only_what_runs() {
         let (core, _, dir) = core("sub-update");
         let server = serve(SUB, &[("subscription-userinfo", "download=5")]).await;
-        let first = core.import_url(&url(&server), None).await.unwrap();
+        let first = core.import_url(&url(&server), None, |_| {}).await.unwrap();
         let running = first.store.subscriptions[0].id.clone();
         let spare = core.import_file(&dir.join("mihomo"), None).await;
         // (The test kernel script is not a config.)
@@ -970,7 +1080,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let updated = core.update(&running).await.unwrap();
+        let updated = core.update(&running, |_| {}).await.unwrap();
 
         assert!(updated.reload);
         assert!(config_of(&dir).starts_with(OTHER));
@@ -985,7 +1095,7 @@ mod tests {
         );
         // A subscription that is not running is only written.
         fs::write(&other, SUB).unwrap();
-        let not_running = core.update(&spare_id).await.unwrap();
+        let not_running = core.update(&spare_id, |_| {}).await.unwrap();
         assert!(!not_running.reload);
         assert!(config_of(&dir).starts_with(OTHER));
         assert_eq!(
@@ -999,7 +1109,7 @@ mod tests {
     async fn a_failed_update_keeps_what_was_there() {
         let (core, _, dir) = core("sub-update-fail");
         let server = serve(SUB, &[]).await;
-        let imported = core.import_url(&url(&server), None).await.unwrap();
+        let imported = core.import_url(&url(&server), None, |_| {}).await.unwrap();
         let id = imported.store.subscriptions[0].id.clone();
         let before = (config_of(&dir), core.subscriptions().unwrap());
 
@@ -1009,7 +1119,7 @@ mod tests {
                 .respond_with(ResponseTemplate::new(status).set_body_string(body))
                 .mount(&server)
                 .await;
-            assert!(core.update(&id).await.is_err(), "{status}");
+            assert!(core.update(&id, |_| {}).await.is_err(), "{status}");
             assert_eq!(config_of(&dir), before.0);
             assert_eq!(core.subscriptions().unwrap(), before.1);
             assert_eq!(
@@ -1018,7 +1128,7 @@ mod tests {
             );
         }
         assert!(matches!(
-            core.update("nope").await,
+            core.update("nope", |_| {}).await,
             Err(CoreError::NoSubscription)
         ));
         fs::remove_dir_all(dir).unwrap();
@@ -1035,19 +1145,19 @@ mod tests {
         assert_eq!(imported.store.subscriptions[0].kind, Kind::File);
 
         fs::write(&file, LINKS).unwrap();
-        core.update(&id).await.unwrap();
+        core.update(&id, |_| {}).await.unwrap();
         let provider = dir.join(format!("core/home/providers/{id}.txt"));
         assert_eq!(fs::read_to_string(&provider).unwrap(), LINKS);
         assert!(config_of(&dir).contains("proxy-providers"));
 
         // And back to a config: the links of the wrapper are not left behind.
         fs::write(&file, SUB).unwrap();
-        core.update(&id).await.unwrap();
+        core.update(&id, |_| {}).await.unwrap();
         assert!(!provider.exists());
         assert!(config_of(&dir).starts_with(SUB));
 
         fs::remove_file(&file).unwrap();
-        let err = core.update(&id).await.unwrap_err();
+        let err = core.update(&id, |_| {}).await.unwrap_err();
         assert!(
             matches!(&err, CoreError::SourceGone(gone) if *gone == file),
             "{err:?}"
@@ -1160,11 +1270,14 @@ mod tests {
         let before = everything_in(&dir);
 
         // No key, then somebody else's, then something that is no key at all.
-        let err = core.import_url(&url(&server), None).await.unwrap_err();
+        let err = core
+            .import_url(&url(&server), None, |_| {})
+            .await
+            .unwrap_err();
         assert!(matches!(err, CoreError::AgeKeyNeeded), "{err:?}");
         let (other, _) = age_pair();
         let err = core
-            .import_url(&url(&server), Some(&other))
+            .import_url(&url(&server), Some(&other), |_| {})
             .await
             .unwrap_err();
         assert!(
@@ -1172,7 +1285,7 @@ mod tests {
             "{err:?}"
         );
         let err = core
-            .import_url(&url(&server), Some("hunter2"))
+            .import_url(&url(&server), Some("hunter2"), |_| {})
             .await
             .unwrap_err();
         assert!(
@@ -1183,7 +1296,7 @@ mod tests {
         assert_eq!(everything_in(&dir), before);
 
         let imported = core
-            .import_url(&url(&server), Some(&format!("{key}\n")))
+            .import_url(&url(&server), Some(&format!("{key}\n")), |_| {})
             .await
             .unwrap();
 
@@ -1210,7 +1323,10 @@ mod tests {
         let (key, identity) = age_pair();
         let server =
             serve_bytes(age::encrypt(&identity.to_public(), SUB.as_bytes()).unwrap()).await;
-        let imported = core.import_url(&url(&server), Some(&key)).await.unwrap();
+        let imported = core
+            .import_url(&url(&server), Some(&key), |_| {})
+            .await
+            .unwrap();
         let id = imported.store.subscriptions[0].id.clone();
 
         // The next one is armored, as `age -a` writes it.
@@ -1220,7 +1336,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(armored))
             .mount(&server)
             .await;
-        core.update(&id).await.unwrap();
+        core.update(&id, |_| {}).await.unwrap();
         assert_eq!(
             fs::read_to_string(dir.join(format!("core/profiles/{id}.yaml"))).unwrap(),
             OTHER
@@ -1236,7 +1352,7 @@ mod tests {
             )
             .mount(&server)
             .await;
-        let err = core.update(&id).await.unwrap_err();
+        let err = core.update(&id, |_| {}).await.unwrap_err();
         assert!(
             matches!(err, CoreError::Age(crate::core::Fault::WrongKey)),
             "{err:?}"
@@ -1252,7 +1368,7 @@ mod tests {
             .respond_with(ResponseTemplate::new(200).set_body_string(SUB))
             .mount(&server)
             .await;
-        let updated = core.update(&id).await.unwrap();
+        let updated = core.update(&id, |_| {}).await.unwrap();
         assert_eq!(updated.store.subscriptions[0].age_key, None);
         fs::remove_dir_all(dir).unwrap();
     }
@@ -1293,7 +1409,7 @@ mod tests {
         let (core, _, dir) = core("sub-edit");
         let server = serve(SUB, &[]).await;
         let id = core
-            .import_url(&url(&server), None)
+            .import_url(&url(&server), None, |_| {})
             .await
             .unwrap()
             .store
@@ -1329,7 +1445,7 @@ mod tests {
         let server =
             serve_bytes(age::encrypt(&identity.to_public(), SUB.as_bytes()).unwrap()).await;
         let id = core
-            .import_url(&url(&server), Some(&key))
+            .import_url(&url(&server), Some(&key), |_| {})
             .await
             .unwrap()
             .store
@@ -1350,7 +1466,7 @@ mod tests {
             .await;
         let (wrong, _) = age_pair();
         for bad in [wrong.as_str(), "hunter2"] {
-            assert!(core.set_age_key(&id, bad).await.is_err(), "{bad}");
+            assert!(core.set_age_key(&id, bad, |_| {}).await.is_err(), "{bad}");
         }
         let stored = core.subscriptions().unwrap();
         assert_eq!(
@@ -1362,7 +1478,7 @@ mod tests {
             SUB
         );
 
-        let done = core.set_age_key(&id, &newer_key).await.unwrap();
+        let done = core.set_age_key(&id, &newer_key, |_| {}).await.unwrap();
         assert_eq!(
             done.store.subscriptions[0].age_key.as_deref(),
             Some(newer_key.as_str())
@@ -1396,7 +1512,7 @@ mod tests {
         });
         let core = Arc::new(core_at(&dir, free_port(), &recorder, false));
         let server = serve(SUB, &[]).await;
-        core.import_url(&url(&server), None).await.unwrap();
+        core.import_url(&url(&server), None, |_| {}).await.unwrap();
         let list = |items: &[&str]| {
             toml::Value::Array(
                 items

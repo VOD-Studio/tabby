@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use jiff::{Timestamp, Zoned};
 use ratatui::{
     Frame,
@@ -10,7 +12,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::{
     api::models,
-    app::App,
+    app::{App, Fetching, Transfer},
     core::{Kind, Subscription},
     format,
     ui::{
@@ -89,8 +91,12 @@ fn draw(frame: &mut Frame, area: Rect, app: &App, total: usize) {
         format!("  {}/{total} · 过滤「{filter}」 ", visible.len())
     };
     let right = if view.importing {
+        let doing = match view.transfers.get(&Fetching::Import) {
+            Some(transfer) => format!("正在导入 {}", transfer_text(transfer, Instant::now())),
+            None => "正在导入…".to_owned(),
+        };
         vec![Span::styled(
-            format!(" {} 正在导入… ", states::spinner_frame(app)),
+            format!(" {} {doing} ", states::spinner_frame(app)),
             Style::new().fg(theme.accent),
         )]
     } else {
@@ -145,7 +151,12 @@ fn draw(frame: &mut Frame, area: Rect, app: &App, total: usize) {
             .unwrap_or(0),
         times.iter().map(|time| time.width()).max().unwrap_or(0),
         autos.iter().map(|auto| auto.width()).max().unwrap_or(0),
-        visible.iter().any(|sub| sub.usage.is_some()),
+        visible.iter().any(|sub| {
+            sub.usage.is_some()
+                || view
+                    .transfers
+                    .contains_key(&Fetching::Subscription(sub.id.clone()))
+        }),
     );
     let cursor = view.cursor.min(visible.len() - 1);
     let window = view.scroll.window(cursor, visible.len(), capacity(area));
@@ -219,22 +230,50 @@ fn row_line(
         };
         spans.push(cell(auto, layout.auto, style));
     }
-    if layout.usage > 0
-        && let Some(used) = sub.usage
-    {
-        spans.push(Span::raw(" ".repeat(GAP)));
-        let used = models::Subscription {
-            upload: used.upload,
-            download: used.download,
-            total: used.total,
-            expire: used.expire,
-        };
-        spans.push(Span::styled(
-            format::truncate(&usage(used, now), layout.usage),
-            muted,
-        ));
+    if layout.usage > 0 {
+        if let Some(transfer) = view.transfers.get(&Fetching::Subscription(sub.id.clone())) {
+            spans.push(Span::raw(" ".repeat(GAP)));
+            spans.push(Span::styled(
+                format::truncate(&transfer_text(transfer, Instant::now()), layout.usage),
+                Style::new().fg(theme.accent),
+            ));
+        } else if let Some(used) = sub.usage {
+            spans.push(Span::raw(" ".repeat(GAP)));
+            let used = models::Subscription {
+                upload: used.upload,
+                download: used.download,
+                total: used.total,
+                expire: used.expire,
+            };
+            spans.push(Span::styled(
+                format::truncate(&usage(used, now), layout.usage),
+                muted,
+            ));
+        }
     }
     Line::from(spans)
+}
+
+/// How far a download is, as of `now`: `32.1 KB/63.5 KB · 12.3 KB/s`, the
+/// size when the server said it, the speed once there is one, and which
+/// try it is from the second on.
+fn transfer_text(transfer: &Transfer, now: Instant) -> String {
+    let (number, unit) = format::bytes(transfer.received);
+    let mut text = match transfer.total {
+        Some(total) if total >= transfer.received => {
+            let (whole, whole_unit) = format::bytes(total);
+            format!("{number} {unit}/{whole} {whole_unit}")
+        }
+        _ => format!("{number} {unit}"),
+    };
+    if let Some(rate) = transfer.rate(now) {
+        let (number, unit) = format::rate(rate);
+        text = format!("{text} · {number} {unit}");
+    }
+    if transfer.attempt > 1 {
+        text = format!("第 {} 次 · {text}", transfer.attempt);
+    }
+    text
 }
 
 /// How a subscription is kept up to date: `24h` for the interval it is

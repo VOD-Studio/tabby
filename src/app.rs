@@ -49,7 +49,7 @@ mod subscriptions;
 
 pub use dns::DnsView;
 pub use managed::{CoreEvent, CorePhase, LoginStart};
-pub use subscriptions::{Ask, SubEvent, SubscriptionsView};
+pub use subscriptions::{Ask, Fetching, SubEvent, SubscriptionsView, Transfer};
 
 /// The eight top-level pages, in tab order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -9663,7 +9663,7 @@ secret = "b-secret"
         let port = testing::free_port();
         let recorder = updating_systemd(port, true, "");
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
-        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None)
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None, |_| {})
             .await
             .unwrap();
         let file = dir.join("local.yaml");
@@ -9814,6 +9814,54 @@ secret = "b-secret"
         let config = std::fs::read_to_string(dir.join("core/home/config.yaml")).unwrap();
         assert!(config.starts_with(SUB_YAML), "{config}");
         assert!(draw(&app).contains("✓ local"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_download_under_way_shows_how_much_came_on_its_row_until_it_ends() {
+        let server = subscription_server(200, SUB_YAML).await;
+        let (mut app, _rx, dir, _) = subscriptions_app("subs-progress", &server).await;
+        let id = app.subscriptions_view.selected().unwrap().id.clone();
+        app.subscriptions_view.busy.insert(id.clone());
+        let progress = |attempt, received| {
+            Msg::Subscription(SubEvent::Progress {
+                fetching: Fetching::Subscription(id.clone()),
+                progress: crate::core::Progress {
+                    attempt,
+                    received,
+                    total: Some(16 * 1024),
+                },
+            })
+        };
+        app.handle_msg(progress(1, 8 * 1024));
+        let row = |app: &App| {
+            draw(app)
+                .lines()
+                .find(|line| line.contains("机场") && line.contains("URL"))
+                .unwrap()
+                .to_owned()
+        };
+        assert!(row(&app).contains("8.0 KB/16.0 KB"), "{}", row(&app));
+        // A second try says so.
+        app.handle_msg(progress(2, 1024));
+        assert!(
+            row(&app).contains("第 2 次 · 1.0 KB/16.0 KB"),
+            "{}",
+            row(&app)
+        );
+
+        app.handle_msg(Msg::Subscription(SubEvent::Done {
+            work: subscriptions::Work::Update(id),
+            result: Err(crate::core::CoreError::Fetch("no data for 20s".to_owned())),
+        }));
+        // The row shows its usage again, and the failure is said.
+        assert!(row(&app).contains("1.0 GB / 10.0 GB"), "{}", row(&app));
+        assert!(app.subscriptions_view.transfers.is_empty());
+        assert!(
+            toasted(&app, "更新「机场」失败：no data for 20s"),
+            "{:?}",
+            app.toasts
+        );
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -10517,7 +10565,7 @@ secret = "b-secret"
         let port = testing::free_port();
         let recorder = updating_systemd(port, true, "");
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
-        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None)
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None, |_| {})
             .await
             .unwrap();
         let file = dir.join("local.yaml");
@@ -10575,7 +10623,7 @@ secret = "b-secret"
         let port = testing::free_port();
         let recorder = updating_systemd(port, true, "");
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
-        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None)
+        core.import_url(&format!("{}/sub?token=SECRET", server.uri()), None, |_| {})
             .await
             .unwrap();
         age_subscriptions(&dir, 25);

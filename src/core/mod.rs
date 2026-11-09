@@ -35,7 +35,7 @@ pub use encrypted::Fault;
 use install::Target;
 pub use install::{Release, Upgrade};
 pub use privilege::Graphical;
-pub use profiles::Outcome;
+pub use profiles::{Outcome, Progress};
 use runner::Runner;
 pub use runner::System;
 use settings::CoreSettings;
