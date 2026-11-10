@@ -170,7 +170,7 @@ binary = "/usr/bin/mihomo"   # 可选，不写则按下面的顺序找
 | `r` | 刷新，出错时重试 |
 | `m` | 切换模式 rule → global → direct |
 | `P` `C` | 切换配置 / 主题 |
-| `j` `k` `g` `G` `Ctrl+d` `Ctrl+u` | 列表移动 |
+| `j` `k` `gg` `G` `Ctrl+d` `Ctrl+u` | 列表移动（`gg` 顶部、`G` 底部，同 vim） |
 | `/` | 过滤（`Enter` 保留，`Esc` 清除；有过滤时 `U` `X` 只作用于匹配项） |
 | `q` | 退出 |
 

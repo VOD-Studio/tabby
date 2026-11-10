@@ -1305,6 +1305,9 @@ pub enum Action {
     /// `m`: switch to the next proxy mode.
     CycleMode,
     Cursor(Move),
+    /// `g`: the first key of `gg`, which goes to the top as in vim. Any
+    /// other key in between drops it.
+    Go,
     /// `Enter`: acts on the item under the cursor: picks a node, opens a
     /// connection's details, toggles or runs a setting (`Space` too).
     Confirm,
@@ -1595,7 +1598,7 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
                 KeyCode::Up | KeyCode::Char('k') => Some(Action::Cursor(Move::Up)),
                 KeyCode::Left => Some(Action::Cursor(Move::Left)),
                 KeyCode::Right => Some(Action::Cursor(Move::Right)),
-                KeyCode::Char('g') => Some(Action::Cursor(Move::Top)),
+                KeyCode::Char('g') => Some(Action::Go),
                 KeyCode::Char('G') => Some(Action::Cursor(Move::Bottom)),
                 KeyCode::Char('h') if page == Page::Proxies => Some(Action::Cursor(Move::Left)),
                 KeyCode::Char('l') if page == Page::Proxies => Some(Action::Cursor(Move::Right)),
@@ -2367,6 +2370,9 @@ pub struct App {
     pub pending: Option<Confirm>,
     /// The first row of the help the overlay shows, when it does not fit.
     pub help_scroll: usize,
+    /// The first key of a two-key command, waiting for the second: `g`,
+    /// for `gg`.
+    prefix: Option<char>,
     /// Frame counter of the loading spinner; advances while one is visible.
     pub spinner: usize,
     streams: Streams,
@@ -2483,6 +2489,7 @@ impl App {
             overlay: None,
             pending: None,
             help_scroll: 0,
+            prefix: None,
             spinner: 0,
             streams,
             links: Links::default(),
@@ -2624,7 +2631,18 @@ impl App {
         });
     }
 
+    /// Carries out `action`. A first `g` is kept back; a second straight
+    /// after it goes to the top.
     pub fn update(&mut self, action: Action) {
+        let prefix = self.prefix.take();
+        match action {
+            Action::Go if prefix == Some('g') => self.act(Action::Cursor(Move::Top)),
+            Action::Go => self.prefix = Some('g'),
+            other => self.act(other),
+        }
+    }
+
+    fn act(&mut self, action: Action) {
         match action {
             Action::Quit => self.should_quit = true,
             Action::Resize(size) => self.resize(size),
@@ -2686,8 +2704,9 @@ impl App {
             Action::Confirm => self.confirm(),
             Action::CloseConnection => self.close_connection(),
             Action::CloseConnections => self.ask_close_connections(),
-            // Only the confirm dialog takes these.
-            Action::Accept | Action::Cancel => {}
+            // Only the confirm dialog takes the first two; `update` takes
+            // `Go`.
+            Action::Accept | Action::Cancel | Action::Go => {}
             Action::TestNode => self.test_node(),
             Action::TestGroup => self.test_group(),
             Action::CycleSort => self.cycle_sort(),
@@ -7934,7 +7953,7 @@ secret = "b-secret"
     fn switch_to(app: &mut App, index: usize) {
         key_press(app, KeyCode::Char('P'));
         assert_eq!(app.overlay, Some(Overlay::Profiles));
-        key_press(app, KeyCode::Char('g'));
+        type_text(app, "gg");
         for _ in 0..index {
             key_press(app, KeyCode::Char('j'));
         }
@@ -8476,7 +8495,7 @@ secret = "b-secret"
         for code in [KeyCode::Char('l'), KeyCode::Char('j'), KeyCode::Down] {
             key_press(&mut app, code);
             assert_eq!(app.proxies_view.focus, Pane::Nodes);
-            key_press(&mut app, KeyCode::Char('g'));
+            type_text(&mut app, "gg");
             key_press(&mut app, KeyCode::Char('h'));
             assert_eq!(app.proxies_view.focus, Pane::Groups);
         }
@@ -8500,7 +8519,7 @@ secret = "b-secret"
                 (Pane::Nodes, 1)
             );
         }
-        key_press(&mut app, KeyCode::Char('g'));
+        type_text(&mut app, "gg");
         key_press(&mut app, KeyCode::Char('h'));
         app.update(Action::Resize(Size::new(100, 30)));
         assert_eq!(
@@ -8580,8 +8599,15 @@ secret = "b-secret"
         assert_eq!(press(KeyCode::Char('j')), 1);
         assert_eq!(press(KeyCode::Char('j')), 2);
         assert_eq!(press(KeyCode::Char('j')), 2);
+        // One `g` waits for the second; anything else in between drops it.
+        assert_eq!(press(KeyCode::Char('g')), 2);
+        assert_eq!(press(KeyCode::Char('k')), 1);
+        assert_eq!(press(KeyCode::Char('g')), 1);
         assert_eq!(press(KeyCode::Char('g')), 0);
         assert_eq!(press(KeyCode::Char('G')), 2);
+        assert_eq!(press(KeyCode::Char('g')), 2);
+        assert_eq!(press(KeyCode::Char('G')), 2);
+        assert_eq!(press(KeyCode::Char('g')), 2);
         // 13 of the rows shown: half a page is 6.
         app.update(Action::Resize(Size::new(50, 15)));
         app.update(Action::Cursor(Move::Bottom));

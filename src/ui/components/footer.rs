@@ -164,7 +164,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
             hint("S", "反转"),
             hint("/", "过滤"),
             hint("j/k", "移动"),
-            hint("g/G", "首尾"),
+            hint("gg/G", "首尾"),
             hint(
                 "p",
                 if app.connections_view.paused {
@@ -189,7 +189,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
             hint("/", "过滤"),
             hint("j/k", "移动"),
         ],
-        Page::Rules => vec![hint("/", "过滤"), hint("j/k", "移动"), hint("g/G", "首尾")],
+        Page::Rules => vec![hint("/", "过滤"), hint("j/k", "移动"), hint("gg/G", "首尾")],
         Page::Settings => settings_hints(app),
         Page::Logs => {
             let view = &app.logs_view;
@@ -279,7 +279,7 @@ fn settings_hints(app: &App) -> Vec<Hint> {
             enabled,
         },
         hint("j/k", "移动"),
-        hint("g/G", "首尾"),
+        hint("gg/G", "首尾"),
     ]
 }
 
