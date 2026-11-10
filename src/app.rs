@@ -9090,6 +9090,22 @@ secret = "b-secret"
     }
 
     #[test]
+    fn help_shows_every_pages_descriptions_whole_at_80_columns() {
+        let (mut app, _rx) = app_without_controller();
+        app.size = Size::new(80, 24);
+        for page in Page::ALL {
+            app.page = page;
+            key_press(&mut app, KeyCode::Char('?'));
+            let screen = screen_text(&app, 80, 24);
+            let stacked = crate::ui::proxies::stacked(80);
+            for (_, description) in help::page_keys(page, stacked) {
+                assert!(screen.contains(description), "{description}:\n{screen}");
+            }
+            key_press(&mut app, KeyCode::Char('?'));
+        }
+    }
+
+    #[test]
     fn popups_that_scroll_show_a_scrollbar_on_their_border() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Connections;

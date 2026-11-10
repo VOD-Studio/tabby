@@ -19,7 +19,7 @@ use crate::{
 
 /// Keys that only work on the given page; the proxies page's depend on
 /// whether it shows the group list or the picker.
-fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str)] {
+pub(crate) fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str)] {
     match page {
         Page::Proxies if stacked => &[
             ("Enter", "组选择行：展开下拉"),
@@ -94,14 +94,14 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
         ],
         Page::Subscriptions => &[
             ("Enter", "切换到这个订阅"),
-            ("a", "添加：订阅地址或文件路径"),
+            ("a", "添加订阅（URL/文件）"),
             ("u", "更新当前订阅"),
             ("U", "更新全部 / 匹配的"),
-            ("t", "开关自动更新（URL 订阅）"),
+            ("t", "自动更新开关（URL）"),
             ("i", "自动更新间隔（小时）"),
             ("e", "改名"),
-            ("K", "更换 age 私钥（加密订阅）"),
-            ("d", "删除（正在使用的不能删）"),
+            ("K", "更换 age 私钥"),
+            ("d", "删除（使用中不可删）"),
             ("/", "按名称过滤"),
             ("Esc", "清除过滤"),
             ("j / k / ↓ / ↑", "上下移动"),
@@ -115,7 +115,7 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
 /// The logs page's keys.
 const LOGS_KEYS: &[(&str, &str)] = &[
     ("Enter", "查看整条日志"),
-    ("y", "复制当前日志（OSC 52）"),
+    ("y", "复制当前日志"),
     ("l", "切换级别（循环）"),
     ("p", "暂停 / 恢复"),
     ("c", "清空日志"),
@@ -264,8 +264,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     let scroll = (u16::try_from(top).unwrap_or(u16::MAX), 0);
     if sheet.columns {
-        // The global keys are short: the page's get the rest, so their
-        // longest description still fits at 70 columns.
+        // The global keys are short: the page's get the rest, 36 columns at
+        // full width, so a page's descriptions stay within 20 columns.
         let left_width = global.iter().map(Line::width).max().unwrap_or(0) + 1;
         let [left, right] = Layout::horizontal([
             Constraint::Length(u16::try_from(left_width).unwrap_or(u16::MAX)),
