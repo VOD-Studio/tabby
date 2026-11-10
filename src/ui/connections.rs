@@ -13,7 +13,7 @@ use crate::{
     format,
     ui::{
         COMPACT_WIDTH,
-        components::{popup, states, title},
+        components::{popup, scrollbar, states, title},
         hit::Target,
         text::wrap,
     },
@@ -243,7 +243,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
     // Only the rows in view are built: the kernel can have thousands open.
     let start = window.start;
-    let body = window.map(|index| {
+    let body = window.clone().map(|index| {
         let style = if index % 2 == 1 {
             theme.stripe
         } else {
@@ -265,6 +265,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
             .row_highlight_style(theme.surface),
         inner,
         &mut TableState::new().with_selected(cursor - start),
+    );
+    scrollbar::list(
+        frame,
+        scrollbar::under_header(inner),
+        &window,
+        visible.len(),
+        theme.accent,
     );
 }
 

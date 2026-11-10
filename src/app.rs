@@ -8308,6 +8308,30 @@ secret = "b-secret"
         ));
     }
 
+    #[test]
+    fn the_connections_scrollbar_follows_the_cursor_and_goes_when_all_fit() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        feed(
+            &mut app,
+            (0..100)
+                .map(|n| flow(&format!("c{n}"), "0", 0, 0))
+                .collect(),
+        );
+        let header = row_of(&app, "主机");
+        let top = thumb_rows(&app);
+        assert_eq!(top[0], header + 1);
+        app.update(Action::Cursor(Move::HalfDown));
+        app.update(Action::Cursor(Move::Bottom));
+        let bottom = thumb_rows(&app);
+        assert_eq!(bottom.len(), top.len());
+        assert!(row_ends_with(&app, *bottom.last().unwrap() + 1, '╯'));
+
+        // A table that fits has none.
+        feed(&mut app, vec![flow("a", "0", 0, 0)]);
+        assert_eq!(thumb_rows(&app), Vec::<usize>::new());
+    }
+
     #[tokio::test]
     async fn a_screen_too_small_only_says_so_and_keys_still_work() {
         let (mut app, _rx) = app_without_controller();
