@@ -7626,6 +7626,17 @@ mod tests {
         (app, rx)
     }
 
+    #[tokio::test]
+    async fn the_settings_scrollbar_counts_headings_and_follows_the_cursor() {
+        let (mut app, _rx) = settings_app("http://127.0.0.1:1", true, MIHOMO_CONFIGS);
+        let top = thumb_rows(&app);
+        assert!(row_ends_with(&app, top[0] - 1, '╮'));
+        app.update(Action::Cursor(Move::Bottom));
+        let bottom = thumb_rows(&app);
+        assert_eq!(bottom.len(), top.len());
+        assert!(row_ends_with(&app, *bottom.last().unwrap() + 1, '╯'));
+    }
+
     fn select(app: &mut App, setting: Setting) {
         app.settings_view.cursor = Setting::ALL.iter().position(|s| *s == setting).unwrap();
     }
