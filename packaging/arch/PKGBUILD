@@ -14,7 +14,7 @@ pkgdesc='Terminal UI for the mihomo (Clash.Meta) kernel'
 arch=('x86_64' 'aarch64')
 url='https://github.com/VOD-Studio/tabby'
 license=('MIT')
-depends=('gcc-libs' 'glibc')
+depends=('glibc' 'libgcc')
 makedepends=('cargo')
 # No kernel is shipped: tabby runs a mihomo on $PATH, or downloads one.
 optdepends=('mihomo: the kernel, kept up to date by pacman instead of tabby'
