@@ -7272,6 +7272,22 @@ mod tests {
         (app, rx)
     }
 
+    #[test]
+    fn the_providers_scrollbar_counts_headings_and_follows_the_cursor() {
+        let names: Vec<String> = (0..30).map(|n| format!("set-{n}")).collect();
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        let (mut app, _rx) = providers_app(&["sub"], &names);
+        let top = thumb_rows(&app);
+        assert!(row_ends_with(&app, top[0] - 1, '╮'));
+        app.update(Action::Cursor(Move::Bottom));
+        let bottom = thumb_rows(&app);
+        assert_eq!(bottom.len(), top.len());
+        assert!(row_ends_with(&app, *bottom.last().unwrap() + 1, '╯'));
+
+        let (app, _rx) = providers_app(&["sub"], &["a", "b"]);
+        assert_eq!(thumb_rows(&app), Vec::<usize>::new());
+    }
+
     fn proxy_ref(name: &str) -> ProviderRef {
         ProviderRef {
             kind: ProviderKind::Proxy,

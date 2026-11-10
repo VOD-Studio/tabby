@@ -14,7 +14,7 @@ use crate::{
     app::{App, ProviderKind, ProviderRef, ProviderRow, Work},
     format,
     ui::{
-        components::{states, title},
+        components::{scrollbar, states, title},
         hit::Target,
         text::{describe, detail},
         theme::Theme,
@@ -169,7 +169,7 @@ fn draw_lines(frame: &mut Frame, inner: Rect, app: &App, rows: &[ProviderRow<'_>
     let rule_list = view.visible_rules();
     let proxy_layout = proxy_layout(app, &proxies, width, &now);
     let rule_layout = rule_layout(app, &rule_list, width, &now);
-    for (line_index, item) in items[window].iter().enumerate() {
+    for (line_index, item) in items[window.clone()].iter().enumerate() {
         let line = match *item {
             Item::ProxyHeading => heading(
                 &theme,
@@ -213,6 +213,7 @@ fn draw_lines(frame: &mut Frame, inner: Rect, app: &App, rows: &[ProviderRow<'_>
             theme.paint_cursor(frame.buffer_mut(), rect);
         }
     }
+    scrollbar::list(frame, inner, &window, items.len(), theme.accent);
 }
 
 /// Every line of the panel, top to bottom.
