@@ -9071,6 +9071,25 @@ secret = "b-secret"
     }
 
     #[test]
+    fn help_lines_up_descriptions_after_keys_of_wide_characters() {
+        use unicode_width::UnicodeWidthStr;
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        app.size = Size::new(80, 24);
+        key_press(&mut app, KeyCode::Char('?'));
+        let screen = screen_text(&app, 80, 24);
+        // The column a text starts at on its row.
+        let column = |text: &str| {
+            screen
+                .lines()
+                .find_map(|line| line.find(text).map(|at| line[..at].width()))
+                .unwrap_or_else(|| panic!("{text} on screen:\n{screen}"))
+        };
+        // `鼠标` is four columns wide, `1-8` three: same description column.
+        assert_eq!(column("点击选择"), column("跳到第"));
+    }
+
+    #[test]
     fn popups_that_scroll_show_a_scrollbar_on_their_border() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Connections;

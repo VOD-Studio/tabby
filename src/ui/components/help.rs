@@ -5,6 +5,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::Paragraph,
 };
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     app::{App, Page},
@@ -230,9 +231,11 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let heading =
         |text: String| Line::styled(text, Style::new().fg(theme.fg).add_modifier(Modifier::BOLD));
     let key_line = |key: &str, description: &'static str| {
+        // Padded by columns, not chars: `鼠标` is two chars but four columns.
+        let pad = KEY_WIDTH.saturating_sub(key.width());
         Line::from(vec![
             Span::styled(
-                format!("{key:<KEY_WIDTH$}"),
+                format!("{key}{:pad$}", ""),
                 Style::new().fg(theme.accent).add_modifier(Modifier::BOLD),
             ),
             Span::styled(description, Style::new().fg(theme.muted)),
