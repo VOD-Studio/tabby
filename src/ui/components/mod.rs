@@ -6,6 +6,7 @@ pub mod header;
 pub mod help;
 pub mod popup;
 pub mod profiles;
+pub mod scrollbar;
 pub mod states;
 pub mod tabs;
 pub mod themes;

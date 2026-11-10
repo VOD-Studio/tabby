@@ -12,7 +12,7 @@ use crate::{
     app::{App, LogEntry, LogLink},
     format,
     ui::{
-        components::{states, title},
+        components::{scrollbar, states, title},
         hit::Target,
         text::wrap,
         theme::Theme,
@@ -134,7 +134,8 @@ pub fn status(app: &App) -> Span<'static> {
     }
 }
 
-/// The logs page: one panel with the log, newest at the bottom.
+/// The logs page: one panel with the log, newest at the bottom, and a
+/// scrollbar on its right border when the log is longer than the panel.
 pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let theme = app.theme;
     let view = &app.logs_view;
@@ -199,12 +200,15 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     }
 
     // Only the rows in view are laid out: the buffer holds up to 2000.
+    let fit = fit(area);
     let lines: Vec<Line> = view
-        .page(fit(area))
+        .page(fit)
         .into_iter()
         .map(|(entry, row, text)| line(entry, row, text, &theme))
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
+    let (above, rows) = view.extent(fit);
+    scrollbar::render(frame, area, above, fit.height, rows, theme.accent);
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
 use std::{
+    cell::Cell,
     cmp::Ordering,
     collections::{HashMap, HashSet, VecDeque},
     time::{Duration, Instant},
@@ -897,6 +898,10 @@ pub struct LogEntry {
     pub message: String,
     /// `message` lowercased once, for the filter.
     lowercase: String,
+    /// The rows `message` last took and the width that was at: the
+    /// scrollbar adds up every shown line on each frame. `(0, 0)` until
+    /// first laid out.
+    rows: Cell<(usize, usize)>,
 }
 
 impl LogEntry {
@@ -916,6 +921,20 @@ impl LogEntry {
             kind: log.kind,
             lowercase: message.to_lowercase(),
             message,
+            rows: Cell::new((0, 0)),
+        }
+    }
+
+    /// Rows the message takes in a message column `width` wide; wrapped
+    /// once per width.
+    fn rows(&self, width: usize) -> usize {
+        match self.rows.get() {
+            (at, rows) if at == width && rows > 0 => rows,
+            _ => {
+                let rows = logs::wrap_message(&self.message, width).len();
+                self.rows.set((width, rows));
+                rows
+            }
         }
     }
 }
@@ -926,11 +945,6 @@ impl LogEntry {
 pub struct LogSpot {
     pub entry: usize,
     pub row: usize,
-}
-
-/// Rows `entry` takes in a message column `width` wide.
-fn log_height(entry: &LogEntry, width: usize) -> usize {
-    logs::wrap_message(&entry.message, width).len()
 }
 
 /// Where the log stream stands, as the logs page tells it.
@@ -1079,7 +1093,7 @@ impl LogsView {
     fn shown_spot(&self, spot: LogSpot, needle: &str, width: usize) -> Option<LogSpot> {
         let (entry, shown) = self.shown_from(spot.entry, needle).next()?;
         let row = if entry == spot.entry {
-            spot.row.min(log_height(shown, width) - 1)
+            spot.row.min(shown.rows(width) - 1)
         } else {
             0
         };
@@ -1090,7 +1104,7 @@ impl LogsView {
     fn rows_from(&self, spot: LogSpot, needle: &str, width: usize, limit: usize) -> usize {
         let mut rows = 0;
         for (index, entry) in self.shown_from(spot.entry, needle) {
-            rows += log_height(entry, width);
+            rows += entry.rows(width);
             if index == spot.entry {
                 rows -= spot.row;
             }
@@ -1108,7 +1122,7 @@ impl LogsView {
         let mut rows = 0;
         let mut top = None;
         for (entry, shown) in self.shown_before(self.entries.len(), needle) {
-            rows += log_height(shown, fit.width);
+            rows += shown.rows(fit.width);
             top = Some(LogSpot {
                 entry,
                 row: rows.saturating_sub(fit.height),
@@ -1134,7 +1148,7 @@ impl LogsView {
             };
             spot = LogSpot {
                 entry,
-                row: log_height(shown, width) - 1,
+                row: shown.rows(width) - 1,
             };
             rows -= 1;
         }
@@ -1147,7 +1161,7 @@ impl LogsView {
             let last = self
                 .entries
                 .get(spot.entry)
-                .map_or(0, |entry| log_height(entry, width) - 1);
+                .map_or(0, |entry| entry.rows(width) - 1);
             if spot.row < last {
                 let step = rows.min(last - spot.row);
                 spot.row += step;
@@ -1254,6 +1268,27 @@ impl LogsView {
                 .skip(skip),
         );
         page
+    }
+
+    /// Where a view of `fit` is, in screen rows, for the scrollbar: the
+    /// rows above its top, and the rows of every shown line. A view that
+    /// follows sits at the bottom.
+    pub fn extent(&self, fit: Fit) -> (usize, usize) {
+        let needle = self.needle();
+        let top = self.resting_top(&needle, fit);
+        let (mut above, mut rows) = (0, 0);
+        for (index, entry) in self.shown_from(0, &needle) {
+            if let Some(top) = top
+                && index == top.entry
+            {
+                above = rows + top.row;
+            }
+            rows += entry.rows(fit.width);
+        }
+        if top.is_none() {
+            above = rows.saturating_sub(fit.height);
+        }
+        (above, rows)
     }
 }
 
@@ -7007,6 +7042,71 @@ mod tests {
         view.scroll(Move::Down, narrow);
         view.scroll(Move::Down, narrow);
         assert_eq!(view.top, Some(LogSpot { entry: 2, row: 0 }));
+    }
+
+    #[test]
+    fn the_scroll_extent_counts_wrapped_rows_and_follows_at_the_bottom() {
+        let mut view = LogsView::default();
+        feed_logs(&mut view, 0, 5);
+        // 45 columns: three rows at 20, five at 10.
+        view.receive(log_entry(LogLevel::Warning, &"x".repeat(45)));
+        feed_logs(&mut view, 5, 4);
+        assert_eq!(view.extent(FIT), (8, 12));
+        view.scroll(Move::Top, FIT);
+        assert_eq!(view.extent(FIT), (0, 12));
+        view.scroll(Move::Down, FIT);
+        view.scroll(Move::HalfDown, FIT);
+        assert_eq!(view.top, Some(LogSpot { entry: 3, row: 0 }));
+        assert_eq!(view.extent(FIT), (3, 12));
+        // Into the long line: its rows count one by one.
+        view.scroll(Move::HalfDown, FIT);
+        assert_eq!(view.top, Some(LogSpot { entry: 5, row: 0 }));
+        view.scroll(Move::Down, FIT);
+        assert_eq!(view.extent(FIT), (6, 12));
+        // A narrower column wraps again, keeping the spot.
+        let narrow = Fit { width: 10, ..FIT };
+        assert_eq!(view.extent(narrow), (6, 14));
+
+        // The filter leaves out what it hides.
+        view.filter = Input::new("x".to_owned());
+        assert_eq!(view.extent(FIT), (0, 3));
+        view.filter = Input::new("7".to_owned());
+        assert_eq!(view.extent(FIT), (0, 1));
+    }
+
+    #[test]
+    fn a_long_log_shows_a_scrollbar_that_tracks_the_view() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        app.logs_view.link = LogLink::Live;
+        feed_logs(&mut app.logs_view, 0, 500);
+        let thumb_rows = |app: &App| -> Vec<usize> {
+            screen_text(app, 80, 24)
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.ends_with('█'))
+                .map(|(row, _)| row)
+                .collect()
+        };
+        let ends_with = |app: &App, row: usize, corner: char| {
+            screen_text(app, 80, 24)
+                .lines()
+                .nth(row)
+                .is_some_and(|line| line.ends_with(corner))
+        };
+        // On the right border: just above the bottom corner while it
+        // follows, just under the top corner at the top.
+        let following = thumb_rows(&app);
+        assert!(ends_with(&app, *following.last().unwrap() + 1, '╯'));
+        app.update(Action::Cursor(Move::Top));
+        let top = thumb_rows(&app);
+        assert_eq!(top.len(), following.len());
+        assert!(ends_with(&app, top[0] - 1, '╮'));
+
+        // Nothing to scroll, no thumb.
+        app.update(press('c', Page::Logs, false).unwrap());
+        feed_logs(&mut app.logs_view, 0, 3);
+        assert_eq!(thumb_rows(&app), Vec::<usize>::new());
     }
 
     #[test]
