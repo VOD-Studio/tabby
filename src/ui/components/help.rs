@@ -213,6 +213,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let inner = popup::panel(frame, sheet.rect, theme.accent, Some("帮助"), status);
     scrollbar::render(
         frame,
+        &app.hits,
         scrollbar::in_popup(inner),
         top,
         sheet.visible,

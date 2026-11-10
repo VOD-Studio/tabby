@@ -1,5 +1,6 @@
 //! A scrollbar drawn over the right border of a panel: the border is the
-//! track, a block on it the thumb.
+//! track, a block on it the thumb. Pressing on the track or dragging along
+//! it scrolls there (`App::mouse_action`).
 
 use std::ops::Range;
 
@@ -8,6 +9,8 @@ use ratatui::{
     layout::Rect,
     style::{Color, Style},
 };
+
+use crate::ui::hit::{Hits, Target};
 
 /// The thumb. A block character: the same in both icon sets.
 const THUMB: &str = "█";
@@ -37,9 +40,11 @@ pub fn thumb(track: usize, position: usize, viewport: usize, len: usize) -> Opti
 /// `rows`: the rows of the panel's inside that scroll, a table's header
 /// left out. The border is the column just right of them, as with a
 /// bordered block without padding. `position`, `viewport` and `len` as in
-/// [`thumb`]; nothing is drawn when everything fits.
+/// [`thumb`]; nothing is drawn when everything fits. The track goes into
+/// `hits` for the mouse.
 pub fn render(
     frame: &mut Frame,
+    hits: &Hits,
     rows: Rect,
     position: usize,
     viewport: usize,
@@ -50,6 +55,12 @@ pub fn render(
         return;
     };
     let x = rows.right();
+    let track = Rect {
+        x,
+        width: 1,
+        ..rows
+    };
+    hits.add(track, Target::Track(track));
     let buffer = frame.buffer_mut();
     for row in (0..rows.height).filter(|row| thumb.contains(&usize::from(*row))) {
         if let Some(cell) = buffer.cell_mut((x, rows.y + row)) {
@@ -78,8 +89,15 @@ pub fn in_popup(inner: Rect) -> Rect {
 
 /// [`render`] for a list scrolled to `window` (as `Scroll::window` gives
 /// it) of `len` items, one row each.
-pub fn list(frame: &mut Frame, rows: Rect, window: &Range<usize>, len: usize, color: Color) {
-    render(frame, rows, window.start, window.len(), len, color);
+pub fn list(
+    frame: &mut Frame,
+    hits: &Hits,
+    rows: Rect,
+    window: &Range<usize>,
+    len: usize,
+    color: Color,
+) {
+    render(frame, hits, rows, window.start, window.len(), len, color);
 }
 
 #[cfg(test)]

@@ -213,7 +213,7 @@ fn draw_lines(frame: &mut Frame, inner: Rect, app: &App, rows: &[ProviderRow<'_>
             theme.paint_cursor(frame.buffer_mut(), rect);
         }
     }
-    scrollbar::list(frame, inner, &window, items.len(), theme.accent);
+    scrollbar::list(frame, &app.hits, inner, &window, items.len(), theme.accent);
 }
 
 /// Every line of the panel, top to bottom.

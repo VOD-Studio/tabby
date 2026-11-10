@@ -102,7 +102,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, configs: &Configs) {
         view.scroll.window(heading, items.len(), capacity);
     }
     let window = view.scroll.window(row_item, items.len(), capacity);
-    scrollbar::list(frame, inner, &window, items.len(), theme.accent);
+    scrollbar::list(frame, &app.hits, inner, &window, items.len(), theme.accent);
 
     let width = usize::from(inner.width);
     for (line_index, index) in window.enumerate() {

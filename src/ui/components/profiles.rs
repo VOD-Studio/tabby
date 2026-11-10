@@ -55,6 +55,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .window(app.profile_cursor, len, usize::from(inner.height));
     scrollbar::list(
         frame,
+        &app.hits,
         scrollbar::in_popup(inner),
         &window,
         len,

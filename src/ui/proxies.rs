@@ -214,6 +214,7 @@ pub fn render_picker(frame: &mut Frame, body: Rect, app: &App) {
         .window(cursor, len, usize::from(inner.height));
     scrollbar::list(
         frame,
+        &app.hits,
         scrollbar::in_popup(inner),
         &window,
         len,
@@ -352,7 +353,14 @@ fn render_groups(
         .proxies_view
         .group_scroll
         .window(selected, groups.len(), capacity);
-    scrollbar::list(frame, inner, &window, groups.len(), border(app, focused));
+    scrollbar::list(
+        frame,
+        &app.hits,
+        inner,
+        &window,
+        groups.len(),
+        border(app, focused),
+    );
     for (row, index) in window.enumerate() {
         let rect = Rect {
             y: inner.y + u16::try_from(row).unwrap_or(0) * GROUP_ROWS,
@@ -509,7 +517,14 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
     }
     let counter = vec![Span::styled(counter, Style::new().fg(theme.muted))];
     frame.render_widget(panel(app, focused, area.width, heading, counter), area);
-    scrollbar::list(frame, inner, &rows, total_rows, border(app, focused));
+    scrollbar::list(
+        frame,
+        &app.hits,
+        inner,
+        &rows,
+        total_rows,
+        border(app, focused),
+    );
 
     for (row, row_index) in rows.enumerate() {
         for column in 0..columns {

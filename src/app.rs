@@ -107,9 +107,18 @@ pub enum Move {
     Bottom,
     HalfUp,
     HalfDown,
+    /// Step `.0` of `.1` from the first item to the last, rounded: where
+    /// the mouse is along a scrollbar's track.
+    To(u16, u16),
 }
 
 impl Move {
+    /// The index step `n` of `steps` from 0 to `last` lands on.
+    fn share(n: u16, steps: u16, last: usize) -> usize {
+        let steps = usize::from(steps.max(1));
+        ((usize::from(n) * last + steps / 2) / steps).min(last)
+    }
+
     /// The cursor position after this move in a list of `len` items; a half
     /// page is `half` items.
     fn apply(self, cursor: usize, len: usize, half: usize) -> usize {
@@ -123,6 +132,7 @@ impl Move {
             Self::Bottom => last,
             Self::HalfUp => cursor.saturating_sub(half),
             Self::HalfDown => (cursor + half).min(last),
+            Self::To(n, steps) => Self::share(n, steps, last),
         }
     }
 
@@ -158,6 +168,11 @@ impl Move {
             Self::Left | Self::Right => cursor,
             Self::Top => 0,
             Self::Bottom => last,
+            // By rows, keeping the column as far as the last row has it.
+            Self::To(n, steps) => {
+                let row = Self::share(n, steps, last / columns);
+                (row * columns + cursor % columns).min(last)
+            }
         }
     }
 }
@@ -1213,6 +1228,11 @@ impl LogsView {
             Move::Down => self.down(current, 1, &needle, fit.width),
             Move::HalfUp => self.up(current, half, &needle, fit.width),
             Move::HalfDown => self.down(current, half, &needle, fit.width),
+            Move::To(n, steps) => {
+                let (_, rows) = self.extent(fit);
+                let row = Move::share(n, steps, rows.saturating_sub(fit.height));
+                self.down(first, row, &needle, fit.width)
+            }
             Move::Top => first,
             Move::Bottom => {
                 self.top = None;
@@ -1645,6 +1665,12 @@ pub fn action_for(event: &Event, page: Page, typing: bool) -> Option<Action> {
         Event::Resize(width, height) => Some(Action::Resize(Size::new(*width, *height))),
         _ => None,
     }
+}
+
+/// A place in the list a scrollbar `track` runs beside: its first row, just
+/// inside the border.
+fn beside(track: Rect) -> Position {
+    Position::new(track.x.saturating_sub(1), track.y)
 }
 
 /// Two presses on the same row within this long are a double click.
@@ -2410,6 +2436,8 @@ pub struct App {
     pub hits: Hits,
     /// The last left press that landed on something, and when.
     last_click: Option<(Target, Instant)>,
+    /// The scrollbar track the left button went down on, while it is held.
+    drag: Option<Rect>,
     dirty: bool,
 }
 
@@ -2507,6 +2535,7 @@ impl App {
             size,
             hits: Hits::default(),
             last_click: None,
+            drag: None,
             dirty: false,
         }
     }
@@ -3137,7 +3166,19 @@ impl App {
     pub fn mouse_action(&mut self, event: MouseEvent, now: Instant) -> Option<Action> {
         let position = Position::new(event.column, event.row);
         let movement = match event.kind {
-            MouseEventKind::Down(MouseButton::Left) => return self.click(position, now),
+            MouseEventKind::Down(MouseButton::Left) => {
+                if let Some(Target::Track(track)) = self.hits.at(position) {
+                    self.drag = Some(track);
+                    return self.along(track, position);
+                }
+                self.drag = None;
+                return self.click(position, now);
+            }
+            MouseEventKind::Drag(MouseButton::Left) => return self.along(self.drag?, position),
+            MouseEventKind::Up(MouseButton::Left) => {
+                self.drag = None;
+                return None;
+            }
             MouseEventKind::ScrollUp => Move::Up,
             MouseEventKind::ScrollDown => Move::Down,
             _ => return None,
@@ -3145,7 +3186,26 @@ impl App {
         if self.overlay.is_some() {
             return Some(Action::Cursor(movement));
         }
+        // Over a scrollbar the wheel scrolls its list.
+        let position = match self.hits.at(position) {
+            Some(Target::Track(track)) => beside(track),
+            _ => position,
+        };
         let target = self.hits.scroll_area(position)?;
+        Some(Action::Wheel(target, movement))
+    }
+
+    /// The mouse at `position` on or along the scrollbar `track`: its list
+    /// goes to the same share of the way, the ends of the track being the
+    /// ends of the list. Above or below the track counts as its end.
+    fn along(&self, track: Rect, position: Position) -> Option<Action> {
+        let last = track.bottom().saturating_sub(1);
+        let row = position.y.clamp(track.y, last) - track.y;
+        let movement = Move::To(row, last - track.y);
+        if self.overlay.is_some() {
+            return Some(Action::Cursor(movement));
+        }
+        let target = self.hits.scroll_area(beside(track))?;
         Some(Action::Wheel(target, movement))
     }
 
@@ -3268,7 +3328,8 @@ impl App {
             | Target::Popup
             | Target::PickerItem(_)
             | Target::Profile(_)
-            | Target::Theme(_) => false,
+            | Target::Theme(_)
+            | Target::Track(_) => false,
         }
     }
 
@@ -5101,6 +5162,21 @@ mod tests {
         assert_eq!(grid(Move::HalfDown, 9), 9);
         assert_eq!(grid(Move::HalfUp, 4), 1);
         assert_eq!(grid(Move::HalfUp, 2), 2);
+    }
+
+    #[test]
+    fn a_spot_along_a_scrollbar_is_the_same_share_of_the_list() {
+        // A track of eleven rows has ten steps.
+        assert_eq!(Move::To(0, 10).apply(37, 101, 4), 0);
+        assert_eq!(Move::To(5, 10).apply(0, 101, 4), 50);
+        assert_eq!(Move::To(10, 10).apply(0, 101, 4), 100);
+        // Rounded, not cut: two thirds of the way along three items.
+        assert_eq!(Move::To(1, 3).apply(0, 3, 4), 1);
+        assert_eq!(Move::To(3, 0).apply(0, 0, 4), 0);
+        // The grid goes by rows, keeping the column the last row has.
+        assert_eq!(grid(Move::To(0, 3), 5), 2);
+        assert_eq!(grid(Move::To(2, 3), 1), 7);
+        assert_eq!(grid(Move::To(3, 3), 1), 9);
     }
 
     #[test]
@@ -8603,6 +8679,95 @@ secret = "b-secret"
             }
         }
         runs
+    }
+
+    /// The scrollbar track `app` draws at `width` x `height`, the one
+    /// furthest right.
+    fn track_in(app: &App, width: u16, height: u16) -> Rect {
+        screen_text(app, width, height);
+        (0..width)
+            .rev()
+            .flat_map(|x| (0..height).map(move |y| Position::new(x, y)))
+            .find_map(|position| match app.hits.at(position) {
+                Some(Target::Track(track)) => Some(track),
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn dragging_the_log_scrollbar_scrolls_by_its_share_and_the_bottom_follows() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        app.logs_view.link = LogLink::Live;
+        feed_logs(&mut app.logs_view, 0, 500);
+        let track = track_in(&app, 80, 24);
+        let (x, last) = (track.x, track.bottom() - 1);
+        let above = |app: &App| app.logs_view.extent(app.logs_fit()).0;
+        let scrollable = app.logs_view.extent(app.logs_fit()).1 - app.logs_fit().height;
+
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            x,
+            track.y,
+        );
+        assert_eq!(above(&app), 0);
+        assert!(app.logs_view.top.is_some());
+        let middle = track.y + track.height / 2;
+        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 3, middle);
+        let steps = track.height - 1;
+        assert_eq!(
+            above(&app),
+            Move::share(middle - track.y, steps, scrollable)
+        );
+        // Past the end of the track is its end: following again.
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            last + 5,
+        );
+        assert_eq!(app.logs_view.top, None);
+
+        // Once let go, moving does nothing; the wheel over it scrolls.
+        mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, last);
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            x,
+            track.y,
+        );
+        assert_eq!(app.logs_view.top, None);
+        mouse(&mut app, MouseEventKind::ScrollUp, x, middle);
+        assert_eq!(above(&app), scrollable - 1);
+    }
+
+    #[test]
+    fn a_press_on_a_list_scrollbar_moves_the_cursor_there() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Rules;
+        let rules = (0..100)
+            .map(|n| rule("DomainSuffix", &format!("{n}.example"), "DIRECT"))
+            .collect();
+        app.rules_view.apply(false, Ok(rules));
+        let track = track_in(&app, 80, 24);
+        let steps = track.height - 1;
+        click(&mut app, track.x, track.bottom() - 1);
+        assert_eq!(app.rules_view.cursor, 99);
+        click(&mut app, track.x, track.y + 3);
+        assert_eq!(app.rules_view.cursor, Move::share(3, steps, 99));
+
+        // In a popup, its own list.
+        app.page = Page::Connections;
+        app.size = Size::new(69, 25);
+        key_press(&mut app, KeyCode::Char('?'));
+        let track = track_in(&app, 69, 25);
+        click(&mut app, track.x, track.bottom() - 1);
+        assert_eq!(
+            app.help_scroll,
+            help::max_scroll(Rect::new(0, 0, 69, 25), Page::Connections)
+        );
     }
 
     #[test]

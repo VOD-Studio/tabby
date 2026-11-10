@@ -48,6 +48,9 @@ pub enum Target {
     Column(SortColumn),
     /// One of the overview's modes.
     Mode(Mode),
+    /// A scrollbar's track: its column, between the ends of the rows it
+    /// runs beside.
+    Track(Rect),
 }
 
 impl Target {

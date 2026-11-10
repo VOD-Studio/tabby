@@ -268,6 +268,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     );
     scrollbar::list(
         frame,
+        &app.hits,
         scrollbar::under_header(inner),
         &window,
         visible.len(),
