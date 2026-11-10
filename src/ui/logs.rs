@@ -109,6 +109,20 @@ pub fn line(entry: &LogEntry, row: usize, text: String, theme: &Theme) -> Line<'
     ])
 }
 
+/// `entry` as one line of text, as the list shows it: the time, the level
+/// in full, the message.
+pub fn copied(entry: &LogEntry) -> String {
+    let level = match &entry.kind {
+        LogKind::Level(level) => level_label(*level).to_owned(),
+        LogKind::Other(word) => word.to_uppercase(),
+    };
+    format!(
+        "{} {level} {}",
+        entry.time.strftime("%H:%M:%S"),
+        entry.message
+    )
+}
+
 /// The right side of the title: whether the stream is connected, and else
 /// whether the view is paused. Nothing claims live while a resubscription
 /// is under way.

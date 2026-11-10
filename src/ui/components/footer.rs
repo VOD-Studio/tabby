@@ -54,7 +54,7 @@ fn log_detail_hints(app: &App) -> Vec<Hint> {
         let sheet = logs::detail_sheet(screen, &detail.entry);
         sheet.lines.len() > sheet.visible
     });
-    let mut hints = vec![hint("Esc", "关闭")];
+    let mut hints = vec![hint("Esc", "关闭"), hint("y", "复制")];
     if scrolls {
         hints.push(hint("j/k", "滚动"));
     }
@@ -211,6 +211,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
             let view = &app.logs_view;
             let mut hints = vec![
                 hint("Enter", "详情"),
+                hint("y", "复制"),
                 hint("l", "级别"),
                 hint("p", if view.paused { "恢复" } else { "暂停" }),
                 hint("c", "清空"),

@@ -6,6 +6,7 @@ use std::{
 
 use color_eyre::Result;
 use crossterm::{
+    clipboard::CopyToClipboard,
     event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
     execute,
 };
@@ -84,6 +85,13 @@ async fn serve(
                 };
                 if let Some(action) = action {
                     app.update(action);
+                }
+                // OSC 52: the terminal (and tmux, with `set-clipboard on`)
+                // puts it on the system clipboard.
+                if let Some(text) = app.take_clipboard()
+                    && let Err(err) = execute!(io::stdout(), CopyToClipboard::to_clipboard_from(text))
+                {
+                    tracing::warn!("cannot copy to the clipboard: {err}");
                 }
                 if app.take_dirty() {
                     paint(terminal, app, shadow)?;

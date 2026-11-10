@@ -2426,6 +2426,9 @@ pub struct App {
     /// The managed core, while `sudo` has to be run on the terminal, which
     /// only the main loop can give.
     suspend: Option<std::sync::Arc<ManagedCore>>,
+    /// Text for the terminal's clipboard, which only the main loop can
+    /// reach.
+    clipboard: Option<String>,
     /// The connections `P` offers, and which one is in use.
     pub profiles: Profiles,
     /// Index into [`Profiles::choices`] of the row the profile popup's
@@ -2575,6 +2578,7 @@ impl App {
             login_start: None,
             system_proxy: None,
             suspend: None,
+            clipboard: None,
             profile_cursor: profiles.current,
             profiles,
             profile_scroll: Scroll::default(),
@@ -2823,23 +2827,15 @@ impl App {
             Action::Confirm => self.confirm(),
             Action::CloseConnection => self.close_connection(),
             Action::CloseConnections => self.ask_close_connections(),
-            // Only the confirm dialog takes the first two; `update` takes
-            // `Go`.
-            Action::Accept | Action::Cancel | Action::Go => {}
+            // `y` copies on the logs page; only the confirm dialog takes
+            // `n`, and `update` takes `Go`.
+            Action::Accept => self.copy_log(),
+            Action::Cancel | Action::Go => {}
             Action::TestNode => self.test_node(),
             Action::TestGroup => self.test_group(),
             Action::CycleSort => self.cycle_sort(),
-            Action::ReverseSort => {
-                let view = &mut self.connections_view;
-                view.set_sort(view.sort.reversed());
-                self.dirty = true;
-            }
-            Action::SortBy(column) => {
-                self.release_input();
-                let view = &mut self.connections_view;
-                view.set_sort(view.sort.toward(column));
-                self.dirty = true;
-            }
+            Action::ReverseSort => self.reverse_sort(),
+            Action::SortBy(column) => self.sort_by(column),
             Action::SetMode(mode) => self.set_mode(mode),
             Action::TogglePause => self.toggle_pause(),
             Action::CycleLevel => self.cycle_level(),
@@ -2867,6 +2863,22 @@ impl App {
             Action::ChangeAgeKey => self.change_age_key(),
             Action::Refresh => self.refresh(),
         }
+    }
+
+    /// `S`: the connections table the other way round.
+    fn reverse_sort(&mut self) {
+        let view = &mut self.connections_view;
+        view.set_sort(view.sort.reversed());
+        self.dirty = true;
+    }
+
+    /// A click on a column heading: sorts by it, or flips it when it already
+    /// does.
+    fn sort_by(&mut self, column: SortColumn) {
+        self.release_input();
+        let view = &mut self.connections_view;
+        view.set_sort(view.sort.toward(column));
+        self.dirty = true;
     }
 
     /// `r`: retries what failed and repeats the startup requests at once,
@@ -3729,8 +3741,32 @@ impl App {
                 }
             }
             Action::Confirm | Action::Dismiss => self.close_overlay(),
+            Action::Accept => self.copy_log(),
             _ => {}
         }
+    }
+
+    /// `y` on the logs page: the line in the detail popup, or else the one
+    /// under the cursor, goes to the clipboard as the list shows it.
+    fn copy_log(&mut self) {
+        if self.page != Page::Logs {
+            return;
+        }
+        let view = &self.logs_view;
+        let entry = match &view.detail {
+            Some(detail) => Some(&detail.entry),
+            None => view.selected().map(|index| &view.entries[index]),
+        };
+        let Some(text) = entry.map(logs::copied) else {
+            return;
+        };
+        self.clipboard = Some(text);
+        self.toast(ToastKind::Success, "已复制到剪贴板".to_owned());
+    }
+
+    /// Text to put on the terminal's clipboard, once.
+    pub fn take_clipboard(&mut self) -> Option<String> {
+        self.clipboard.take()
     }
 
     /// Whether the kernel can take `setting`: original Clash has none of
@@ -8926,6 +8962,44 @@ secret = "b-secret"
         assert_eq!(app.overlay, Some(Overlay::Log));
         assert_eq!(app.logs_view.detail.as_ref().unwrap().entry.message, "2000");
         assert!(!screen_text(&app, 80, 24).contains("j/k 滚动"));
+    }
+
+    #[test]
+    fn y_copies_the_line_under_the_cursor_or_in_the_popup_as_the_list_shows_it() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        app.logs_view.link = LogLink::Live;
+        feed_logs(&mut app.logs_view, 0, 3);
+        key_press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.take_clipboard().as_deref(), Some("12:00:00 INFO 2"));
+        assert!(toasted(&app, "已复制到剪贴板"));
+        assert_eq!(app.take_clipboard(), None);
+        key_press(&mut app, KeyCode::Char('k'));
+        key_press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.take_clipboard().as_deref(), Some("12:00:00 INFO 1"));
+
+        // A level tabby does not know goes in full; in the popup, its line.
+        let log = Log {
+            kind: LogKind::Other("silent".to_owned()),
+            payload: "two\nlines".to_owned(),
+        };
+        app.logs_view
+            .receive(LogEntry::new(log, civil::time(9, 5, 7, 0)));
+        key_press(&mut app, KeyCode::Char('G'));
+        key_press(&mut app, KeyCode::Enter);
+        feed_logs(&mut app.logs_view, 3, 2);
+        key_press(&mut app, KeyCode::Char('y'));
+        assert_eq!(
+            app.take_clipboard().as_deref(),
+            Some("09:05:07 SILENT two\nlines")
+        );
+        assert_eq!(app.overlay, Some(Overlay::Log));
+
+        // Nothing shown, nothing copied.
+        key_press(&mut app, KeyCode::Esc);
+        key_press(&mut app, KeyCode::Char('c'));
+        key_press(&mut app, KeyCode::Char('y'));
+        assert_eq!(app.take_clipboard(), None);
     }
 
     #[test]

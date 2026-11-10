@@ -114,6 +114,7 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
 /// The logs page's keys.
 const LOGS_KEYS: &[(&str, &str)] = &[
     ("Enter", "查看整条日志"),
+    ("y", "复制当前日志（OSC 52）"),
     ("l", "切换级别（循环）"),
     ("p", "暂停 / 恢复"),
     ("c", "清空日志"),
