@@ -22,7 +22,7 @@ tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 XDG_CONFIG_HOME="$$tmp/config" XDG_STATE_HOME="$$tmp/state" XDG_DATA_HOME="$$tmp/data" $(1)
 endef
 
-.PHONY: help build release run fmt fmt-check lint test check audit install uninstall dist cut-release clean
+.PHONY: help build release run fmt fmt-check lint test check audit install uninstall dist cut-release aur clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -65,6 +65,9 @@ dist: ## Release archives in dist/, with and without mihomo; TARGET=<triple> to 
 
 cut-release: ## Gate, bump, CHANGELOG, commit and tag VERSION=x.y.z (no push; the tag push publishes)
 	scripts/release.sh $(VERSION)
+
+aur: ## Point packaging/arch/PKGBUILD at the pushed tag of Cargo.toml's version, write .SRCINFO
+	scripts/aur.sh
 
 clean: ## Remove build artifacts
 	$(CARGO) clean

@@ -1,0 +1,59 @@
+# Maintainer: xfy
+#
+# The AUR package of tabby, built from the source archive of release tag
+# $_tag. `make aur` (scripts/aur.sh) sets _tag, pkgver, pkgrel and the sum to
+# the version in Cargo.toml once its tag is on GitHub, and writes .SRCINFO.
+# The package is not called tabby: that name, and /usr/bin/tabby, belong to
+# the Tabby terminal emulator on the AUR.
+pkgname=tabby-mihomo
+_name=tabby
+_tag=v0.2.1
+pkgver=0.2.1
+pkgrel=1
+pkgdesc='Terminal UI for the mihomo (Clash.Meta) kernel'
+arch=('x86_64' 'aarch64')
+url='https://github.com/VOD-Studio/tabby'
+license=('MIT')
+depends=('gcc-libs' 'glibc')
+makedepends=('cargo')
+# No kernel is shipped: tabby runs a mihomo on $PATH, or downloads one.
+optdepends=('mihomo: the kernel, kept up to date by pacman instead of tabby'
+            'libcap: getcap and setcap, to authorize the kernel for TUN mode'
+            'polkit: pkexec, to authorize TUN mode without a terminal')
+conflicts=('tabby' 'tabby-bin')
+# makepkg's lto puts -flto in CFLAGS: aws-lc-sys then compiles to GCC LTO
+# objects, which rust-lld cannot link (undefined aws_lc_* symbols).
+options=('!lto')
+source=("$_name-${_tag#v}.tar.gz::$url/archive/refs/tags/$_tag.tar.gz")
+sha256sums=('990bfdc1487835c8cfea22413654deb3f2cab39fcf0470d6574446f8de2d163a')
+
+prepare() {
+  cd "$_name-${_tag#v}"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc --print host-tuple)"
+}
+
+build() {
+  cd "$_name-${_tag#v}"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$_name-${_tag#v}"
+  export RUSTUP_TOOLCHAIN=stable
+  # The tests must not see the builder's own tabby config or data.
+  local tmp
+  tmp=$(mktemp -d)
+  XDG_CONFIG_HOME="$tmp/config" XDG_DATA_HOME="$tmp/data" XDG_STATE_HOME="$tmp/state" \
+    cargo test --frozen
+  rm -rf "$tmp"
+}
+
+package() {
+  cd "$_name-${_tag#v}"
+  install -Dm755 "target/release/$_name" -t "$pkgdir/usr/bin/"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}

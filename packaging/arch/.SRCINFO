@@ -1,0 +1,21 @@
+pkgbase = tabby-mihomo
+	pkgdesc = Terminal UI for the mihomo (Clash.Meta) kernel
+	pkgver = 0.2.1
+	pkgrel = 1
+	url = https://github.com/VOD-Studio/tabby
+	arch = x86_64
+	arch = aarch64
+	license = MIT
+	makedepends = cargo
+	depends = gcc-libs
+	depends = glibc
+	optdepends = mihomo: the kernel, kept up to date by pacman instead of tabby
+	optdepends = libcap: getcap and setcap, to authorize the kernel for TUN mode
+	optdepends = polkit: pkexec, to authorize TUN mode without a terminal
+	conflicts = tabby
+	conflicts = tabby-bin
+	options = !lto
+	source = tabby-0.2.1.tar.gz::https://github.com/VOD-Studio/tabby/archive/refs/tags/v0.2.1.tar.gz
+	sha256sums = 990bfdc1487835c8cfea22413654deb3f2cab39fcf0470d6574446f8de2d163a
+
+pkgname = tabby-mihomo
