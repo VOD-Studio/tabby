@@ -36,6 +36,8 @@ pub enum Target {
     Connection(String),
     /// A row of the rules table, by its number.
     Rule(usize),
+    /// A row of the log, by its line's `LogEntry::seq`.
+    Log(u64),
     Provider(ProviderRef),
     Setting(Setting),
     /// A row of the subscriptions page, by subscription id.
@@ -69,6 +71,7 @@ impl Target {
                 | Self::Node(_)
                 | Self::Connection(_)
                 | Self::Rule(_)
+                | Self::Log(_)
                 | Self::Provider(_)
                 | Self::Setting(_)
                 | Self::Subscription(_)

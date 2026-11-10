@@ -913,6 +913,9 @@ pub struct LogEntry {
     pub message: String,
     /// `message` lowercased once, for the filter.
     lowercase: String,
+    /// Numbers the line in the order it was shown, for the mouse: an index
+    /// shifts as old lines go.
+    pub seq: u64,
     /// The rows `message` last took and the width that was at: the
     /// scrollbar adds up every shown line on each frame. `(0, 0)` until
     /// first laid out.
@@ -936,6 +939,7 @@ impl LogEntry {
             kind: log.kind,
             lowercase: message.to_lowercase(),
             message,
+            seq: 0,
             rows: Cell::new((0, 0)),
         }
     }
@@ -975,11 +979,11 @@ pub enum LogLink {
     Live,
 }
 
-/// Buffer, level, pause, filter and scroll state of the logs page.
+/// Buffer, level, pause, filter, cursor and scroll state of the logs page.
 ///
-/// Scrolling counts screen rows, so a long message wrapped over several
-/// rows is read one row at a time. Positions are laid out on demand from
-/// the spot they start at, never for the whole buffer.
+/// The cursor is on an entry; the view counts screen rows, so it can start
+/// partway into a long message. Positions are laid out on demand from the
+/// spot they start at, never for the whole buffer.
 #[derive(Debug, Default)]
 pub struct LogsView {
     /// What is shown, oldest first; at most [`LOG_CAPACITY`].
@@ -999,9 +1003,14 @@ pub struct LogsView {
     pub filter: Input,
     /// The filter box has the keyboard.
     pub typing: bool,
-    /// The top row of the view while it stays where the user scrolled to;
-    /// `None` while it follows the newest line.
+    /// The entry the cursor is on (an index into `entries`) while it stays
+    /// put; `None` while it follows the newest shown line.
+    pub cursor: Option<usize>,
+    /// The top row of the view while the cursor stays put; `None` while it
+    /// follows.
     pub top: Option<LogSpot>,
+    /// [`LogEntry::seq`] of the next line shown.
+    next_seq: u64,
 }
 
 impl LogsView {
@@ -1018,9 +1027,12 @@ impl LogsView {
         }
     }
 
-    /// Adds a line to what is shown, dropping the oldest when full. A view
-    /// that stays put moves its spot along, so it keeps the same lines.
-    fn append(&mut self, entry: LogEntry) {
+    /// Adds a line to what is shown, dropping the oldest when full. A cursor
+    /// and a view that stay put move their spots along, so they keep the
+    /// same lines.
+    fn append(&mut self, mut entry: LogEntry) {
+        entry.seq = self.next_seq;
+        self.next_seq += 1;
         if self.entries.len() == LOG_CAPACITY {
             self.entries.pop_front();
             if let Some(top) = &mut self.top {
@@ -1029,6 +1041,9 @@ impl LogsView {
                     // Its line is gone: the oldest one left takes its place.
                     None => LogSpot { entry: 0, row: 0 },
                 };
+            }
+            if let Some(cursor) = &mut self.cursor {
+                *cursor = cursor.saturating_sub(1);
             }
         }
         self.entries.push_back(entry);
@@ -1050,6 +1065,7 @@ impl LogsView {
         self.entries.clear();
         self.pending.clear();
         self.missed = 0;
+        self.cursor = None;
         self.top = None;
     }
 
@@ -1170,88 +1186,149 @@ impl LogsView {
         spot
     }
 
-    /// The spot `rows` rows below `spot`, or the very last row.
-    fn down(&self, mut spot: LogSpot, mut rows: usize, needle: &str, width: usize) -> LogSpot {
-        while rows > 0 {
-            let last = self
-                .entries
-                .get(spot.entry)
-                .map_or(0, |entry| entry.rows(width) - 1);
-            if spot.row < last {
-                let step = rows.min(last - spot.row);
-                spot.row += step;
-                rows -= step;
-                continue;
-            }
-            let Some((entry, _)) = self.shown_from(spot.entry + 1, needle).next() else {
-                break;
-            };
-            spot = LogSpot { entry, row: 0 };
-            rows -= 1;
+    /// The shown entry the cursor is on: its own, or when the filter hides
+    /// it the next shown one, or else the newest. `None` when nothing is
+    /// shown.
+    fn selected_in(&self, needle: &str) -> Option<usize> {
+        self.cursor
+            .and_then(|cursor| self.shown_from(cursor, needle).next())
+            .or_else(|| self.shown_before(self.entries.len(), needle).next())
+            .map(|(index, _)| index)
+    }
+
+    /// The index of the entry the cursor is on, as [`Self::selected_in`].
+    pub fn selected(&self) -> Option<usize> {
+        self.selected_in(&self.needle())
+    }
+
+    /// Where the top of a view of `fit` is while the cursor stays put: where
+    /// it was left, kept from running past the end, and moved just enough to
+    /// show the cursor's entry: its start when that is above, its end (or
+    /// its start, when it is taller than the view) when below. `None` draws
+    /// from the bottom: while following, or with nothing shown.
+    fn view_top(&self, needle: &str, fit: Fit) -> Option<LogSpot> {
+        self.cursor?;
+        let cursor = self.selected_in(needle)?;
+        let (width, height) = (fit.width, fit.height.max(1));
+        let mut top = self
+            .top
+            .and_then(|top| self.shown_spot(top, needle, width))
+            .unwrap_or(LogSpot {
+                entry: cursor,
+                row: 0,
+            });
+        if self.rows_from(top, needle, width, height) < height {
+            top = self.bottom_top(needle, fit).unwrap_or(top);
         }
-        spot
+        if cursor < top.entry || (cursor == top.entry && top.row > 0) {
+            return Some(LogSpot {
+                entry: cursor,
+                row: 0,
+            });
+        }
+        // Rows from the top of the view to the end of the cursor's entry.
+        let mut through = 0;
+        for (index, entry) in self.shown_from(top.entry, needle) {
+            through += entry.rows(width);
+            if index == top.entry {
+                through -= top.row;
+            }
+            if index == cursor || through > height {
+                break;
+            }
+        }
+        if through > height {
+            let rows = self.entries[cursor].rows(width);
+            top = if rows >= height {
+                LogSpot {
+                    entry: cursor,
+                    row: 0,
+                }
+            } else {
+                let end = LogSpot {
+                    entry: cursor,
+                    row: rows - 1,
+                };
+                self.up(end, height - 1, needle, width)
+            };
+        }
+        Some(top)
     }
 
-    /// Where the top of a view that stays put is, when it does and still
-    /// has more below than fits; `None` means drawing from the bottom.
-    fn resting_top(&self, needle: &str, fit: Fit) -> Option<LogSpot> {
-        let top = self.shown_spot(self.top?, needle, fit.width)?;
-        (self.rows_from(top, needle, fit.width, fit.height + 1) > fit.height).then_some(top)
+    /// Puts the cursor on entry `index` (a shown one), the view moving only
+    /// as far as it must; on the newest shown entry it follows again.
+    fn put_cursor(&mut self, index: usize, needle: &str, fit: Fit) {
+        let newest = self.shown_before(self.entries.len(), needle).next();
+        if newest.is_none_or(|(newest, _)| index >= newest) {
+            self.cursor = None;
+            self.top = None;
+            return;
+        }
+        let view = self
+            .view_top(needle, fit)
+            .or_else(|| self.bottom_top(needle, fit));
+        self.cursor = Some(index);
+        self.top = view;
+        self.top = self.view_top(needle, fit);
     }
 
-    /// Follows the newest line again once the view reached the bottom: by
-    /// scrolling there, or because the filter or the size left too little
-    /// below it.
-    fn settle(&mut self, fit: Fit) {
-        let needle = self.needle();
-        self.top = self.resting_top(&needle, fit);
-    }
-
-    /// Scrolls by screen rows. Leaving the bottom stops following; reaching
-    /// it, or `G`, follows again.
+    /// Moves the cursor over the shown entries. Leaving the newest stops
+    /// following, the view staying where it was; reaching it again, or `G`,
+    /// follows again. Along the scrollbar it goes to the entry at that
+    /// share of the rows.
     fn scroll(&mut self, movement: Move, fit: Fit) {
         let needle = self.needle();
-        let Some((first, _)) = self.shown_from(0, &needle).next() else {
+        let shown: Vec<usize> = self
+            .shown_from(0, &needle)
+            .map(|(index, _)| index)
+            .collect();
+        let Some(&newest) = shown.last() else {
             return;
         };
-        let first = LogSpot {
-            entry: first,
-            row: 0,
-        };
-        let current = self
-            .resting_top(&needle, fit)
-            .or_else(|| self.bottom_top(&needle, fit))
-            .unwrap_or(first);
-        let half = (fit.height / 2).max(1);
-        let top = match movement {
-            Move::Up => self.up(current, 1, &needle, fit.width),
-            Move::Down => self.down(current, 1, &needle, fit.width),
-            Move::HalfUp => self.up(current, half, &needle, fit.width),
-            Move::HalfDown => self.down(current, half, &needle, fit.width),
+        let current = self.selected_in(&needle).unwrap_or(newest);
+        let at = shown.partition_point(|&index| index < current);
+        let next = match movement {
             Move::To(n, steps) => {
-                let (_, rows) = self.extent(fit);
-                let row = Move::share(n, steps, rows.saturating_sub(fit.height));
-                self.down(first, row, &needle, fit.width)
+                let rows = |index: &usize| self.entries[*index].rows(fit.width);
+                let total: usize = shown.iter().map(rows).sum();
+                let row = Move::share(n, steps, total.saturating_sub(1));
+                let mut end = 0;
+                shown
+                    .iter()
+                    .position(|index| {
+                        end += rows(index);
+                        end > row
+                    })
+                    .unwrap_or(shown.len() - 1)
             }
-            Move::Top => first,
-            Move::Bottom => {
-                self.top = None;
-                return;
-            }
-            Move::Left | Move::Right => return,
+            other => other.apply(at, shown.len(), (fit.height / 2).max(1)),
         };
-        self.top = Some(top);
-        self.settle(fit);
+        self.put_cursor(shown[next], &needle, fit);
+    }
+
+    /// A click on the line numbered `seq`: the cursor goes there. `false`
+    /// when that line is gone or hidden.
+    fn select(&mut self, seq: u64, fit: Fit) -> bool {
+        let index = self.entries.partition_point(|entry| entry.seq < seq);
+        let needle = self.needle();
+        let shown = self
+            .entries
+            .get(index)
+            .is_some_and(|entry| entry.seq == seq && entry.lowercase.contains(&needle));
+        if shown {
+            self.put_cursor(index, &needle, fit);
+        }
+        shown
     }
 
     /// What a view of `fit` shows, top to bottom: for each screen row the
-    /// entry, which row of its message it is, and that row's text. Only the
-    /// entries in view are laid out; one that follows lays out from the
-    /// bottom up.
-    pub fn page(&self, fit: Fit) -> Vec<(&LogEntry, usize, String)> {
+    /// entry's index, the entry, which row of its message it is, and that
+    /// row's text. Only the entries in view are laid out; one that follows
+    /// lays out from the bottom up.
+    pub fn page(&self, fit: Fit) -> Vec<(usize, &LogEntry, usize, String)> {
         let needle = self.needle();
         let mut page = Vec::with_capacity(fit.height);
-        if let Some(top) = self.resting_top(&needle, fit) {
+        if let Some(top) = self.view_top(&needle, fit) {
             for (index, entry) in self.shown_from(top.entry, &needle) {
                 let skip = if index == top.entry { top.row } else { 0 };
                 let rows = logs::wrap_message(&entry.message, fit.width);
@@ -1259,17 +1336,17 @@ impl LogsView {
                     if page.len() == fit.height {
                         return page;
                     }
-                    page.push((entry, row, text));
+                    page.push((index, entry, row, text));
                 }
             }
             return page;
         }
         let mut above = vec![];
         let mut rows = 0;
-        for (_, entry) in self.shown_before(self.entries.len(), &needle) {
+        for (index, entry) in self.shown_before(self.entries.len(), &needle) {
             let wrapped = logs::wrap_message(&entry.message, fit.width);
             rows += wrapped.len();
-            above.push((entry, wrapped));
+            above.push((index, entry, wrapped));
             if rows >= fit.height {
                 break;
             }
@@ -1279,11 +1356,11 @@ impl LogsView {
             above
                 .into_iter()
                 .rev()
-                .flat_map(|(entry, wrapped)| {
+                .flat_map(|(index, entry, wrapped)| {
                     wrapped
                         .into_iter()
                         .enumerate()
-                        .map(move |(row, text)| (entry, row, text))
+                        .map(move |(row, text)| (index, entry, row, text))
                 })
                 .skip(skip),
         );
@@ -1295,7 +1372,7 @@ impl LogsView {
     /// follows sits at the bottom.
     pub fn extent(&self, fit: Fit) -> (usize, usize) {
         let needle = self.needle();
-        let top = self.resting_top(&needle, fit);
+        let top = self.view_top(&needle, fit);
         let (mut above, mut rows) = (0, 0);
         for (index, entry) in self.shown_from(0, &needle) {
             if let Some(top) = top
@@ -3006,13 +3083,11 @@ impl App {
         self.dirty = true;
     }
 
-    /// Applies a new terminal size: what is laid out by it settles, and the
-    /// group picker's drop-down closes once the page is wide enough for the
-    /// group list. The page's focus and selection stay as they were.
+    /// Applies a new terminal size: the group picker's drop-down closes
+    /// once the page is wide enough for the group list. The page's focus and
+    /// selection stay as they were.
     fn resize(&mut self, size: Size) {
         self.size = size;
-        let fit = self.logs_fit();
-        self.logs_view.settle(fit);
         if self.overlay == Some(Overlay::Groups) && !self.proxies_fit().stacked {
             self.close_overlay();
         }
@@ -3296,6 +3371,10 @@ impl App {
                 view.cursor = index;
                 true
             }
+            Target::Log(seq) => {
+                let fit = self.logs_fit();
+                self.logs_view.select(*seq, fit)
+            }
             Target::Provider(provider) => {
                 let view = &mut self.providers_view;
                 let Some(index) = view.rows().iter().position(|row| row.target() == *provider)
@@ -3428,8 +3507,6 @@ impl App {
             }),
             Page::Logs => {
                 self.logs_view.filter.handle_event(&event);
-                let fit = self.logs_fit();
-                self.logs_view.settle(fit);
             }
             Page::Settings => self.settings_view.type_key(key),
             Page::Subscriptions => {
@@ -3501,8 +3578,6 @@ impl App {
             Page::Logs => {
                 self.logs_view.filter.reset();
                 self.logs_view.typing = false;
-                let fit = self.logs_fit();
-                self.logs_view.settle(fit);
             }
             Page::Settings => self.settings_view.editing = None,
             Page::Subscriptions => {
@@ -7034,7 +7109,7 @@ mod tests {
     fn screen(view: &LogsView) -> Vec<String> {
         view.page(FIT)
             .into_iter()
-            .map(|(_, _, text)| text)
+            .map(|(_, _, _, text)| text)
             .collect()
     }
 
@@ -7057,85 +7132,114 @@ mod tests {
         assert_eq!(screen(&view), ["2006", "2007", "2008", "2009"]);
     }
 
+    /// The message of the entry under the cursor.
+    fn selected(view: &LogsView) -> &str {
+        &view.entries[view.selected().unwrap()].message
+    }
+
+    /// The screen rows of `view` laid out for `fit`, as text.
+    fn screen_at(view: &LogsView, fit: Fit) -> Vec<String> {
+        view.page(fit)
+            .into_iter()
+            .map(|(_, _, _, text)| text)
+            .collect()
+    }
+
     #[test]
-    fn a_view_scrolled_up_keeps_its_lines_while_old_ones_are_dropped() {
+    fn a_cursor_moved_up_keeps_its_line_and_view_while_old_ones_are_dropped() {
         let mut view = LogsView::default();
         feed_logs(&mut view, 0, LOG_CAPACITY);
+        assert_eq!(selected(&view), "1999");
+        // The view only moves once the cursor would leave it.
         view.scroll(Move::Up, FIT);
+        assert_eq!(selected(&view), "1998");
+        assert_eq!(screen(&view), ["1996", "1997", "1998", "1999"]);
+        for _ in 0..3 {
+            view.scroll(Move::Up, FIT);
+        }
         assert_eq!(screen(&view), ["1995", "1996", "1997", "1998"]);
-        // Full: each new line pushes out the oldest, and the view moves
-        // its spot along instead of drifting down the log.
+        // Full: each new line pushes out the oldest, and the cursor and the
+        // view move their spots along instead of drifting down the log.
         feed_logs(&mut view, LOG_CAPACITY, 10);
+        assert_eq!(selected(&view), "1995");
         assert_eq!(screen(&view), ["1995", "1996", "1997", "1998"]);
-        assert_eq!(view.top.unwrap().entry, 1985);
+        assert_eq!(view.cursor, Some(1985));
 
         // At the very top its line goes, and the oldest left takes over.
         view.scroll(Move::Top, FIT);
         assert_eq!(screen(&view), ["10", "11", "12", "13"]);
         feed_logs(&mut view, 2010, 1);
+        assert_eq!(selected(&view), "11");
         assert_eq!(screen(&view), ["11", "12", "13", "14"]);
     }
 
     #[test]
-    fn reaching_the_bottom_or_g_follows_again() {
+    fn reaching_the_newest_line_or_g_follows_again() {
         let mut view = LogsView::default();
         feed_logs(&mut view, 0, 10);
         view.scroll(Move::Up, FIT);
         view.scroll(Move::Up, FIT);
-        assert_eq!(screen(&view), ["4", "5", "6", "7"]);
-        view.scroll(Move::Down, FIT);
-        assert!(view.top.is_some());
-        view.scroll(Move::Down, FIT);
-        assert_eq!(view.top, None);
+        assert_eq!(selected(&view), "7");
+        // Away from the newest line, new ones do not move the view.
         feed_logs(&mut view, 10, 1);
-        assert_eq!(screen(&view), ["7", "8", "9", "10"]);
+        assert_eq!(screen(&view), ["6", "7", "8", "9"]);
+        for _ in 0..3 {
+            view.scroll(Move::Down, FIT);
+        }
+        assert_eq!((view.cursor, view.top), (None, None));
+        feed_logs(&mut view, 11, 1);
+        assert_eq!(selected(&view), "11");
+        assert_eq!(screen(&view), ["8", "9", "10", "11"]);
 
         view.scroll(Move::HalfUp, FIT);
-        feed_logs(&mut view, 11, 1);
-        assert_eq!(screen(&view), ["5", "6", "7", "8"]);
-        view.scroll(Move::Bottom, FIT);
-        assert_eq!(view.top, None);
+        assert_eq!(selected(&view), "9");
+        feed_logs(&mut view, 12, 1);
         assert_eq!(screen(&view), ["8", "9", "10", "11"]);
+        view.scroll(Move::Bottom, FIT);
+        assert_eq!(view.cursor, None);
+        assert_eq!(screen(&view), ["9", "10", "11", "12"]);
     }
 
     #[test]
-    fn a_log_that_fits_on_screen_does_not_scroll() {
+    fn a_log_that_fits_on_screen_still_has_a_cursor() {
         let mut view = LogsView::default();
         feed_logs(&mut view, 0, 3);
         view.scroll(Move::Up, FIT);
         view.scroll(Move::Top, FIT);
-        assert_eq!(view.top, None);
+        assert_eq!(selected(&view), "0");
         assert_eq!(screen(&view), ["0", "1", "2"]);
+        view.scroll(Move::Bottom, FIT);
+        assert_eq!((view.cursor, selected(&view)), (None, "2"));
     }
 
     #[test]
-    fn scrolling_goes_one_screen_row_at_a_time() {
+    fn the_cursor_goes_by_entry_and_the_view_shows_all_of_its_entry() {
         let mut view = LogsView::default();
         feed_logs(&mut view, 0, 2);
         // 45 columns: three rows at 20.
         view.receive(log_entry(LogLevel::Warning, &"x".repeat(45)));
-        let rows: Vec<(usize, String)> = view
-            .page(FIT)
-            .into_iter()
-            .map(|(_, row, text)| (row, text))
-            .collect();
+        feed_logs(&mut view, 2, 2);
         let long = |n| "x".repeat(n);
-        assert_eq!(
-            rows,
-            [
-                (0, "1".to_owned()),
-                (0, long(20)),
-                (1, long(20)),
-                (2, long(5))
-            ]
-        );
+        let x = long(20);
+        assert_eq!(screen(&view), [x.as_str(), &long(5), "2", "3"]);
         view.scroll(Move::Up, FIT);
-        assert_eq!(screen(&view), ["0", "1", &long(20), &long(20)]);
-        // A narrower terminal keeps the spot, its row within the message.
-        let narrow = Fit { width: 10, ..FIT };
+        assert_eq!(screen(&view), [x.as_str(), &long(5), "2", "3"]);
+        // Onto the long line: from its first row.
+        view.scroll(Move::Up, FIT);
+        assert_eq!(screen(&view), [x.as_str(), &x, &long(5), "2"]);
+        view.scroll(Move::Up, FIT);
+        assert_eq!(screen(&view), ["1", &x, &x, &long(5)]);
+        view.scroll(Move::Down, FIT);
+        assert_eq!(screen(&view), ["1", &x, &x, &long(5)]);
+        // Below the view, an entry comes in from the bottom.
+        view.scroll(Move::Down, FIT);
+        assert_eq!(selected(&view), "2");
+        assert_eq!(screen(&view), [x.as_str(), &x, &long(5), "2"]);
+
+        // Taller than the view, it shows from its start.
+        let narrow = Fit { width: 5, ..FIT };
         view.scroll(Move::Up, narrow);
-        view.scroll(Move::Down, narrow);
-        view.scroll(Move::Down, narrow);
+        assert_eq!(screen_at(&view, narrow), vec![long(5); 4]);
         assert_eq!(view.top, Some(LogSpot { entry: 2, row: 0 }));
     }
 
@@ -7151,22 +7255,23 @@ mod tests {
         assert_eq!(view.extent(FIT), (0, 12));
         view.scroll(Move::Down, FIT);
         view.scroll(Move::HalfDown, FIT);
-        assert_eq!(view.top, Some(LogSpot { entry: 3, row: 0 }));
-        assert_eq!(view.extent(FIT), (3, 12));
-        // Into the long line: its rows count one by one.
-        view.scroll(Move::HalfDown, FIT);
-        assert_eq!(view.top, Some(LogSpot { entry: 5, row: 0 }));
+        assert_eq!(view.extent(FIT), (0, 12));
         view.scroll(Move::Down, FIT);
-        assert_eq!(view.extent(FIT), (6, 12));
-        // A narrower column wraps again, keeping the spot.
+        assert_eq!(view.extent(FIT), (1, 12));
+        // Onto the long line: all three of its rows come into view.
+        view.scroll(Move::Down, FIT);
+        assert_eq!(view.extent(FIT), (4, 12));
+        // Wrapped again in a narrower column it no longer fits: its start.
         let narrow = Fit { width: 10, ..FIT };
-        assert_eq!(view.extent(narrow), (6, 14));
+        assert_eq!(view.extent(narrow), (5, 14));
 
-        // The filter leaves out what it hides.
+        // The filter leaves out what it hides; a hidden cursor takes the
+        // next line shown.
         view.filter = Input::new("x".to_owned());
         assert_eq!(view.extent(FIT), (0, 3));
         view.filter = Input::new("7".to_owned());
         assert_eq!(view.extent(FIT), (0, 1));
+        assert_eq!(selected(&view), "7");
     }
 
     #[test]
@@ -8696,15 +8801,16 @@ secret = "b-secret"
     }
 
     #[test]
-    fn dragging_the_log_scrollbar_scrolls_by_its_share_and_the_bottom_follows() {
+    fn dragging_the_log_scrollbar_moves_the_cursor_by_its_share_and_the_bottom_follows() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Logs;
         app.logs_view.link = LogLink::Live;
         feed_logs(&mut app.logs_view, 0, 500);
         let track = track_in(&app, 80, 24);
         let (x, last) = (track.x, track.bottom() - 1);
-        let above = |app: &App| app.logs_view.extent(app.logs_fit()).0;
-        let scrollable = app.logs_view.extent(app.logs_fit()).1 - app.logs_fit().height;
+        let drag = |app: &mut App, row: u16| {
+            mouse(app, MouseEventKind::Drag(MouseButton::Left), 3, row);
+        };
 
         mouse(
             &mut app,
@@ -8712,35 +8818,68 @@ secret = "b-secret"
             x,
             track.y,
         );
-        assert_eq!(above(&app), 0);
-        assert!(app.logs_view.top.is_some());
+        assert_eq!(app.logs_view.selected(), Some(0));
+        assert_eq!(app.logs_view.extent(app.logs_fit()).0, 0);
+        // Off the track sideways still drags; one line a row here.
         let middle = track.y + track.height / 2;
-        mouse(&mut app, MouseEventKind::Drag(MouseButton::Left), 3, middle);
+        drag(&mut app, middle);
         let steps = track.height - 1;
         assert_eq!(
-            above(&app),
-            Move::share(middle - track.y, steps, scrollable)
+            app.logs_view.selected(),
+            Some(Move::share(middle - track.y, steps, 499))
         );
         // Past the end of the track is its end: following again.
-        mouse(
-            &mut app,
-            MouseEventKind::Drag(MouseButton::Left),
-            x,
-            last + 5,
-        );
-        assert_eq!(app.logs_view.top, None);
+        drag(&mut app, last + 5);
+        assert_eq!(app.logs_view.cursor, None);
 
-        // Once let go, moving does nothing; the wheel over it scrolls.
+        // Once let go, moving does nothing; the wheel over it moves the
+        // cursor.
         mouse(&mut app, MouseEventKind::Up(MouseButton::Left), x, last);
-        mouse(
-            &mut app,
-            MouseEventKind::Drag(MouseButton::Left),
-            x,
-            track.y,
-        );
-        assert_eq!(app.logs_view.top, None);
+        drag(&mut app, track.y);
+        assert_eq!(app.logs_view.cursor, None);
         mouse(&mut app, MouseEventKind::ScrollUp, x, middle);
-        assert_eq!(above(&app), scrollable - 1);
+        assert_eq!(app.logs_view.selected(), Some(498));
+    }
+
+    #[test]
+    fn a_click_on_a_log_line_puts_the_cursor_on_it_and_highlights_its_rows() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        app.logs_view.link = LogLink::Live;
+        feed_logs(&mut app.logs_view, 0, 3);
+        app.logs_view
+            .receive(log_entry(LogLevel::Info, &"y".repeat(150)));
+        feed_logs(&mut app.logs_view, 3, 2);
+        // The rows painted as the cursor, by their first characters.
+        let highlighted = |app: &App| -> Vec<String> {
+            let mut terminal =
+                ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+            let buffer = terminal.backend().buffer();
+            let surface = ratatui::style::Style::default().patch(app.theme.surface);
+            (0..24)
+                .filter(|&y| {
+                    let cell = &buffer[(16, y)];
+                    cell.bg == surface.bg.unwrap_or(cell.bg)
+                        && cell.modifier.contains(surface.add_modifier)
+                        && cell.symbol() != " "
+                })
+                .map(|y| buffer[(16, y)].symbol().to_owned())
+                .collect()
+        };
+        // Following: the newest line.
+        assert_eq!(highlighted(&app), ["4"]);
+        // Every row of a wrapped line, clicked on any of them.
+        let row = u16::try_from(row_of(&app, "yyy")).unwrap();
+        click(&mut app, 30, row + 1);
+        assert_eq!(app.logs_view.selected(), Some(3));
+        assert_eq!(highlighted(&app), ["y", "y", "y"]);
+        let row = u16::try_from(row_of(&app, "INFO  1")).unwrap();
+        click(&mut app, 30, row);
+        assert_eq!(app.logs_view.selected(), Some(1));
+        // Lines that came in since keep the cursor where it is.
+        feed_logs(&mut app.logs_view, 5, 3);
+        assert_eq!(app.logs_view.selected(), Some(1));
     }
 
     #[test]

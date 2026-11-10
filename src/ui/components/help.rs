@@ -86,7 +86,7 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
             ("c", "清空日志"),
             ("/", "过滤日志"),
             ("Esc", "清除过滤"),
-            ("j / k / ↓ / ↑", "按行滚动"),
+            ("j / k / ↓ / ↑", "上下移动（按条）"),
             ("gg", "最早"),
             ("G", "最新并跟随"),
             ("Ctrl+d / Ctrl+u", "翻半页"),

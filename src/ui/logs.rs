@@ -3,7 +3,7 @@ use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, BorderType, Paragraph},
+    widgets::{Block, BorderType},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -201,12 +201,20 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
 
     // Only the rows in view are laid out: the buffer holds up to 2000.
     let fit = fit(area);
-    let lines: Vec<Line> = view
-        .page(fit)
-        .into_iter()
-        .map(|(entry, row, text)| line(entry, row, text, &theme))
-        .collect();
-    frame.render_widget(Paragraph::new(lines), inner);
+    let selected = view.selected();
+    for (offset, (index, entry, row, text)) in view.page(fit).into_iter().enumerate() {
+        let rect = Rect {
+            y: inner.y + u16::try_from(offset).unwrap_or(u16::MAX),
+            height: 1,
+            ..inner
+        };
+        app.hits.add(rect, Target::Log(entry.seq));
+        frame.render_widget(line(entry, row, text, &theme), rect);
+        // Every row of the entry under the cursor.
+        if Some(index) == selected {
+            theme.paint_cursor(frame.buffer_mut(), rect);
+        }
+    }
     let (above, rows) = view.extent(fit);
     scrollbar::render(
         frame,

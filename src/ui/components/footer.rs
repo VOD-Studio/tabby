@@ -200,7 +200,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
                 hint("/", "过滤"),
             ];
             // Only while it stays put: following, it is already there.
-            if view.top.is_some() {
+            if view.cursor.is_some() {
                 hints.push(hint("G", "最新"));
             }
             hints
