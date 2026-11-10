@@ -8318,6 +8318,38 @@ secret = "b-secret"
     }
 
     #[test]
+    fn the_node_grid_scrollbar_goes_by_card_rows() {
+        let (mut app, _) = app_with_proxies();
+        app.page = Page::Proxies;
+        app.update(Action::Resize(Size::new(60, 20)));
+        // The thumb is on the grid's right border, the last column.
+        let thumb = |app: &App| -> Vec<usize> {
+            screen_text(app, 60, 20)
+                .lines()
+                .enumerate()
+                .filter(|(_, line)| line.ends_with('█'))
+                .map(|(row, _)| row)
+                .collect()
+        };
+        let corner = |app: &App, row: usize| {
+            screen_text(app, 60, 20)
+                .lines()
+                .nth(row)
+                .and_then(|line| line.chars().last())
+        };
+        // Eight nodes two a row: three of the four card rows fit, so the
+        // thumb is 3/4 of the 12-row track.
+        let top = thumb(&app);
+        assert_eq!(top.len(), 9);
+        assert_eq!(corner(&app, top[0] - 1), Some('╮'));
+        app.proxies_view.focus = Pane::Nodes;
+        app.update(Action::Cursor(Move::Bottom));
+        let bottom = thumb(&app);
+        assert_eq!(bottom.len(), 9);
+        assert_eq!(corner(&app, bottom[8] + 1), Some('╯'));
+    }
+
+    #[test]
     fn the_rules_scrollbar_runs_beside_the_rows_not_the_header() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Rules;

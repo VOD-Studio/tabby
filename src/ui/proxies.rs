@@ -13,7 +13,7 @@ use crate::{
     format::truncate,
     ui::{
         NARROW_WIDTH,
-        components::{popup, states, title},
+        components::{popup, scrollbar, states, title},
         hit::Target,
         text::truncate_spans,
     },
@@ -212,6 +212,12 @@ pub fn render_picker(frame: &mut Frame, body: Rect, app: &App) {
     let window = view
         .picker_scroll
         .window(cursor, len, usize::from(inner.height));
+    // The popup pads its inside by a column: the border is one further.
+    let track = Rect {
+        width: inner.width + 1,
+        ..inner
+    };
+    scrollbar::list(frame, track, &window, len, theme.accent);
     for (row, index) in window.enumerate() {
         let area = Rect {
             y: inner.y + u16::try_from(row).unwrap_or(0),
@@ -302,15 +308,19 @@ fn panel(
     left: Vec<Span<'static>>,
     right: Vec<Span<'static>>,
 ) -> Block<'static> {
-    let color = if focused {
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(border(app, focused)));
+    title::titled(block, width, left, right)
+}
+
+/// A pane's border, and its scrollbar: accent while it has the keyboard.
+fn border(app: &App, focused: bool) -> Color {
+    if focused {
         app.theme.accent
     } else {
         app.theme.muted
-    };
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(color));
-    title::titled(block, width, left, right)
+    }
 }
 
 fn render_groups(
@@ -341,6 +351,7 @@ fn render_groups(
         .proxies_view
         .group_scroll
         .window(selected, groups.len(), capacity);
+    scrollbar::list(frame, inner, &window, groups.len(), border(app, focused));
     for (row, index) in window.enumerate() {
         let rect = Rect {
             y: inner.y + u16::try_from(row).unwrap_or(0) * GROUP_ROWS,
@@ -497,6 +508,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
     }
     let counter = vec![Span::styled(counter, Style::new().fg(theme.muted))];
     frame.render_widget(panel(app, focused, area.width, heading, counter), area);
+    scrollbar::list(frame, inner, &rows, total_rows, border(app, focused));
 
     for (row, row_index) in rows.enumerate() {
         for column in 0..columns {
