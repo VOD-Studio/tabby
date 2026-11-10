@@ -8584,6 +8584,64 @@ secret = "b-secret"
         check(&app, "drop-down");
     }
 
+    /// The cells of the scrollbar thumbs `app` draws at `width` x
+    /// `height`, with the symbols just above and below each run of them.
+    fn thumbs(app: &App, width: u16, height: u16) -> Vec<(u16, String, String)> {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(width, height)).unwrap();
+        terminal.draw(|frame| crate::ui::draw(frame, app)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut runs = vec![];
+        for x in 0..width {
+            let rows: Vec<u16> = (0..height)
+                .filter(|y| buffer[(x, *y)].symbol() == "█")
+                .collect();
+            if let (Some(&first), Some(&last)) = (rows.first(), rows.last()) {
+                let above = buffer[(x, first - 1)].symbol().to_owned();
+                let below = buffer[(x, last + 1)].symbol().to_owned();
+                runs.push((last - first + 1, above, below));
+            }
+        }
+        runs
+    }
+
+    #[test]
+    fn popups_that_scroll_show_a_scrollbar_on_their_border() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Connections;
+        app.size = Size::new(69, 25);
+        key_press(&mut app, KeyCode::Char('?'));
+        let [(size, above, _)] = &thumbs(&app, 69, 25)[..] else {
+            panic!("one thumb");
+        };
+        assert_eq!(above, "╮");
+        key_press(&mut app, KeyCode::Char('G'));
+        assert_eq!(
+            thumbs(&app, 69, 25),
+            [(*size, "│".to_owned(), "╯".to_owned())]
+        );
+        key_press(&mut app, KeyCode::Esc);
+
+        // Twenty profiles, thirteen rows: the thumb is 13 * 13 / 20.
+        app.profiles.choices = (0..20)
+            .map(|n| crate::config::Choice {
+                origin: crate::config::Origin::Profile,
+                name: format!("p{n}"),
+                url: "http://127.0.0.1:1".to_owned(),
+                secret: None,
+            })
+            .collect();
+        app.update(Action::Resize(Size::new(50, 15)));
+        key_press(&mut app, KeyCode::Char('P'));
+        assert_eq!(app.overlay, Some(Overlay::Profiles));
+        let [(size, above, _)] = &thumbs(&app, 50, 15)[..] else {
+            panic!("one thumb");
+        };
+        assert_eq!((*size, above.as_str()), (8, "╮"));
+        key_press(&mut app, KeyCode::Char('G'));
+        assert_eq!(thumbs(&app, 50, 15), [(8, "│".to_owned(), "╯".to_owned())]);
+    }
+
     #[test]
     fn the_help_scrolls_no_further_than_its_last_row() {
         let (mut app, _rx) = app_without_controller();

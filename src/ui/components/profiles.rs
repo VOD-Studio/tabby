@@ -11,7 +11,11 @@ use crate::{
     app::App,
     config::{Choice, Origin},
     format::truncate,
-    ui::{components::popup, hit::Target, text::wrap},
+    ui::{
+        components::{popup, scrollbar},
+        hit::Target,
+        text::wrap,
+    },
 };
 
 /// Widest the popup gets, borders included.
@@ -49,6 +53,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let window = app
         .profile_scroll
         .window(app.profile_cursor, len, usize::from(inner.height));
+    scrollbar::list(
+        frame,
+        scrollbar::in_popup(inner),
+        &window,
+        len,
+        theme.accent,
+    );
     for (row, index) in window.enumerate() {
         let choice = &profiles.choices[index];
         let marker = if index == profiles.current {

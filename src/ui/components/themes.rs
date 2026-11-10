@@ -10,7 +10,10 @@ use crate::{
     app::App,
     format::truncate,
     themes::{Entry, Source},
-    ui::{components::popup, hit::Target},
+    ui::{
+        components::{popup, scrollbar},
+        hit::Target,
+    },
 };
 
 /// Widest the popup gets, borders included.
@@ -43,6 +46,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     let window = picker
         .scroll
         .window(picker.cursor, len, usize::from(inner.height));
+    scrollbar::list(
+        frame,
+        scrollbar::in_popup(inner),
+        &window,
+        len,
+        theme.accent,
+    );
     for (row, index) in window.enumerate() {
         let entry = &picker.entries[index];
         let marker = if entry.id == app.settings.theme {

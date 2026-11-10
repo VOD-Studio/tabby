@@ -212,12 +212,13 @@ pub fn render_picker(frame: &mut Frame, body: Rect, app: &App) {
     let window = view
         .picker_scroll
         .window(cursor, len, usize::from(inner.height));
-    // The popup pads its inside by a column: the border is one further.
-    let track = Rect {
-        width: inner.width + 1,
-        ..inner
-    };
-    scrollbar::list(frame, track, &window, len, theme.accent);
+    scrollbar::list(
+        frame,
+        scrollbar::in_popup(inner),
+        &window,
+        len,
+        theme.accent,
+    );
     for (row, index) in window.enumerate() {
         let area = Rect {
             y: inner.y + u16::try_from(row).unwrap_or(0),

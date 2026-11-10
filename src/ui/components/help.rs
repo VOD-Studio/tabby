@@ -8,7 +8,12 @@ use ratatui::{
 
 use crate::{
     app::{App, Page},
-    ui::{COMPACT_WIDTH, components::popup, hit::Target, page_title, proxies},
+    ui::{
+        COMPACT_WIDTH,
+        components::{popup, scrollbar},
+        hit::Target,
+        page_title, proxies,
+    },
 };
 
 /// Keys that only work on the given page; the proxies page's depend on
@@ -206,6 +211,14 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
     });
     app.hits.add(sheet.rect, Target::Popup);
     let inner = popup::panel(frame, sheet.rect, theme.accent, Some("帮助"), status);
+    scrollbar::render(
+        frame,
+        scrollbar::in_popup(inner),
+        top,
+        sheet.visible,
+        sheet.rows,
+        theme.accent,
+    );
     version(frame, sheet.rect, theme.muted);
 
     let heading =

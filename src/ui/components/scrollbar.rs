@@ -67,6 +67,15 @@ pub fn under_header(inner: Rect) -> Rect {
     }
 }
 
+/// The rows of a popup's inside `inner`, as `popup::panel` gives it: it
+/// is padded by a column, so its border is one further right.
+pub fn in_popup(inner: Rect) -> Rect {
+    Rect {
+        width: inner.width.saturating_add(1),
+        ..inner
+    }
+}
+
 /// [`render`] for a list scrolled to `window` (as `Scroll::window` gives
 /// it) of `len` items, one row each.
 pub fn list(frame: &mut Frame, rows: Rect, window: &Range<usize>, len: usize, color: Color) {
