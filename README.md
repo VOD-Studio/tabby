@@ -100,7 +100,7 @@ accent = "#7aa2f7"
 
 ### 主题
 
-`terminal`（默认，跟随终端 16 色）、`tokyo-night`、`catppuccin-mocha`、`catppuccin-latte`（浅色）、`gruvbox-dark`、`nord`、`dracula`。`C` 打开主题弹窗，移动即预览，`Enter` 写回 `theme`（保留注释）。
+`terminal`（默认，跟随终端 16 色）、`tokyo-night`、`catppuccin-mocha`、`catppuccin-latte`（浅色）、`gruvbox-dark`、`nord`、`dracula`、`clay-dark`、`clay-light`（浅色；按 [Clay 设计规范](https://github.com/DefectingCat/clay.nvim) 取色，灰阶为底，Clay 只用于焦点）。`C` 打开主题弹窗，移动即预览，`Enter` 写回 `theme`（保留注释）。
 
 自定义主题放在 `themes/<name>.toml`：
 

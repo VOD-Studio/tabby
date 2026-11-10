@@ -164,6 +164,47 @@ impl Theme {
         bg: Color::Reset,
     };
 
+    /// Clay (clay.nvim's design system), dark: neutral grays, the one hue
+    /// being Clay itself, kept to focus. States are told apart by brightness
+    /// as in Clay's diagnostics: Ok `fg`, Warn `secondary`, Error `bright`.
+    /// Series take gray steps and the warm `string` gray. The cursor row is
+    /// Clay's `selection`, the stripe its `cursorline`; no background of its
+    /// own, like Clay's default transparency.
+    const CLAY_DARK: Self = Self {
+        fg: Color::Rgb(0xcc, 0xcc, 0xcc),
+        muted: Color::Rgb(0x7a, 0x7a, 0x7a),
+        accent: Color::Rgb(0xd9, 0x77, 0x57),
+        success: Color::Rgb(0xcc, 0xcc, 0xcc),
+        warning: Color::Rgb(0xaa, 0xaa, 0xaa),
+        error: Color::Rgb(0xe6, 0xe6, 0xe6),
+        c1: Color::Rgb(0xaa, 0xaa, 0xaa),
+        c2: Color::Rgb(0xe6, 0xe6, 0xe6),
+        c3: Color::Rgb(0xb0, 0x97, 0x8e),
+        c4: Color::Rgb(0xcc, 0xcc, 0xcc),
+        surface: Style::new().bg(Color::Rgb(0x36, 0x36, 0x36)),
+        stripe: Style::new().bg(Color::Rgb(0x1e, 0x1e, 0x1e)),
+        bg: Color::Reset,
+    };
+
+    /// Clay, light: the same roles as [`Theme::CLAY_DARK`] with the light
+    /// variant's values. It brings its own background, as Catppuccin Latte
+    /// does.
+    const CLAY_LIGHT: Self = Self {
+        fg: Color::Rgb(0x33, 0x33, 0x33),
+        muted: Color::Rgb(0x73, 0x73, 0x73),
+        accent: Color::Rgb(0xd9, 0x77, 0x57),
+        success: Color::Rgb(0x33, 0x33, 0x33),
+        warning: Color::Rgb(0x4b, 0x4b, 0x4b),
+        error: Color::Rgb(0x20, 0x20, 0x20),
+        c1: Color::Rgb(0x4b, 0x4b, 0x4b),
+        c2: Color::Rgb(0x20, 0x20, 0x20),
+        c3: Color::Rgb(0x66, 0x50, 0x48),
+        c4: Color::Rgb(0x33, 0x33, 0x33),
+        surface: Style::new().bg(Color::Rgb(0xc6, 0xc6, 0xc6)),
+        stripe: Style::new().bg(Color::Rgb(0xe5, 0xe5, 0xe5)),
+        bg: Color::Rgb(0xf6, 0xf6, 0xf6),
+    };
+
     /// This theme with the colors `palette` names replaced.
     ///
     /// `surface` and `stripe` are backgrounds, not colors of text: each
@@ -240,6 +281,8 @@ impl From<ThemeName> for Theme {
             ThemeName::GruvboxDark => Self::GRUVBOX_DARK,
             ThemeName::Nord => Self::NORD,
             ThemeName::Dracula => Self::DRACULA,
+            ThemeName::ClayDark => Self::CLAY_DARK,
+            ThemeName::ClayLight => Self::CLAY_LIGHT,
         }
     }
 }
@@ -309,6 +352,49 @@ mod tests {
                     "{name:?} color {index}"
                 );
             }
+        }
+    }
+
+    fn pairwise_distinct(colors: &[Color]) -> bool {
+        colors
+            .iter()
+            .enumerate()
+            .all(|(index, color)| !colors[index + 1..].contains(color))
+    }
+
+    #[test]
+    fn every_built_in_theme_tells_apart_the_states_and_the_series_shown_together() {
+        for name in ThemeName::ALL {
+            let theme = Theme::from(name);
+            // Delays, health, log levels and toasts put these side by side,
+            // and the focus must not read as any of them.
+            let states = [theme.accent, theme.success, theme.warning, theme.error];
+            assert!(pairwise_distinct(&states), "{name:?} states {states:?}");
+            // The overview's four cards; up and down share every view.
+            let series = [theme.c1, theme.c2, theme.c3, theme.c4];
+            assert!(pairwise_distinct(&series), "{name:?} series {series:?}");
+            // The cursor row stands out from a striped row.
+            assert_ne!(theme.surface, theme.stripe, "{name:?}");
+        }
+    }
+
+    #[test]
+    fn clay_is_neutral_gray_but_for_clay_itself_and_the_warm_string_gray() {
+        for name in [ThemeName::ClayDark, ThemeName::ClayLight] {
+            let theme = Theme::from(name);
+            let (colors, surface, stripe) = parts(&theme);
+            let hued = [theme.accent, theme.c3];
+            let backgrounds = [surface.bg, stripe.bg].map(Option::unwrap);
+            for color in colors.into_iter().chain(backgrounds) {
+                if hued.contains(&color) || color == Color::Reset {
+                    continue;
+                }
+                let Color::Rgb(r, g, b) = color else {
+                    panic!("{name:?}: {color:?} is not a true color");
+                };
+                assert!(r == g && g == b, "{name:?}: {color:?} is not gray");
+            }
+            assert_eq!(theme.accent, Color::Rgb(0xd9, 0x77, 0x57), "{name:?}");
         }
     }
 

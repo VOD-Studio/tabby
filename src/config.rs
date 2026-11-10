@@ -42,11 +42,13 @@ pub enum ThemeName {
     GruvboxDark,
     Nord,
     Dracula,
+    ClayDark,
+    ClayLight,
 }
 
 impl ThemeName {
     /// Every built-in theme, in the order the theme picker lists them.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::Terminal,
         Self::TokyoNight,
         Self::CatppuccinMocha,
@@ -54,6 +56,8 @@ impl ThemeName {
         Self::GruvboxDark,
         Self::Nord,
         Self::Dracula,
+        Self::ClayDark,
+        Self::ClayLight,
     ];
 
     /// What `theme =` and `--theme` call it.
@@ -66,6 +70,8 @@ impl ThemeName {
             Self::GruvboxDark => "gruvbox-dark",
             Self::Nord => "nord",
             Self::Dracula => "dracula",
+            Self::ClayDark => "clay-dark",
+            Self::ClayLight => "clay-light",
         }
     }
 
