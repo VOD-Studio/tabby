@@ -7080,28 +7080,14 @@ mod tests {
         app.page = Page::Logs;
         app.logs_view.link = LogLink::Live;
         feed_logs(&mut app.logs_view, 0, 500);
-        let thumb_rows = |app: &App| -> Vec<usize> {
-            screen_text(app, 80, 24)
-                .lines()
-                .enumerate()
-                .filter(|(_, line)| line.ends_with('█'))
-                .map(|(row, _)| row)
-                .collect()
-        };
-        let ends_with = |app: &App, row: usize, corner: char| {
-            screen_text(app, 80, 24)
-                .lines()
-                .nth(row)
-                .is_some_and(|line| line.ends_with(corner))
-        };
         // On the right border: just above the bottom corner while it
         // follows, just under the top corner at the top.
         let following = thumb_rows(&app);
-        assert!(ends_with(&app, *following.last().unwrap() + 1, '╯'));
+        assert!(row_ends_with(&app, *following.last().unwrap() + 1, '╯'));
         app.update(Action::Cursor(Move::Top));
         let top = thumb_rows(&app);
         assert_eq!(top.len(), following.len());
-        assert!(ends_with(&app, top[0] - 1, '╮'));
+        assert!(row_ends_with(&app, top[0] - 1, '╮'));
 
         // Nothing to scroll, no thumb.
         app.update(press('c', Page::Logs, false).unwrap());
@@ -8275,6 +8261,51 @@ secret = "b-secret"
             text.push('\n');
         }
         text
+    }
+
+    /// The screen rows of `app` at 80x24 the scrollbar's thumb is on: those
+    /// ending in it, on the panel's right border.
+    fn thumb_rows(app: &App) -> Vec<usize> {
+        screen_text(app, 80, 24)
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.ends_with('█'))
+            .map(|(row, _)| row)
+            .collect()
+    }
+
+    /// The screen row of `app` at 80x24 holding `text`.
+    fn row_of(app: &App, text: &str) -> usize {
+        screen_text(app, 80, 24)
+            .lines()
+            .position(|line| line.contains(text))
+            .unwrap()
+    }
+
+    /// Whether screen row `row` of `app` at 80x24 ends with `corner`.
+    fn row_ends_with(app: &App, row: usize, corner: char) -> bool {
+        screen_text(app, 80, 24)
+            .lines()
+            .nth(row)
+            .is_some_and(|line| line.ends_with(corner))
+    }
+
+    #[test]
+    fn the_rules_scrollbar_runs_beside_the_rows_not_the_header() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Rules;
+        let rules = (0..100)
+            .map(|n| rule("DomainSuffix", &format!("{n}.example"), "DIRECT"))
+            .collect();
+        app.rules_view.apply(false, Ok(rules));
+        let header = row_of(&app, "匹配内容");
+        assert_eq!(thumb_rows(&app)[0], header + 1);
+        app.update(Action::Cursor(Move::Bottom));
+        assert!(row_ends_with(
+            &app,
+            *thumb_rows(&app).last().unwrap() + 1,
+            '╯'
+        ));
     }
 
     #[tokio::test]

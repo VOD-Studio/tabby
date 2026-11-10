@@ -12,7 +12,7 @@ use crate::{
     format,
     ui::{
         COMPACT_WIDTH,
-        components::{states, title},
+        components::{scrollbar, states, title},
         hit::Target,
         theme::Theme,
     },
@@ -301,7 +301,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
     );
     // Only the rows in view are built: a kernel can have thousands of rules.
     let start = window.start;
-    let body = window.map(|index| {
+    let body = window.clone().map(|index| {
         let style = if index % 2 == 1 {
             theme.stripe
         } else {
@@ -318,6 +318,13 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
             .row_highlight_style(theme.surface),
         inner,
         &mut TableState::new().with_selected(cursor - start),
+    );
+    scrollbar::list(
+        frame,
+        scrollbar::under_header(inner),
+        &window,
+        visible.len(),
+        theme.accent,
     );
 }
 

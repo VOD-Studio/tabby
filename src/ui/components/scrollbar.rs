@@ -33,31 +33,44 @@ pub fn thumb(track: usize, position: usize, viewport: usize, len: usize) -> Opti
     Some(start..start + size)
 }
 
-/// Draws the thumb, in `color`, over the right border of the bordered
-/// panel `area`, between its corners. `position`, `viewport` and `len` as
-/// in [`thumb`]; nothing is drawn when everything fits.
+/// Draws the thumb, in `color`, on the right border of a panel, alongside
+/// `rows`: the rows of the panel's inside that scroll, a table's header
+/// left out. The border is the column just right of them, as with a
+/// bordered block without padding. `position`, `viewport` and `len` as in
+/// [`thumb`]; nothing is drawn when everything fits.
 pub fn render(
     frame: &mut Frame,
-    area: Rect,
+    rows: Rect,
     position: usize,
     viewport: usize,
     len: usize,
     color: Color,
 ) {
-    if area.width < 2 || area.height < 4 {
-        return;
-    }
-    let track = area.height - 2;
-    let Some(thumb) = thumb(usize::from(track), position, viewport, len) else {
+    let Some(thumb) = thumb(usize::from(rows.height), position, viewport, len) else {
         return;
     };
-    let x = area.right() - 1;
+    let x = rows.right();
     let buffer = frame.buffer_mut();
-    for row in (0..track).filter(|row| thumb.contains(&usize::from(*row))) {
-        if let Some(cell) = buffer.cell_mut((x, area.y + 1 + row)) {
+    for row in (0..rows.height).filter(|row| thumb.contains(&usize::from(*row))) {
+        if let Some(cell) = buffer.cell_mut((x, rows.y + row)) {
             cell.set_symbol(THUMB).set_style(Style::new().fg(color));
         }
     }
+}
+
+/// The rows of a table's inside `inner` under its one header row.
+pub fn under_header(inner: Rect) -> Rect {
+    Rect {
+        y: inner.y.saturating_add(1),
+        height: inner.height.saturating_sub(1),
+        ..inner
+    }
+}
+
+/// [`render`] for a list scrolled to `window` (as `Scroll::window` gives
+/// it) of `len` items, one row each.
+pub fn list(frame: &mut Frame, rows: Rect, window: &Range<usize>, len: usize, color: Color) {
+    render(frame, rows, window.start, window.len(), len, color);
 }
 
 #[cfg(test)]

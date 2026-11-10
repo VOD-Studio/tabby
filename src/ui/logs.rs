@@ -208,7 +208,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         .collect();
     frame.render_widget(Paragraph::new(lines), inner);
     let (above, rows) = view.extent(fit);
-    scrollbar::render(frame, area, above, fit.height, rows, theme.accent);
+    scrollbar::render(frame, inner, above, fit.height, rows, theme.accent);
 }
 
 #[cfg(test)]
