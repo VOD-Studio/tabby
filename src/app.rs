@@ -1011,6 +1011,16 @@ pub struct LogsView {
     pub top: Option<LogSpot>,
     /// [`LogEntry::seq`] of the next line shown.
     next_seq: u64,
+    /// What the detail popup shows.
+    pub detail: Option<LogDetail>,
+}
+
+/// A log line the detail popup shows: a copy, which stays when the buffer
+/// lets the line go; and the first row of it in view.
+#[derive(Debug, Clone)]
+pub struct LogDetail {
+    pub entry: LogEntry,
+    pub scroll: usize,
 }
 
 impl LogsView {
@@ -1790,6 +1800,8 @@ pub enum Overlay {
     /// The DNS keys of a managed core's settings, kept in
     /// [`App::dns_view`].
     Dns,
+    /// One log line in full, kept in [`LogsView::detail`].
+    Log,
 }
 
 /// Which connections `X` closes.
@@ -2770,6 +2782,7 @@ impl App {
             _ if self.overlay == Some(Overlay::Themes) => self.pick_theme(&action),
             _ if self.overlay == Some(Overlay::Groups) => self.pick_group(&action),
             _ if self.overlay == Some(Overlay::Dns) => self.pick_dns(&action),
+            _ if self.overlay == Some(Overlay::Log) => self.in_log_detail(&action),
             Action::ToggleHelp => {
                 // The connection popup is not swapped for the help.
                 self.overlay = match self.overlay {
@@ -3683,8 +3696,39 @@ impl App {
                 self.overlay = Some(Overlay::Connection);
                 self.dirty = true;
             }
+            Page::Logs => {
+                let view = &mut self.logs_view;
+                let Some(index) = view.selected() else {
+                    return;
+                };
+                view.detail = Some(LogDetail {
+                    entry: view.entries[index].clone(),
+                    scroll: 0,
+                });
+                self.overlay = Some(Overlay::Log);
+                self.dirty = true;
+            }
             Page::Settings => self.activate_setting(),
             Page::Subscriptions => self.switch_subscription(),
+            _ => {}
+        }
+    }
+
+    /// The log detail popup scrolls with the cursor keys and closes with
+    /// `Esc` or `Enter`; everything else waits, as under any popup.
+    fn in_log_detail(&mut self, action: &Action) {
+        match action {
+            Action::Cursor(movement) => {
+                let screen = Rect::from(self.size);
+                if let Some(detail) = &mut self.logs_view.detail {
+                    let sheet = logs::detail_sheet(screen, &detail.entry);
+                    let positions = sheet.lines.len().saturating_sub(sheet.visible) + 1;
+                    let half = (sheet.visible / 2).max(1);
+                    detail.scroll = movement.apply(detail.scroll, positions, half);
+                    self.dirty = true;
+                }
+            }
+            Action::Confirm | Action::Dismiss => self.close_overlay(),
             _ => {}
         }
     }
@@ -3923,6 +3967,7 @@ impl App {
     fn close_overlay(&mut self) {
         match self.overlay.take() {
             Some(Overlay::Connection) => self.connections_view.detail = None,
+            Some(Overlay::Log) => self.logs_view.detail = None,
             Some(Overlay::Confirm) => self.pending = None,
             Some(Overlay::Dns) => self.close_dns(),
             Some(Overlay::Help | Overlay::Profiles | Overlay::Themes | Overlay::Groups) | None => {}
@@ -8839,6 +8884,48 @@ secret = "b-secret"
         assert_eq!(app.logs_view.cursor, None);
         mouse(&mut app, MouseEventKind::ScrollUp, x, middle);
         assert_eq!(app.logs_view.selected(), Some(498));
+    }
+
+    #[test]
+    fn enter_shows_the_whole_line_which_scrolls_and_outlives_the_buffer() {
+        let (mut app, _rx) = app_without_controller();
+        app.page = Page::Logs;
+        app.update(Action::Resize(Size::new(80, 24)));
+        app.logs_view.link = LogLink::Live;
+        feed_logs(&mut app.logs_view, 0, 3);
+        let long = (0..400)
+            .map(|n| format!("w{n}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        app.logs_view.receive(log_entry(LogLevel::Warning, &long));
+        key_press(&mut app, KeyCode::Enter);
+        assert_eq!(app.overlay, Some(Overlay::Log));
+        let screen = screen_text(&app, 80, 24);
+        assert!(screen.contains("日志详情") && screen.contains("12:00:00 WARN"));
+        assert!(screen.contains("w0 w1 w2") && !screen.contains("w399"));
+        assert!(screen.contains("Esc 关闭") && screen.contains("j/k 滚动"));
+
+        // Modal: page keys wait; the cursor keys scroll it to the end.
+        key_press(&mut app, KeyCode::Char('l'));
+        assert_eq!(app.logs_view.level, LogLevel::Info);
+        key_press(&mut app, KeyCode::Char('G'));
+        let screen = screen_text(&app, 80, 24);
+        assert!(screen.contains("w399") && !screen.contains("12:00:00 WARN"));
+        // The buffer lets the line go; the popup keeps it.
+        feed_logs(&mut app.logs_view, 3, LOG_CAPACITY);
+        assert!(screen_text(&app, 80, 24).contains("w399"));
+        key_press(&mut app, KeyCode::Esc);
+        assert_eq!(app.overlay, None);
+        assert!(app.logs_view.detail.is_none());
+
+        // A double click on a line opens it too; a short one fits.
+        let row = u16::try_from(row_of(&app, "INFO  2000")).unwrap();
+        let now = later();
+        press_at(&mut app, 30, row, now);
+        press_at(&mut app, 30, row, now + Duration::from_millis(100));
+        assert_eq!(app.overlay, Some(Overlay::Log));
+        assert_eq!(app.logs_view.detail.as_ref().unwrap().entry.message, "2000");
+        assert!(!screen_text(&app, 80, 24).contains("j/k 滚动"));
     }
 
     #[test]

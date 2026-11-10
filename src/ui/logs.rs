@@ -12,7 +12,7 @@ use crate::{
     app::{App, LogEntry, LogLink},
     format,
     ui::{
-        components::{scrollbar, states, title},
+        components::{popup, scrollbar, states, title},
         hit::Target,
         text::wrap,
         theme::Theme,
@@ -223,6 +223,91 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App) {
         above,
         fit.height,
         rows,
+        theme.accent,
+    );
+}
+
+/// Columns of the log detail popup at most.
+const DETAIL_WIDTH: u16 = 100;
+
+/// The log detail popup laid out on `screen`: where it goes, its rows of
+/// text (the time and level, a gap, the message wrapped), and how many of
+/// them it shows at once.
+pub struct DetailSheet {
+    pub rect: Rect,
+    pub lines: Vec<String>,
+    pub visible: usize,
+}
+
+/// [`DetailSheet`] for `entry`. The header is laid out by [`render_detail`];
+/// it stands here as a row of its own.
+pub fn detail_sheet(screen: Rect, entry: &LogEntry) -> DetailSheet {
+    let width = DETAIL_WIDTH.min(screen.width);
+    // Borders and the panel's padding take two columns a side.
+    let room = usize::from(width.saturating_sub(4)).max(1);
+    let mut lines = vec![String::new(), String::new()];
+    lines.extend(wrap_message(&entry.message, room));
+    // Two rows clear above and below: the top bar and the key bar stay.
+    let height = u16::try_from(lines.len() + 2)
+        .unwrap_or(u16::MAX)
+        .min(screen.height.saturating_sub(4));
+    let rect = popup::centered(screen, width, height);
+    let visible = usize::from(rect.height.saturating_sub(2));
+    DetailSheet {
+        rect,
+        lines,
+        visible,
+    }
+}
+
+/// The log detail popup: when the line came in and its level, then all of
+/// its message, scrolled to [`LogDetail::scroll`] when it does not fit.
+///
+/// [`LogDetail::scroll`]: crate::app::LogDetail::scroll
+pub fn render_detail(frame: &mut Frame, area: Rect, app: &App) {
+    let Some(detail) = &app.logs_view.detail else {
+        return;
+    };
+    let theme = app.theme;
+    let entry = &detail.entry;
+    let sheet = detail_sheet(area, entry);
+    let rect = popup::modal(app, area, sheet.rect.width, sheet.rect.height);
+    let inner = popup::panel(frame, rect, theme.accent, Some("日志详情"), None);
+
+    let (label, color) = label(&entry.kind, &theme);
+    let header = Line::from(vec![
+        Span::styled(
+            entry.time.strftime("%H:%M:%S").to_string(),
+            Style::new().fg(theme.muted),
+        ),
+        Span::raw(" "),
+        Span::styled(label, Style::new().fg(color).add_modifier(Modifier::BOLD)),
+    ]);
+    let total = sheet.lines.len();
+    let top = detail.scroll.min(total.saturating_sub(sheet.visible));
+    let lines = sheet
+        .lines
+        .into_iter()
+        .enumerate()
+        .map(|(row, text)| match row {
+            0 => header.clone(),
+            _ => Line::styled(text, Style::new().fg(theme.fg)),
+        });
+    for (offset, line) in lines.skip(top).take(sheet.visible).enumerate() {
+        let rect = Rect {
+            y: inner.y + u16::try_from(offset).unwrap_or(u16::MAX),
+            height: 1,
+            ..inner
+        };
+        frame.render_widget(line, rect);
+    }
+    scrollbar::render(
+        frame,
+        &app.hits,
+        scrollbar::in_popup(inner),
+        top,
+        sheet.visible,
+        total,
         theme.accent,
     );
 }

@@ -80,17 +80,7 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
             ("Ctrl+d / Ctrl+u", "翻半页"),
             ("p", "暂停 / 恢复刷新"),
         ],
-        Page::Logs => &[
-            ("l", "切换级别（循环）"),
-            ("p", "暂停 / 恢复"),
-            ("c", "清空日志"),
-            ("/", "过滤日志"),
-            ("Esc", "清除过滤"),
-            ("j / k / ↓ / ↑", "上下移动（按条）"),
-            ("gg", "最早"),
-            ("G", "最新并跟随"),
-            ("Ctrl+d / Ctrl+u", "翻半页"),
-        ],
+        Page::Logs => LOGS_KEYS,
         Page::Settings => &[
             ("Enter / Space", "切换开关或执行操作"),
             ("Enter", "端口行：编辑端口"),
@@ -120,6 +110,20 @@ fn page_keys(page: Page, stacked: bool) -> &'static [(&'static str, &'static str
         Page::Overview => &[],
     }
 }
+
+/// The logs page's keys.
+const LOGS_KEYS: &[(&str, &str)] = &[
+    ("Enter", "查看整条日志"),
+    ("l", "切换级别（循环）"),
+    ("p", "暂停 / 恢复"),
+    ("c", "清空日志"),
+    ("/", "过滤日志"),
+    ("Esc", "清除过滤"),
+    ("j / k / ↓ / ↑", "上下移动（按条）"),
+    ("gg", "最早"),
+    ("G", "最新并跟随"),
+    ("Ctrl+d / Ctrl+u", "翻半页"),
+];
 
 /// Keys that work on every page, as `(key, what it does)`.
 const GLOBAL_KEYS: [(&str, &str); 9] = [

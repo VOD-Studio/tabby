@@ -126,6 +126,7 @@ fn draw_screen(frame: &mut Frame, app: &App) {
     match app.overlay {
         Some(Overlay::Help) => components::help::render(frame, frame.area(), app),
         Some(Overlay::Connection) => connections::render_detail(frame, frame.area(), app),
+        Some(Overlay::Log) => logs::render_detail(frame, frame.area(), app),
         Some(Overlay::Profiles) => components::profiles::render(frame, frame.area(), app),
         Some(Overlay::Themes) => components::themes::render(frame, frame.area(), app),
         Some(Overlay::Dns) => components::dns::render(frame, frame.area(), app),

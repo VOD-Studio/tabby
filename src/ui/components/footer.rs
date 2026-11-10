@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     app::{App, Confirm, Gate, Overlay, Page, Pane, Setting},
     core::{DNS_KEYS, DnsKind},
-    ui::proxies,
+    ui::{logs, proxies},
 };
 
 /// Between two hints.
@@ -44,6 +44,22 @@ fn help_hints() -> Vec<Hint> {
 /// Keys while the connection detail popup is open.
 fn detail_hints() -> Vec<Hint> {
     vec![hint("Esc", "关闭"), hint("q", "退出")]
+}
+
+/// Keys while the log detail popup is open; scrolling only when there is
+/// more than it shows.
+fn log_detail_hints(app: &App) -> Vec<Hint> {
+    let screen = Rect::from(app.size);
+    let scrolls = app.logs_view.detail.as_ref().is_some_and(|detail| {
+        let sheet = logs::detail_sheet(screen, &detail.entry);
+        sheet.lines.len() > sheet.visible
+    });
+    let mut hints = vec![hint("Esc", "关闭")];
+    if scrolls {
+        hints.push(hint("j/k", "滚动"));
+    }
+    hints.push(hint("q", "退出"));
+    hints
 }
 
 /// Keys while the confirm dialog is open.
@@ -194,6 +210,7 @@ fn page_hints(app: &App) -> Vec<Hint> {
         Page::Logs => {
             let view = &app.logs_view;
             let mut hints = vec![
+                hint("Enter", "详情"),
                 hint("l", "级别"),
                 hint("p", if view.paused { "恢复" } else { "暂停" }),
                 hint("c", "清空"),
@@ -304,6 +321,7 @@ fn hints(app: &App) -> Vec<Hint> {
     match app.overlay {
         Some(Overlay::Help) => help_hints(),
         Some(Overlay::Connection) => detail_hints(),
+        Some(Overlay::Log) => log_detail_hints(app),
         Some(Overlay::Confirm) => confirm_hints(app),
         Some(Overlay::Profiles) => profile_hints(app),
         Some(Overlay::Dns) => dns_hints(app),
