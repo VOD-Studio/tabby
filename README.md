@@ -42,6 +42,12 @@ sha256sum --check --ignore-missing SHA256SUMS
 tar -xzf tabby-*-x86_64-unknown-linux-gnu-with-mihomo.tar.gz -C ~/.local --strip-components=1
 ```
 
+**Arch Linux**：用仓库里的 `packaging/arch/PKGBUILD` 从发布源码构建，包名 `tabby-mihomo`（AUR 上的 `tabby` 是 Tabby 终端，二者都占用 `/usr/bin/tabby`，不能共存）。不附带内核：可另装 `mihomo`，由 pacman 更新。
+
+```sh
+cd packaging/arch && makepkg -si
+```
+
 **源码**（Rust ≥ 1.95，仅在 Linux 上验证）：
 
 ```sh
