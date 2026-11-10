@@ -9827,6 +9827,38 @@ secret = "b-secret"
     }
 
     #[tokio::test]
+    async fn the_subscriptions_scrollbar_follows_the_cursor() {
+        let dir = testing::scratch("app-sub-scrollbar");
+        let port = testing::free_port();
+        let recorder = updating_systemd(port, true, "");
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, _rx) = managed_app(core);
+        app.page = Page::Subscriptions;
+        app.core_phase = Some(CorePhase::Running);
+        let subscription = |n: usize| crate::core::Subscription {
+            id: format!("s{n}"),
+            name: format!("订阅 {n}"),
+            kind: crate::core::Kind::Url,
+            source: format!("https://example.com/{n}"),
+            auto_update: false,
+            interval_hours: 24,
+            updated_at: 0,
+            usage: None,
+            age_key: None,
+        };
+        app.subscriptions_view.list = Some(Ok(crate::core::Store {
+            active: None,
+            subscriptions: (0..40).map(subscription).collect(),
+        }));
+        let top = thumb_rows(&app);
+        assert!(row_ends_with(&app, top[0] - 1, '╮'));
+        app.update(Action::Cursor(Move::Bottom));
+        let bottom = thumb_rows(&app);
+        assert_eq!(bottom.len(), top.len());
+        assert!(row_ends_with(&app, *bottom.last().unwrap() + 1, '╯'));
+    }
+
+    #[tokio::test]
     async fn a_kernel_of_the_users_own_is_not_upgraded_and_the_row_says_so() {
         let dir = testing::scratch("app-own-kernel");
         let port = testing::free_port();

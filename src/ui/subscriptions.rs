@@ -16,7 +16,7 @@ use crate::{
     core::{Kind, Subscription},
     format,
     ui::{
-        components::{states, title},
+        components::{scrollbar, states, title},
         hit::Target,
         providers::usage,
         text,
@@ -160,6 +160,7 @@ fn draw(frame: &mut Frame, area: Rect, app: &App, total: usize) {
     );
     let cursor = view.cursor.min(visible.len() - 1);
     let window = view.scroll.window(cursor, visible.len(), capacity(area));
+    scrollbar::list(frame, inner, &window, visible.len(), theme.accent);
     for (row, index) in window.enumerate() {
         let sub = visible[index];
         let rect = Rect {
