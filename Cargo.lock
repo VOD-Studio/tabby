@@ -3592,6 +3592,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "tui-input",
+ "unicode-segmentation",
  "unicode-width",
  "wiremock",
 ]

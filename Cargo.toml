@@ -30,6 +30,7 @@ tracing = "0.1.44"
 tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tui-input = "0.15.5"
+unicode-segmentation = "1.13.3"
 unicode-width = "0.2.3"
 
 [lints.rust]

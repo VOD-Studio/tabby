@@ -1,5 +1,6 @@
 use ratatui::text::Span;
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::{
     api::error::ApiError,
@@ -142,16 +143,18 @@ pub fn core_step(step: Step) -> String {
 }
 
 /// Breaks `spans` into lines at most `width` columns wide, each piece keeping
-/// its style. Wide characters are never split; a space a line would start
-/// with is dropped.
+/// its style. Wide characters are never split, and neither is a grapheme (a
+/// flag cut in two leaves regional indicators terminals draw two columns
+/// wide, past the edge of the line); a space a line would start with is
+/// dropped.
 pub fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> {
     let mut lines: Vec<Vec<Span<'static>>> = vec![vec![]];
     let mut used = 0;
     for span in spans {
         let mut piece = String::new();
-        for ch in span.content.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if used > 0 && used + ch_width > width {
+        for grapheme in span.content.graphemes(true) {
+            let grapheme_width = grapheme.width();
+            if used > 0 && used + grapheme_width > width {
                 if !piece.is_empty() {
                     lines
                         .last_mut()
@@ -161,11 +164,11 @@ pub fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> 
                 lines.push(vec![]);
                 used = 0;
             }
-            if used == 0 && ch == ' ' && lines.len() > 1 {
+            if used == 0 && grapheme == " " && lines.len() > 1 {
                 continue;
             }
-            piece.push(ch);
-            used += ch_width;
+            piece.push_str(grapheme);
+            used += grapheme_width;
         }
         if !piece.is_empty() {
             lines
@@ -178,8 +181,8 @@ pub fn wrap(spans: Vec<Span<'static>>, width: usize) -> Vec<Vec<Span<'static>>> 
 }
 
 /// Cuts `spans` to at most `width` columns, ending in `…` in the style of
-/// the span it cut into when anything was cut. Wide characters are never
-/// split.
+/// the span it cut into when anything was cut. Wide characters and
+/// graphemes are never split.
 pub fn truncate_spans(spans: Vec<Span<'_>>, width: usize) -> Vec<Span<'_>> {
     if spans.iter().map(Span::width).sum::<usize>() <= width {
         return spans;
@@ -199,13 +202,13 @@ pub fn truncate_spans(spans: Vec<Span<'_>>, width: usize) -> Vec<Span<'_>> {
             continue;
         }
         let mut piece = String::new();
-        for ch in span.content.chars() {
-            let ch_width = ch.width().unwrap_or(0);
-            if used + ch_width > budget {
+        for grapheme in span.content.graphemes(true) {
+            let grapheme_width = grapheme.width();
+            if used + grapheme_width > budget {
                 break;
             }
-            used += ch_width;
-            piece.push(ch);
+            used += grapheme_width;
+            piece.push_str(grapheme);
         }
         piece.push('…');
         out.push(Span::styled(piece, span.style));
@@ -236,6 +239,31 @@ mod tests {
         assert_eq!(lines[1][0].style, muted);
         // A line does not start with the space it broke at.
         assert_eq!(texts(&wrap(vec![Span::raw("ab cd")], 2)), ["ab", "cd"]);
+    }
+
+    #[test]
+    fn wrapping_never_cuts_a_flag_or_an_emoji_sequence_in_two() {
+        // `🇭🇰` is two regional indicators, one column each on their own:
+        // per char the first would end the line and the second start the
+        // next, each drawn two wide by the terminal, past the line's edge.
+        assert_eq!(texts(&wrap(vec![Span::raw("hy2🇭🇰]")], 4)), ["hy2", "🇭🇰]"]);
+        // `☁️` (with VS16) is two columns, not the one `☁` counts alone.
+        assert_eq!(texts(&wrap(vec![Span::raw("ab☁️c")], 3)), ["ab", "☁️c"]);
+        for width in 2..12 {
+            for line in wrap(vec![Span::raw("香港🇭🇰 ☁️ 日本🇯🇵")], width) {
+                let line: String = line.iter().map(|span| span.content.as_ref()).collect();
+                assert!(line.width() <= width, "{line:?} at {width}");
+                assert!(!line.chars().any(|ch| ch == '\u{1F1ED}') || line.contains("🇭🇰"));
+                assert!(!line.chars().any(|ch| ch == '\u{1F1EF}') || line.contains("🇯🇵"));
+            }
+        }
+    }
+
+    #[test]
+    fn truncating_spans_never_leaves_half_a_flag() {
+        // Per char, `ab🇭` fit 3 columns plus the ellipsis.
+        let cut = truncate_spans(vec![Span::raw("ab🇭🇰cd")], 4);
+        assert_eq!(texts(&[cut]), ["ab…"]);
     }
 
     #[test]

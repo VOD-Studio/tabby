@@ -1,23 +1,17 @@
 use std::cmp::Ordering;
 
 use jiff::{Timestamp, Zoned};
-use unicode_width::UnicodeWidthChar;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 const ELLIPSIS: char = '…';
 
 /// Shortens `text` to at most `max_width` terminal columns, ending in `…` when
-/// anything was cut. Wide characters (CJK, emoji) are never split.
+/// anything was cut. Wide characters (CJK, emoji) are never split, and
+/// neither is a grapheme: half a flag is a lone regional indicator, one
+/// column to us and two to many terminals.
 pub fn truncate(text: &str, max_width: usize) -> String {
-    let mut width = 0;
-    let mut fits = true;
-    for ch in text.chars() {
-        width += ch.width().unwrap_or(0);
-        if width > max_width {
-            fits = false;
-            break;
-        }
-    }
-    if fits {
+    if text.width() <= max_width {
         return text.to_owned();
     }
 
@@ -25,13 +19,13 @@ pub fn truncate(text: &str, max_width: usize) -> String {
     let budget = max_width.saturating_sub(1);
     let mut out = String::new();
     let mut used = 0;
-    for ch in text.chars() {
-        let w = ch.width().unwrap_or(0);
+    for grapheme in text.graphemes(true) {
+        let w = grapheme.width();
         if used + w > budget {
             break;
         }
         used += w;
-        out.push(ch);
+        out.push_str(grapheme);
     }
     if max_width > 0 {
         out.push(ELLIPSIS);
@@ -195,6 +189,16 @@ mod tests {
         assert_eq!(truncate("你好世界", 4), "你…");
         assert_eq!(truncate("a😀bc", 3), "a…");
         assert_eq!(truncate("a😀bc", 4), "a😀…");
+    }
+
+    #[test]
+    fn never_splits_a_flag_or_undercounts_an_emoji_sequence() {
+        // Per char, `🇭` alone is one column and would fit before the `…`.
+        assert_eq!(truncate("ab🇭🇰cd", 4), "ab…");
+        assert_eq!(truncate("ab🇭🇰cd", 5), "ab🇭🇰…");
+        // `☁️` is two columns: `a☁️b` is 4 wide and does not fit 3.
+        assert_eq!(truncate("a☁️b", 3), "a…");
+        assert_eq!(truncate("a☁️b", 4), "a☁️b");
     }
 
     #[test]
