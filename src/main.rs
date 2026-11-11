@@ -4,6 +4,7 @@ mod config;
 mod core;
 mod event;
 mod format;
+mod os;
 mod themes;
 mod ui;
 
@@ -21,7 +22,6 @@ use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
     execute,
 };
-use directories::ProjectDirs;
 use tokio::sync::mpsc;
 use tracing::level_filters::LevelFilter;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
@@ -39,13 +39,14 @@ struct Cli {
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     color_eyre::install()?;
-    init_logging()?;
-    let path = config::path();
+    let dirs = config::Dirs::current();
+    init_logging(dirs.as_ref())?;
+    let path = dirs.as_ref().map(config::Dirs::config_file);
     let mut file = Config::load(path.as_deref())?;
-    file.open_core(config::data_dir().as_deref())?;
+    file.open_core(dirs.as_ref().map(|dirs| dirs.data.as_path()))?;
     let settings = file.resolve(&cli.overrides)?;
     let picker = themes::Picker {
-        dir: config::themes_dir(),
+        dir: dirs.as_ref().map(config::Dirs::themes),
         config: path.clone(),
         ..themes::Picker::default()
     };
@@ -104,10 +105,10 @@ fn release_mouse_on_panic() {
 /// to the TUI), and records panics there too.
 ///
 /// Filtering follows `RUST_LOG`, defaulting to `info`.
-fn init_logging() -> Result<()> {
-    let dirs = ProjectDirs::from("", "", "tabby")
-        .ok_or_else(|| eyre!("cannot determine the home directory"))?;
-    let dir = dirs.state_dir().unwrap_or_else(|| dirs.data_local_dir());
+fn init_logging(dirs: Option<&config::Dirs>) -> Result<()> {
+    let dir = &dirs
+        .ok_or_else(|| eyre!("cannot determine the home directory"))?
+        .state;
     let file = RollingFileAppender::builder()
         .rotation(Rotation::NEVER)
         .filename_prefix("tabby.log")

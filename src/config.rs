@@ -1,5 +1,6 @@
 use std::{
     collections::BTreeMap,
+    ffi::OsString,
     fs, io,
     path::{self, Path, PathBuf},
     sync::Arc,
@@ -14,7 +15,7 @@ use directories::ProjectDirs;
 use ratatui::style::Color;
 use serde::{Deserialize, Deserializer, de};
 
-use crate::core::ManagedCore;
+use crate::{core::ManagedCore, os::Os};
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:9090";
 
@@ -397,21 +398,60 @@ impl Profiles {
     }
 }
 
-/// Where `config.toml` lives; `None` when the home directory is unknown.
-pub fn path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "tabby").map(|dirs| dirs.config_dir().join("config.toml"))
+/// Where tabby keeps its files.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Dirs {
+    /// `config.toml` and `themes/`.
+    pub config: PathBuf,
+    /// The managed core's files.
+    pub data: PathBuf,
+    /// `tabby.log`.
+    pub state: PathBuf,
 }
 
-/// Where the managed core keeps its files; `None` when the home directory
-/// is unknown.
-pub fn data_dir() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "tabby").map(|dirs| dirs.data_local_dir().to_owned())
-}
+impl Dirs {
+    /// The directories of this system; `None` when the home directory is
+    /// unknown.
+    pub fn current() -> Option<Self> {
+        let project = ProjectDirs::from("", "", "tabby")?;
+        Some(Self::resolve(Os::current(), &project, |key| {
+            std::env::var_os(key)
+        }))
+    }
 
-/// Where user themes live, next to `config.toml`; `None` when the home
-/// directory is unknown.
-pub fn themes_dir() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "tabby").map(|dirs| dirs.config_dir().join("themes"))
+    /// The directories `project` names, for `os` with the environment
+    /// `env`. Linux's already follow `XDG_*`; macOS's are all
+    /// `~/Library/Application Support/tabby`, unless an `XDG_*` variable is
+    /// set to an absolute path, which is then followed as on Linux (plan
+    /// `2026-11-11-macos.md` §3). Without a state directory (macOS), the
+    /// log goes with the data.
+    fn resolve(os: Os, project: &ProjectDirs, env: impl Fn(&str) -> Option<OsString>) -> Self {
+        let xdg = |key: &str| match os {
+            Os::Linux => None,
+            Os::Macos => env(key)
+                .map(PathBuf::from)
+                .filter(|dir| dir.is_absolute())
+                .map(|dir| dir.join("tabby")),
+        };
+        let data = xdg("XDG_DATA_HOME").unwrap_or_else(|| project.data_local_dir().to_owned());
+        Self {
+            config: xdg("XDG_CONFIG_HOME").unwrap_or_else(|| project.config_dir().to_owned()),
+            state: xdg("XDG_STATE_HOME")
+                .or_else(|| project.state_dir().map(Path::to_owned))
+                .unwrap_or_else(|| data.clone()),
+            data,
+        }
+    }
+
+    /// Where `config.toml` lives.
+    pub fn config_file(&self) -> PathBuf {
+        self.config.join("config.toml")
+    }
+
+    /// Where user themes live, next to `config.toml`.
+    pub fn themes(&self) -> PathBuf {
+        self.config.join("themes")
+    }
 }
 
 /// Whether the theme `id` is the path of a file rather than a name.
@@ -981,6 +1021,56 @@ c4 = "gray"
             ..Overrides::default()
         };
         assert_eq!(theme(&config("nord"), &empty), ("nord".to_owned(), false));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn macos_follows_an_absolute_xdg_directory_and_linux_leaves_them_to_its_own_dirs() {
+        let project = ProjectDirs::from_path(PathBuf::from("tabby")).unwrap();
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| OsString::from(value))
+            }
+        };
+        let set: &[(&str, &str)] = &[
+            ("XDG_CONFIG_HOME", "/x/config"),
+            ("XDG_DATA_HOME", "/x/data"),
+            ("XDG_STATE_HOME", "/x/state"),
+        ];
+        let library = project.data_local_dir().to_owned();
+
+        let macos = Dirs::resolve(Os::Macos, &project, env(set));
+        assert_eq!(macos.config, PathBuf::from("/x/config/tabby"));
+        assert_eq!(macos.data, PathBuf::from("/x/data/tabby"));
+        assert_eq!(macos.state, PathBuf::from("/x/state/tabby"));
+        assert_eq!(
+            macos.config_file(),
+            PathBuf::from("/x/config/tabby/config.toml")
+        );
+
+        // Empty or relative is unset; the log goes with the data, which may
+        // itself follow XDG_DATA_HOME.
+        let partly: &[(&str, &str)] = &[
+            ("XDG_CONFIG_HOME", ""),
+            ("XDG_DATA_HOME", "/x/data"),
+            ("XDG_STATE_HOME", "state"),
+        ];
+        let macos = Dirs::resolve(Os::Macos, &project, env(partly));
+        assert_eq!(macos.config, project.config_dir());
+        assert_eq!(macos.data, PathBuf::from("/x/data/tabby"));
+        let state = project
+            .state_dir()
+            .map_or_else(|| PathBuf::from("/x/data/tabby"), Path::to_owned);
+        assert_eq!(macos.state, state);
+        assert_eq!(Dirs::resolve(Os::Macos, &project, env(&[])).data, library);
+
+        // Linux's directories already read XDG_*, when they were made.
+        let linux = Dirs::resolve(Os::Linux, &project, env(set));
+        assert_eq!(linux.config, project.config_dir());
+        assert_eq!(linux.data, library);
     }
 
     /// A directory of its own under the system's temporary one, emptied.
