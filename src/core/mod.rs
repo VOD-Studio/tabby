@@ -30,7 +30,10 @@ use std::{
 use color_eyre::{Result, eyre::WrapErr};
 use tokio::sync::OnceCell;
 
-use crate::api::{client::ApiClient, error::ApiError, models::CoreKind};
+use crate::{
+    api::{client::ApiClient, error::ApiError, models::CoreKind},
+    os::Os,
+};
 pub use encrypted::Fault;
 use install::Target;
 pub use install::{Release, Upgrade};
@@ -300,6 +303,8 @@ pub struct ManagedCore {
     unit_dir: Option<PathBuf>,
     /// The desktop whose system proxy tabby can set, if it is one.
     desktop: Option<sysproxy::Desktop>,
+    /// The system tabby runs on; tests choose it.
+    os: Os,
 }
 
 impl ManagedCore {
@@ -355,6 +360,7 @@ impl ManagedCore {
                 .and_then(|current| sysproxy::Desktop::detect(&current)),
             unit_dir: directories::BaseDirs::new()
                 .map(|dirs| dirs.config_dir().join("systemd").join("user")),
+            os: Os::current(),
             timing: Timing {
                 ready: READY_TIMEOUT,
                 poll: READY_POLL,
@@ -581,11 +587,11 @@ impl ManagedCore {
 
     /// Records the kernel process run without systemd (and when it
     /// started), or forgets it.
-    fn store_process(&self, pid: Option<u32>) -> Result<(), CoreError> {
+    fn store_process(&self, process: Option<supervisor::Process>) -> Result<(), CoreError> {
         let mut state = State::load_or_create(&self.paths.state())
             .map_err(|err| CoreError::io("cannot read state.toml", err))?;
-        state.pid = pid;
-        state.pid_start = pid.and_then(supervisor::start_time);
+        state.pid = process.map(|process| process.pid);
+        state.pid_start = process.and_then(|process| process.start);
         state
             .save(&self.paths.state())
             .map_err(|err| CoreError::io("cannot write state.toml", err))

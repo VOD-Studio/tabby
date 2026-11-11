@@ -10,7 +10,10 @@ use std::{
     time::{Duration, Instant},
 };
 
+use sha2::{Digest, Sha256};
+
 use super::{Action, CoreError, ManagedCore, runner::Cmd};
+use crate::os::Os;
 
 /// Lines of the kernel's output the error page shows.
 const LOG_LINES: usize = 20;
@@ -22,14 +25,14 @@ const STOP_POLL: Duration = Duration::from_millis(100);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Process {
     pub pid: u32,
-    /// When it started, from [`start_time`].
+    /// When it started, from [`ManagedCore::start_time`].
     pub start: Option<u64>,
 }
 
 /// When process `pid` started, in clock ticks since boot (field 22 of
 /// `/proc/<pid>/stat`); `None` when there is no such process, it has ended
 /// without being waited for, or there is no `/proc`.
-pub fn start_time(pid: u32) -> Option<u64> {
+fn proc_start_time(pid: u32) -> Option<u64> {
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
     // The name in the second field may hold spaces and parentheses: the
     // rest starts after the last one. Then comes the state, field 3.
@@ -39,6 +42,22 @@ pub fn start_time(pid: u32) -> Option<u64> {
         return None;
     }
     fields.nth(18)?.parse().ok()
+}
+
+/// What `ps -o lstart=` said of a process (`Wed Nov 11 10:00:00 2026`), as
+/// a number: the first eight bytes of its sha256. The text follows the
+/// locale, so it is compared, not read; the hash, unlike std's, is the same
+/// from one build of tabby to the next. `None` when `ps` found nothing.
+fn ps_start_time(output: &Output) -> Option<u64> {
+    let text = String::from_utf8_lossy(&output.stdout);
+    let text = text.trim();
+    if !output.status.success() || text.is_empty() {
+        return None;
+    }
+    let digest = Sha256::digest(text.as_bytes());
+    let mut first = [0; 8];
+    first.copy_from_slice(&digest[..8]);
+    Some(u64::from_be_bytes(first))
 }
 
 /// How the kernel is kept running.
@@ -187,7 +206,8 @@ impl ManagedCore {
                         action: Action::Start,
                         message: err.to_string(),
                     })?;
-                self.store_process(Some(pid))
+                let start = self.start_time(pid).await;
+                self.store_process(Some(Process { pid, start }))
             }
         }
     }
@@ -265,12 +285,26 @@ impl ManagedCore {
         .await
     }
 
+    /// When process `pid` started, in a unit of the system's own that is
+    /// only compared: what tells it from the next process with its number.
+    /// `None` when there is no such process, or no way to tell.
+    pub(super) async fn start_time(&self, pid: u32) -> Option<u64> {
+        match self.os {
+            Os::Linux => proc_start_time(pid),
+            // No /proc: `ps` (plan `2026-11-11-macos.md` §4.2).
+            Os::Macos => {
+                let asked = Cmd::new("ps", ["-o", "lstart=", "-p", &pid.to_string()]);
+                ps_start_time(&self.exec(asked).await.ok()?)
+            }
+        }
+    }
+
     /// Whether `process` is still the kernel tabby started, and not just a
-    /// process with that number: it started when the kernel did. Without
-    /// `/proc` only the number can be checked.
+    /// process with that number: it started when the kernel did. On a Linux
+    /// without `/proc` only the number can be checked.
     async fn is_kernel(&self, process: Process) -> bool {
-        if Path::new("/proc/self").exists() {
-            return process.start.is_some() && start_time(process.pid) == process.start;
+        if self.os == Os::Macos || Path::new("/proc/self").exists() {
+            return process.start.is_some() && self.start_time(process.pid).await == process.start;
         }
         self.exec(Cmd::new("kill", ["-0".to_owned(), process.pid.to_string()]))
             .await

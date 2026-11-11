@@ -25,9 +25,10 @@ pub struct State {
     /// The kernel's process id, when it runs without systemd.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
-    /// When that process started, in clock ticks since boot: a number the
-    /// next process to get the same id does not have, and which does not
-    /// depend on how far `execve` has come, as its command line does.
+    /// When that process started (on Linux in clock ticks since boot, on
+    /// macOS a hash of what `ps` says): a number the next process to get
+    /// the same id does not have, and which does not depend on how far
+    /// `execve` has come, as its command line does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid_start: Option<u64>,
 }

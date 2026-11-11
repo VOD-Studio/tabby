@@ -166,6 +166,8 @@ fn core_in(
     core.unit_dir = Some(dir.join("units"));
     // Nor the desktop of whoever runs them.
     core.desktop = None;
+    // Nor their system: a test that runs real processes says so.
+    core.os = crate::os::Os::Linux;
     core.timing = Timing {
         ready: Duration::from_secs(3),
         poll: Duration::from_millis(20),

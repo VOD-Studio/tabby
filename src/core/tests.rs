@@ -1,4 +1,4 @@
-use std::{fs, os::unix::fs::PermissionsExt, sync::Mutex, thread};
+use std::{fs, os::unix::fs::PermissionsExt, path::Path, sync::Mutex, thread};
 
 use super::{runner::Cmd, testing::*, *};
 
@@ -223,28 +223,42 @@ async fn a_running_unit_is_restarted_through_systemd_on_a_fresh_config() {
     fs::remove_dir_all(dir).unwrap();
 }
 
-/// Systemd is not there; a `kill` really kills.
+/// Systemd is not there; a `kill` really kills and `ps` really looks.
 fn without_systemd() -> Arc<Recorder> {
     Recorder::new(|cmd| match cmd.program.as_str() {
-        "kill" => System.run(cmd).unwrap(),
+        "kill" | "ps" => System.run(cmd).unwrap(),
         _ => answer(1, "offline\n"),
     })
 }
 
+/// A core of `recorder` for the system the tests run on: its processes are
+/// real.
+fn real_core(dir: &Path, recorder: &Arc<Recorder>) -> ManagedCore {
+    let mut core = core_at(dir, free_port(), recorder, false);
+    core.os = Os::current();
+    core
+}
+
+/// What `ps` says of process `pid`, `field` alone; `None` when it is gone.
+fn ps(pid: u32, field: &str) -> Option<String> {
+    let output = std::process::Command::new("ps")
+        .args(["-o", &format!("{field}="), "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    (output.status.success() && !text.is_empty()).then_some(text)
+}
+
 fn gone(core: &ManagedCore, pid: u32) -> bool {
-    !Path::new(&format!("/proc/{pid}/cmdline")).exists()
-        || fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|text| {
-            !text
-                .split(|byte| *byte == 0)
-                .any(|part| part == core.binary().unwrap().as_os_str().as_encoded_bytes())
-        })
+    let binary = core.binary().unwrap();
+    ps(pid, "command").is_none_or(|command| !command.contains(&*binary.to_string_lossy()))
 }
 
 #[tokio::test]
 async fn without_systemd_the_kernel_is_a_process_that_can_be_found_and_stopped() {
     let dir = scratch("fallback");
     let recorder = without_systemd();
-    let core = core_at(&dir, free_port(), &recorder, false);
+    let core = real_core(&dir, &recorder);
     let binary = core.binary().unwrap();
     core.write_config().unwrap();
 
@@ -257,17 +271,7 @@ async fn without_systemd_the_kernel_is_a_process_that_can_be_found_and_stopped()
     assert_eq!(core.status().await, supervisor::Status::Active);
     assert!(core.alive().await);
     // Its own process group: a ^C for tabby does not reach it.
-    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).unwrap();
-    let group: u32 = stat
-        .rsplit(')')
-        .next()
-        .unwrap()
-        .split_whitespace()
-        .nth(2)
-        .unwrap()
-        .parse()
-        .unwrap();
-    assert_eq!(group, pid);
+    assert_eq!(ps(pid, "pgid"), Some(pid.to_string()));
 
     core.stop().await.unwrap();
     assert_eq!(core.stored_process(), None);
@@ -280,7 +284,7 @@ async fn without_systemd_the_kernel_is_a_process_that_can_be_found_and_stopped()
 async fn a_second_launch_keeps_the_previous_log_and_the_log_tail_is_the_current_one() {
     let dir = scratch("log");
     let recorder = without_systemd();
-    let core = core_at(&dir, free_port(), &recorder, false);
+    let core = real_core(&dir, &recorder);
     let binary = dir.join("noisy");
     fs::write(
         &binary,
@@ -308,10 +312,43 @@ async fn a_second_launch_keeps_the_previous_log_and_the_log_tail_is_the_current_
 }
 
 #[tokio::test]
+async fn on_macos_the_kernel_is_told_from_a_reused_pid_by_when_ps_says_it_started() {
+    let dir = scratch("ps-start");
+    let started = Arc::new(Mutex::new("Wed Nov 11 10:00:00 2026"));
+    let says = Arc::clone(&started);
+    let recorder = Recorder::new(move |cmd| match cmd.program.as_str() {
+        "ps" if cmd.args == ["-o", "lstart=", "-p", "4242"] => {
+            answer(0, &format!("{}\n", says.lock().unwrap()))
+        }
+        "ps" => answer(1, ""),
+        _ => answer(0, ""),
+    });
+    let mut core = core_at(&dir, free_port(), &recorder, false);
+    core.os = Os::Macos;
+    let start = core.start_time(4242).await;
+    assert!(start.is_some());
+    assert_eq!(core.start_time(7).await, None);
+    let mut state = State::load_or_create(&core.paths.state()).unwrap();
+    state.pid = Some(4242);
+    state.pid_start = start;
+    state.save(&core.paths.state()).unwrap();
+
+    assert_eq!(core.status().await, supervisor::Status::Active);
+    // The kernel ended and another process got its number.
+    *started.lock().unwrap() = "Wed Nov 11 10:05:00 2026";
+    assert_eq!(core.status().await, supervisor::Status::Inactive);
+    core.stop().await.unwrap();
+
+    assert_eq!(recorder.runs("kill"), Vec::<String>::new());
+    assert_eq!(core.stored_process(), None);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn a_pid_that_is_not_the_kernel_is_never_signalled() {
     let dir = scratch("stale");
     let recorder = without_systemd();
-    let core = core_at(&dir, free_port(), &recorder, false);
+    let core = real_core(&dir, &recorder);
     // This very process has a number, but did not start when the kernel did.
     let mut state = State::load_or_create(&core.paths.state()).unwrap();
     state.pid = Some(std::process::id());
