@@ -1,5 +1,6 @@
-# The per-commit gate of AGENTS.md (make fmt-check, lint, test) and a zizmor
-# audit of .github/ on every push to main and every pull request; release.yml
+# The per-commit gate of AGENTS.md (make fmt-check, lint, test; lint and test
+# on Linux and macOS) and a zizmor audit of .github/ on every push to main and
+# every pull request; release.yml
 # runs it on the tagged commit before building. Actions are pinned to full
 # commit SHAs (Dependabot keeps them current) and every job gets a read-only
 # token.
@@ -35,8 +36,13 @@ jobs:
       - run: make fmt-check
 
   clippy:
-    name: clippy
-    runs-on: ubuntu-24.04
+    name: clippy (${{ matrix.runner }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # macOS compiles other `cfg` branches of std and the dependencies.
+        runner: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
     steps:
@@ -54,8 +60,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The two architectures the release archives are built for.
-        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+        # The two Linux architectures the release archives are built for,
+        # and macOS on Apple Silicon (plan 2026-11-11-macos.md).
+        runner: [ubuntu-24.04, ubuntu-24.04-arm, macos-15]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
