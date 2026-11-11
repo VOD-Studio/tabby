@@ -593,6 +593,11 @@ impl App {
         };
         if let Err(err) = core.persist(change) {
             self.toast(ToastKind::Error, failure("已生效，但没能保存", &err));
+        } else if patch == Patch::Tun(true) && core.tun_turns_dns_on() {
+            // The TUN hands the DNS queries to a kernel whose DNS is off:
+            // the config just written turns it on, but only once the kernel
+            // reads it (`PATCH /configs` has no `dns`).
+            self.send_change(Change::Reload);
         }
         // The desktop was pointed at the port it was; it follows the kernel.
         if let Patch::Port(Port::Mixed, number) = patch

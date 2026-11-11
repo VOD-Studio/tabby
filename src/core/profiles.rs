@@ -121,6 +121,15 @@ impl ManagedCore {
             .map_err(|err| CoreError::io("cannot write the kernel's config", err))
     }
 
+    /// Whether turning TUN on also turns the DNS of the kernel's config on
+    /// ([`runtime::tun_turns_dns_on`]): the subscription in use has none of
+    /// its own on. A running kernel then has to read its config again.
+    pub fn tun_turns_dns_on(&self) -> bool {
+        self.subscriptions()
+            .and_then(|store| self.base_profile(&store))
+            .is_ok_and(|base| runtime::tun_turns_dns_on(&base, &self.settings()).unwrap_or(false))
+    }
+
     /// The client a subscription is downloaded with, the way
     /// `[subscription-download]` says, and that way as the log says it.
     fn subscription_client(&self) -> Result<(reqwest::Client, String), CoreError> {

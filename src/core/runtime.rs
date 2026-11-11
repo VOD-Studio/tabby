@@ -50,6 +50,8 @@ pub struct Edited {
     /// go into (it has none, or it is not a block mapping, and was taken
     /// out): the caller writes one.
     pub dns_missing: bool,
+    /// The profile's DNS is off, and is turned on for the TUN.
+    pub dns_turned_on: bool,
 }
 
 /// The block-style `dns` section of a profile.
@@ -58,6 +60,8 @@ struct DnsBlock {
     children: Vec<(usize, String)>,
     /// The column they start in.
     indent: usize,
+    /// It says `enable: true`.
+    on: bool,
 }
 
 /// Whether the YAML at character `index` of `text` opens a flow collection.
@@ -65,13 +69,20 @@ fn is_flow(text: &str, index: usize) -> bool {
     text.chars().nth(index) == Some('{')
 }
 
-/// The top-level entries of a profile (each with the line it starts on), and
-/// its `dns` section when that is a block mapping.
-type Scan = (Vec<(usize, String)>, Option<DnsBlock>);
+/// What [`scan`] finds in a profile.
+struct Scan {
+    /// The top-level entries, each with the line it starts on.
+    entries: Vec<(usize, String)>,
+    /// Its `dns` section, when that is a block mapping.
+    block: Option<DnsBlock>,
+    /// Its `dns` section is a `{…}` flow mapping, which is not read.
+    flow: bool,
+}
 
 fn scan(text: &str) -> Result<Scan, Unsupported> {
     let mut entries: Vec<(usize, String)> = Vec::new();
     let mut block: Option<DnsBlock> = None;
+    let mut flow = false;
     let mut depth = 0usize;
     let mut documents = 0;
     let mut top = false;
@@ -109,8 +120,18 @@ fn scan(text: &str) -> Result<Scan, Unsupported> {
                 block = Some(DnsBlock {
                     children: vec![],
                     indent: 0,
+                    on: false,
                 });
                 (in_dns, dns_expect, depth) = (true, true, 2);
+            }
+            // The value of `dns`, when it is a flow mapping.
+            Event::MappingStart(..)
+                if depth == 1
+                    && !expect_key
+                    && entries.last().is_some_and(|(_, name)| name == "dns") =>
+            {
+                flow = true;
+                depth += 1;
             }
             Event::MappingStart(..) | Event::SequenceStart(..) => depth += 1,
             Event::MappingEnd | Event::SequenceEnd => {
@@ -128,11 +149,19 @@ fn scan(text: &str) -> Result<Scan, Unsupported> {
                 expect_key = !expect_key;
             }
             Event::Scalar(name, ..) if depth == 2 && in_dns => {
-                if dns_expect && let Some(block) = &mut block {
-                    if block.children.is_empty() {
-                        block.indent = span.start.col();
+                if let Some(block) = &mut block {
+                    if dns_expect {
+                        if block.children.is_empty() {
+                            block.indent = span.start.col();
+                        }
+                        block.children.push((span.start.line(), name.into_owned()));
+                    } else if block
+                        .children
+                        .last()
+                        .is_some_and(|(_, key)| key == "enable")
+                    {
+                        block.on = matches!(&*name, "true" | "True" | "TRUE");
                     }
-                    block.children.push((span.start.line(), name.into_owned()));
                 }
                 dns_expect = !dns_expect;
             }
@@ -144,7 +173,11 @@ fn scan(text: &str) -> Result<Scan, Unsupported> {
     if !top {
         return Err(Unsupported);
     }
-    Ok((entries, block))
+    Ok(Scan {
+        entries,
+        block,
+        flow,
+    })
 }
 
 /// `text` without the top-level entries called one of `remove`, each taken
@@ -155,8 +188,34 @@ fn scan(text: &str) -> Result<Scan, Unsupported> {
 /// a byte: a profile read and written back through a YAML library would
 /// turn `short-id: 0123` into a number, drop its comments and renumber its
 /// anchors (plan §7.2).
-pub fn edit(text: &str, remove: &[&str], dns: &[(&str, String)]) -> Result<Edited, Unsupported> {
-    let (entries, block) = scan(text)?;
+///
+/// With `tun` on, the DNS is on too: the TUN hands every DNS query to the
+/// kernel (`dns-hijack`), and a kernel whose DNS is off answers none, which
+/// takes the name lookups of the whole machine down. `enable: true` is set
+/// like a `dns` entry; mihomo has servers of its own to ask when the profile
+/// names none. A `{…}` section is not read, and is left as it is unless
+/// entries are set in it.
+pub fn edit(
+    text: &str,
+    remove: &[&str],
+    dns: &[(&str, String)],
+    tun: bool,
+) -> Result<Edited, Unsupported> {
+    let Scan {
+        entries,
+        block,
+        flow,
+    } = scan(text)?;
+    let dns_turned_on = tun
+        && match &block {
+            Some(block) => !block.on,
+            // A new section (written for entries set) is on anyway.
+            None => !flow && dns.is_empty(),
+        };
+    let mut dns = dns.to_vec();
+    if dns_turned_on {
+        dns.push(("enable", "true".to_owned()));
+    }
     // Byte offset of the start of each line, the first being line 1.
     let mut starts = vec![0];
     starts.extend(text.match_indices('\n').map(|(at, _)| at + 1));
@@ -196,7 +255,7 @@ pub fn edit(text: &str, remove: &[&str], dns: &[(&str, String)]) -> Result<Edite
         if at > 0 && !text[..at].ends_with('\n') {
             lines.push_str(newline);
         }
-        for (key, value) in dns {
+        for (key, value) in &dns {
             let _ = write!(
                 lines,
                 "{}{}: {value}{newline}",
@@ -219,7 +278,25 @@ pub fn edit(text: &str, remove: &[&str], dns: &[(&str, String)]) -> Result<Edite
     Ok(Edited {
         text: kept,
         dns_missing: !dns.is_empty() && !has_section,
+        dns_turned_on,
     })
+}
+
+/// The `[dns]` overrides of `settings` as [`edit`] takes them.
+fn dns_overrides(settings: &CoreSettings) -> Vec<(&str, String)> {
+    settings
+        .dns
+        .iter()
+        .map(|(key, value)| (key.as_str(), to_json(value).to_string()))
+        .collect()
+}
+
+/// Whether TUN, turned on, also turns the DNS of the config made from
+/// `base` on ([`edit`]). A running kernel told over its controller to turn
+/// TUN on is not told about the DNS (`PATCH /configs` has no `dns`): it has
+/// to read its config again.
+pub fn tun_turns_dns_on(base: &str, settings: &CoreSettings) -> Result<bool, Unsupported> {
+    Ok(edit(base, &TAKEN, &dns_overrides(settings), true)?.dns_turned_on)
 }
 
 /// The config file the kernel is started with: `base` (a profile) followed
@@ -231,12 +308,7 @@ pub fn edit(text: &str, remove: &[&str], dns: &[(&str, String)]) -> Result<Edite
 /// twice: [`edit`] takes them out first. A profile that is not a block
 /// mapping at the top is [`Unsupported`].
 pub fn render(base: &str, settings: &CoreSettings, state: &State) -> Result<String, Unsupported> {
-    let dns: Vec<(&str, String)> = settings
-        .dns
-        .iter()
-        .map(|(key, value)| (key.as_str(), to_json(value).to_string()))
-        .collect();
-    let edited = edit(base, &TAKEN, &dns)?;
+    let edited = edit(base, &TAKEN, &dns_overrides(settings), settings.tun.enable)?;
     let tun = &settings.tun;
     let overrides: [(&str, Value); 8] = [
         (
@@ -287,7 +359,7 @@ mod tests {
 
     /// [`edit`] with only keys to take out.
     fn strip(text: &str, keys: &[&str]) -> Result<String, Unsupported> {
-        edit(text, keys, &[]).map(|edited| edited.text)
+        edit(text, keys, &[], false).map(|edited| edited.text)
     }
 
     fn state() -> State {
@@ -417,6 +489,7 @@ rules: [MATCH,g]
                 set("nameserver", r#"["https://dns.test/q"]"#),
                 set("ipv6", "true"),
             ],
+            false,
         )
         .unwrap();
         assert!(!edited.dns_missing);
@@ -433,6 +506,7 @@ rules: [MATCH,g]
             "dns:\n  enable: true\n  nameserver: [a]",
             &[],
             &[set("nameserver", "[\"b\"]")],
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -444,6 +518,7 @@ rules: [MATCH,g]
             "dns:\r\n    enable: true\r\nrules: []\r\n",
             &[],
             &[set("ipv6", "true")],
+            false,
         )
         .unwrap();
         assert_eq!(
@@ -459,17 +534,18 @@ rules: [MATCH,g]
             "dns: {enable: true, ipv6: false}\nrules: []\n",
             "dns:\nrules: []\n",
         ] {
-            let edited = edit(text, &[], &[set("ipv6", "true")]).unwrap();
+            let edited = edit(text, &[], &[set("ipv6", "true")], false).unwrap();
             assert!(edited.dns_missing, "{text}");
             assert_eq!(edited.text, "rules: []\n", "{text}");
         }
         // With no keys to set a profile's own section is left alone, whatever its style.
         let own = "dns: {enable: true}\nrules: []\n";
         assert_eq!(
-            edit(own, &[], &[]).unwrap(),
+            edit(own, &[], &[], false).unwrap(),
             Edited {
                 text: own.to_owned(),
-                dns_missing: false
+                dns_missing: false,
+                dns_turned_on: false
             }
         );
     }
@@ -499,6 +575,82 @@ rules: [MATCH,g]
             none.contains("\"dns\": {\"enable\":true,\"ipv6\":true,\"nameserver\":[\"1.1.1.1\"]}"),
             "{none}"
         );
+    }
+
+    /// `settings` with TUN `on`.
+    fn tun(on: bool) -> CoreSettings {
+        let mut settings = CoreSettings::default();
+        settings.set(crate::core::settings::Persist::Tun(on));
+        settings
+    }
+
+    #[test]
+    fn with_tun_on_a_profile_without_dns_gets_it_turned_on_and_with_tun_off_none() {
+        let on = render(BUILTIN, &tun(true), &state()).unwrap();
+        assert!(on.ends_with("\n\"dns\": {\"enable\":true}\n"), "{on}");
+        assert_eq!(on.matches("dns\":").count(), 1, "{on}");
+        assert!(tun_turns_dns_on(BUILTIN, &tun(true)).unwrap());
+        // An empty section is none.
+        let empty = render("dns:\nrules: []\n", &tun(true), &state()).unwrap();
+        assert!(empty.starts_with("rules: []\n"), "{empty}");
+        assert!(empty.contains("\"dns\": {\"enable\":true}"), "{empty}");
+
+        let off = render(BUILTIN, &tun(false), &state()).unwrap();
+        assert!(!off.contains("dns\":"), "{off}");
+    }
+
+    #[test]
+    fn with_tun_on_a_dns_section_that_is_off_is_turned_on_and_one_that_is_on_is_left_alone() {
+        for text in [
+            "dns:\n  # kept\n  enable: false\n  nameserver: [1.1.1.1]\nrules: []\n",
+            "dns:\n  nameserver: [1.1.1.1]\nrules: []\n",
+            "dns:\n  enable: yes\n  nameserver: [1.1.1.1]\nrules: []\n",
+        ] {
+            let edited = edit(text, &[], &[], true).unwrap();
+            assert!(edited.dns_turned_on && !edited.dns_missing, "{text}");
+            assert_eq!(
+                edited
+                    .text
+                    .replace("  enable: false\n", "")
+                    .replace("  enable: yes\n", ""),
+                text.replace("  enable: false\n", "")
+                    .replace("  enable: yes\n", "")
+                    .replace("rules", "  \"enable\": true\nrules"),
+                "{text}"
+            );
+        }
+        // Its own servers and the keys set stay; it is on once.
+        let set = render(
+            "dns:\n  enable: false\n  nameserver: [1.1.1.1]\n",
+            &CoreSettings {
+                dns: [("ipv6".to_owned(), toml::Value::Boolean(true))].into(),
+                ..tun(true)
+            },
+            &state(),
+        )
+        .unwrap();
+        assert!(
+            set.starts_with(
+                "dns:\n  nameserver: [1.1.1.1]\n  \"ipv6\": true\n  \"enable\": true\n"
+            ),
+            "{set}"
+        );
+        assert_eq!(set.matches("enable\": true").count(), 1, "{set}");
+
+        let own = "dns:\n  enable: true\n  enhanced-mode: fake-ip\nrules: []\n";
+        let edited = edit(own, &[], &[], true).unwrap();
+        assert_eq!((edited.text.as_str(), edited.dns_turned_on), (own, false));
+        assert!(!tun_turns_dns_on(own, &tun(true)).unwrap());
+    }
+
+    #[test]
+    fn with_tun_on_a_flow_dns_section_is_not_read_and_stays_as_the_profile_has_it() {
+        let own = "dns: {enable: true, enhanced-mode: fake-ip}\nrules: []\n";
+        let edited = edit(own, &[], &[], true).unwrap();
+        assert_eq!((edited.text.as_str(), edited.dns_turned_on), (own, false));
+        // A key nested deeper is not the section's own.
+        let nested = "dns:\n  nameserver-policy:\n    enable: true\nrules: []\n";
+        assert!(edit(nested, &[], &[], true).unwrap().dns_turned_on);
     }
 
     #[test]

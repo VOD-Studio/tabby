@@ -11337,6 +11337,49 @@ secret = "b-secret"
     }
 
     #[tokio::test]
+    async fn turning_tun_on_makes_a_kernel_without_dns_read_its_config_with_the_dns_on() {
+        use std::sync::atomic::AtomicBool;
+        let dir = testing::scratch("app-tun-dns");
+        let port = testing::free_port();
+        let recorder = tun_machine(port, 0, 1, Arc::new(AtomicBool::new(true)));
+        let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
+        let (mut app, mut rx) = on_tun_row(&core).await;
+        // The stand-in kernel was attached to, not started from a config.
+        core.regenerate().await.unwrap();
+        let config = std::fs::read_to_string(dir.join("core/home/config.yaml")).unwrap();
+        assert!(!config.contains("\"dns\""), "{config}");
+        let before = testing::requests_to(port).len();
+
+        key_press(&mut app, KeyCode::Enter);
+        key_press(&mut app, KeyCode::Char('y'));
+        requested(&mut app, &mut rx, port, |requests| {
+            requests[before..]
+                .iter()
+                .any(|request| request.starts_with("PUT /configs"))
+        })
+        .await;
+
+        // The built-in profile has no DNS: TUN is turned on, then the
+        // kernel reads the config that turns its DNS on.
+        let requests = &testing::requests_to(port)[before..];
+        let at = |method: &str| {
+            requests
+                .iter()
+                .position(|request| request.starts_with(method))
+        };
+        assert!(
+            matches!(
+                (at("PATCH /configs"), at("PUT /configs")),
+                (Some(patch), Some(reload)) if patch < reload
+            ),
+            "{requests:?}"
+        );
+        let config = std::fs::read_to_string(dir.join("core/home/config.yaml")).unwrap();
+        assert!(config.contains("\"dns\": {\"enable\":true}"), "{config}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn saying_no_to_the_dialog_leaves_tun_off_and_the_kernel_alone() {
         use std::sync::atomic::AtomicBool;
         let dir = testing::scratch("app-tun-cancel");
