@@ -112,7 +112,7 @@ pub fn core_detail(err: &CoreError) -> Vec<String> {
             "沿用已导入的内容".to_owned(),
         ],
         CoreError::NeedsServiceManager => vec!["需要 systemd 或 launchd".to_owned()],
-        CoreError::NoDesktopProxy => vec!["支持 GNOME、MATE、Cinnamon 和 KDE".to_owned()],
+        CoreError::NoDesktopProxy => vec!["支持 GNOME、MATE、Cinnamon、KDE 和 macOS".to_owned()],
         CoreError::AgeKeyNeeded => vec!["订阅已加密，需要 age 密钥".to_owned()],
         CoreError::Age(Fault::NotAKey) => {
             vec!["不是 age 私钥（以 AGE-SECRET-KEY-1 开头）".to_owned()]

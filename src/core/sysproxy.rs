@@ -1,5 +1,6 @@
 //! The desktop's system proxy (plan §9.2): pointed at the kernel's Mixed
-//! port while the user wants it, and put back as it was after.
+//! port while the user wants it, and put back as it was after. On macOS it
+//! is a setting of every network service (plan `2026-11-11-macos.md` §5).
 
 use std::{fs, io, path::PathBuf};
 
@@ -15,6 +16,8 @@ pub enum Desktop {
     Gnome,
     /// KDE: `kioslaverc`.
     Kde,
+    /// macOS: `networksetup`.
+    Macos,
 }
 
 impl Desktop {
@@ -55,10 +58,92 @@ struct Saved {
     /// The Mixed port it points at.
     port: u16,
     /// The mode it was in, as the desktop spells it (`'none'` of
-    /// `gsettings`, `0` of KDE's `ProxyType`).
+    /// `gsettings`, `0` of KDE's `ProxyType`; empty on macOS).
     mode: String,
-    /// The hosts it left alone, as the desktop spells them.
+    /// The hosts it left alone, as the desktop spells them (empty on
+    /// macOS).
     ignore: String,
+    /// macOS: what each network service had.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    services: Vec<Service>,
+}
+
+/// One proxy of a network service on macOS, as `networksetup -get…proxy`
+/// says it.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+struct Proxy {
+    enabled: bool,
+    server: String,
+    port: u16,
+}
+
+impl Proxy {
+    /// `Enabled: Yes`, `Server: host`, `Port: 3128`, a line each.
+    fn parse(text: &str) -> Self {
+        let mut proxy = Self::default();
+        for line in text.lines() {
+            let Some((key, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim();
+            match key.trim() {
+                "Enabled" => proxy.enabled = value == "Yes",
+                "Server" => value.clone_into(&mut proxy.server),
+                "Port" => proxy.port = value.parse().unwrap_or_default(),
+                _ => {}
+            }
+        }
+        proxy
+    }
+}
+
+/// What a network service on macOS had before tabby set its proxies.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Service {
+    name: String,
+    /// HTTP, HTTPS and SOCKS, in the order of [`MAC_PROXIES`].
+    proxies: Vec<Proxy>,
+    bypass: Vec<String>,
+}
+
+/// The proxies of a network service `networksetup` sets: what reads one,
+/// what sets its server (and turns it on), and what turns it off.
+const MAC_PROXIES: [[&str; 3]; 3] = [
+    ["-getwebproxy", "-setwebproxy", "-setwebproxystate"],
+    [
+        "-getsecurewebproxy",
+        "-setsecurewebproxy",
+        "-setsecurewebproxystate",
+    ],
+    [
+        "-getsocksfirewallproxy",
+        "-setsocksfirewallproxy",
+        "-setsocksfirewallproxystate",
+    ],
+];
+
+/// The network services `networksetup -listallnetworkservices` lists, but
+/// the disabled ones (`*` first). The first line says what `*` means.
+fn mac_services(text: &str) -> Vec<String> {
+    text.lines()
+        .skip(1)
+        .map(str::trim)
+        .filter(|name| !name.is_empty() && !name.starts_with('*'))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// The hosts `networksetup -getproxybypassdomains` lists; it says so in a
+/// sentence when there are none.
+fn mac_bypass(text: &str) -> Vec<String> {
+    if text.contains("There aren't any bypass domains") {
+        return vec![];
+    }
+    text.lines()
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Hosts that are not sent through the kernel.
@@ -139,6 +224,7 @@ impl ManagedCore {
             let saved = match desktop {
                 Desktop::Gnome => self.point_gnome(port, before).await?,
                 Desktop::Kde => self.point_kde(port, before).await?,
+                Desktop::Macos => self.point_macos(port, before).await?,
             };
             let text = toml::to_string(&saved).map_err(|err| failed(err.to_string()))?;
             super::files::write_private(&self.proxy_file(), &text)
@@ -150,6 +236,7 @@ impl ManagedCore {
             match saved.desktop {
                 Desktop::Gnome => self.put_back_gnome(&saved).await?,
                 Desktop::Kde => self.put_back_kde(&saved).await?,
+                Desktop::Macos => self.put_back_macos(&saved).await?,
             }
             match fs::remove_file(self.proxy_file()) {
                 Ok(()) => Ok(()),
@@ -206,6 +293,7 @@ impl ManagedCore {
             port,
             mode,
             ignore,
+            services: vec![],
         })
     }
 
@@ -295,6 +383,7 @@ impl ManagedCore {
             port,
             mode,
             ignore,
+            services: vec![],
         })
     }
 
@@ -305,11 +394,105 @@ impl ManagedCore {
         self.kde_notify().await;
         Ok(())
     }
+
+    async fn networksetup(&self, args: Vec<String>) -> Result<String, CoreError> {
+        self.capture("networksetup", args).await
+    }
+
+    /// What every enabled network service has now.
+    async fn read_macos(&self) -> Result<Vec<Service>, CoreError> {
+        let list = self
+            .networksetup(vec!["-listallnetworkservices".to_owned()])
+            .await?;
+        let mut services = vec![];
+        for name in mac_services(&list) {
+            let mut proxies = vec![];
+            for [get, _, _] in MAC_PROXIES {
+                let text = self
+                    .networksetup(vec![get.to_owned(), name.clone()])
+                    .await?;
+                proxies.push(Proxy::parse(&text));
+            }
+            let bypass = self
+                .networksetup(vec!["-getproxybypassdomains".to_owned(), name.clone()])
+                .await?;
+            services.push(Service {
+                bypass: mac_bypass(&bypass),
+                name,
+                proxies,
+            });
+        }
+        Ok(services)
+    }
+
+    /// Every enabled network service gets the kernel for its HTTP, HTTPS
+    /// and SOCKS proxies, the bypass list first: setting a proxy turns it
+    /// on.
+    async fn point_macos(&self, port: u16, before: Option<Saved>) -> Result<Saved, CoreError> {
+        let services = match before {
+            Some(saved) => saved.services,
+            None => self.read_macos().await?,
+        };
+        let number = port.to_string();
+        for service in &services {
+            let mut bypass = vec!["-setproxybypassdomains".to_owned(), service.name.clone()];
+            bypass.extend(BYPASS.iter().map(|host| (*host).to_owned()));
+            self.networksetup(bypass).await?;
+            for [_, set, _] in MAC_PROXIES {
+                self.networksetup(vec![
+                    set.to_owned(),
+                    service.name.clone(),
+                    "127.0.0.1".to_owned(),
+                    number.clone(),
+                ])
+                .await?;
+            }
+        }
+        Ok(Saved {
+            desktop: Desktop::Macos,
+            port,
+            mode: String::new(),
+            ignore: String::new(),
+            services,
+        })
+    }
+
+    /// Each service gets back its bypass list, and its proxies: the server
+    /// of one that was on, off for one that was off (which keeps the
+    /// kernel's address, as GNOME keeps its host).
+    async fn put_back_macos(&self, saved: &Saved) -> Result<(), CoreError> {
+        for service in &saved.services {
+            let mut bypass = vec!["-setproxybypassdomains".to_owned(), service.name.clone()];
+            if service.bypass.is_empty() {
+                bypass.push("Empty".to_owned());
+            } else {
+                bypass.extend(service.bypass.iter().cloned());
+            }
+            self.networksetup(bypass).await?;
+            for ([_, set, state], proxy) in MAC_PROXIES.iter().zip(&service.proxies) {
+                let args = if proxy.enabled {
+                    vec![
+                        (*set).to_owned(),
+                        service.name.clone(),
+                        proxy.server.clone(),
+                        proxy.port.to_string(),
+                    ]
+                } else {
+                    vec![(*state).to_owned(), service.name.clone(), "off".to_owned()]
+                };
+                self.networksetup(args).await?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Arc, Mutex};
+    use std::{
+        process::Output,
+        sync::{Arc, Mutex},
+    };
 
     use super::*;
     use crate::core::testing::{Recorder, answer, core_at, free_port, scratch};
@@ -593,6 +776,148 @@ mod tests {
         *running.lock().unwrap() = false;
 
         assert_eq!(core.system_proxy_dangling().await, Some(7890));
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    const SERVICES: &str = "An asterisk (*) denotes that a network service is disabled.\n\
+        Wi-Fi\n\
+        *Bluetooth PAN\n\
+        USB 10/100/1000 LAN\n";
+
+    /// `networksetup` on a Mac whose Wi-Fi goes through a proxy of the
+    /// office for the web, and whose wired network has none.
+    fn networksetup() -> Arc<Recorder> {
+        Recorder::new(|cmd| {
+            let off = "Enabled: No\nServer: \nPort: 0\nAuthenticated Proxy Enabled: 0\n";
+            match (cmd.args[0].as_str(), cmd.args.get(1).map(String::as_str)) {
+                ("-listallnetworkservices", _) => answer(0, SERVICES),
+                ("-getwebproxy", Some("Wi-Fi")) => answer(
+                    0,
+                    "Enabled: Yes\nServer: proxy.corp\nPort: 3128\nAuthenticated Proxy Enabled: 0\n",
+                ),
+                ("-getproxybypassdomains", Some("Wi-Fi")) => answer(0, "*.corp\nlocalhost\n"),
+                ("-getproxybypassdomains", Some(name)) => answer(
+                    0,
+                    &format!("There aren't any bypass domains set on {name}.\n"),
+                ),
+                (get, _) if get.starts_with("-get") => answer(0, off),
+                _ => answer(0, ""),
+            }
+        })
+    }
+
+    fn mac_core(dir: &std::path::Path, recorder: &Arc<Recorder>) -> ManagedCore {
+        let mut core = core_at(dir, free_port(), recorder, false);
+        core.desktop = Some(Desktop::Macos);
+        core
+    }
+
+    #[test]
+    fn what_networksetup_says_is_read_as_it_lists_it() {
+        assert_eq!(mac_services(SERVICES), ["Wi-Fi", "USB 10/100/1000 LAN"]);
+        assert_eq!(
+            Proxy::parse(
+                "Enabled: Yes\nServer: 10.0.0.1\nPort: 8080\nAuthenticated Proxy Enabled: 0\n"
+            ),
+            Proxy {
+                enabled: true,
+                server: "10.0.0.1".to_owned(),
+                port: 8080
+            }
+        );
+        assert_eq!(
+            Proxy::parse("Enabled: No\nServer: \nPort: 0\n"),
+            Proxy::default()
+        );
+        assert_eq!(
+            mac_bypass("There aren't any bypass domains set on Wi-Fi.\n"),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            mac_bypass("*.local\n169.254/16\n"),
+            ["*.local", "169.254/16"]
+        );
+    }
+
+    #[tokio::test]
+    async fn every_enabled_service_of_a_mac_gets_the_kernel_and_its_own_proxies_back() {
+        let dir = scratch("proxy-macos");
+        let recorder = networksetup();
+        let core = mac_core(&dir, &recorder);
+
+        core.set_system_proxy(true, 7890).await.unwrap();
+
+        let sets: Vec<String> = calls(&recorder, "networksetup")
+            .into_iter()
+            .filter(|call| call.starts_with("-set"))
+            .collect();
+        let bypass = BYPASS.join(" ");
+        assert_eq!(
+            sets,
+            [
+                format!("-setproxybypassdomains Wi-Fi {bypass}"),
+                "-setwebproxy Wi-Fi 127.0.0.1 7890".to_owned(),
+                "-setsecurewebproxy Wi-Fi 127.0.0.1 7890".to_owned(),
+                "-setsocksfirewallproxy Wi-Fi 127.0.0.1 7890".to_owned(),
+                format!("-setproxybypassdomains USB 10/100/1000 LAN {bypass}"),
+                "-setwebproxy USB 10/100/1000 LAN 127.0.0.1 7890".to_owned(),
+                "-setsecurewebproxy USB 10/100/1000 LAN 127.0.0.1 7890".to_owned(),
+                "-setsocksfirewallproxy USB 10/100/1000 LAN 127.0.0.1 7890".to_owned(),
+            ]
+        );
+        // The service names are one argument each, spaces and all.
+        assert!(
+            recorder
+                .calls()
+                .iter()
+                .any(|cmd| cmd.args.get(1).map(String::as_str) == Some("USB 10/100/1000 LAN"))
+        );
+        assert!(core.system_proxy().enabled);
+
+        // A new port: what was there before the first time is kept.
+        core.set_system_proxy(true, 7891).await.unwrap();
+        let before = recorder.calls().len();
+        core.set_system_proxy(false, 7891).await.unwrap();
+
+        let back: Vec<String> = recorder.calls()[before..]
+            .iter()
+            .map(|cmd| cmd.args.join(" "))
+            .collect();
+        assert_eq!(
+            back,
+            [
+                "-setproxybypassdomains Wi-Fi *.corp localhost",
+                "-setwebproxy Wi-Fi proxy.corp 3128",
+                "-setsecurewebproxystate Wi-Fi off",
+                "-setsocksfirewallproxystate Wi-Fi off",
+                "-setproxybypassdomains USB 10/100/1000 LAN Empty",
+                "-setwebproxystate USB 10/100/1000 LAN off",
+                "-setsecurewebproxystate USB 10/100/1000 LAN off",
+                "-setsocksfirewallproxystate USB 10/100/1000 LAN off",
+            ]
+        );
+        assert!(!core.system_proxy().enabled);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_mac_that_refuses_a_change_says_why_and_is_not_marked_on() {
+        let dir = scratch("proxy-macos-refused");
+        let recorder = Recorder::new(|cmd| match cmd.args[0].as_str() {
+            "-listallnetworkservices" => answer(0, SERVICES),
+            set if set.starts_with("-set") => Output {
+                status: answer(14, "").status,
+                stdout: vec![],
+                stderr: b"** Error: authorization failed\n".to_vec(),
+            },
+            _ => answer(0, "Enabled: No\n"),
+        });
+        let core = mac_core(&dir, &recorder);
+
+        let err = core.set_system_proxy(true, 7890).await.unwrap_err();
+
+        assert!(err.to_string().contains("authorization failed"), "{err}");
+        assert!(!core.system_proxy().enabled);
         fs::remove_dir_all(dir).unwrap();
     }
 }

@@ -358,9 +358,12 @@ impl ManagedCore {
             delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
             tun_dropped: AtomicBool::new(false),
             mountinfo: PathBuf::from("/proc/self/mountinfo"),
-            desktop: std::env::var("XDG_CURRENT_DESKTOP")
-                .ok()
-                .and_then(|current| sysproxy::Desktop::detect(&current)),
+            desktop: match Os::current() {
+                Os::Linux => std::env::var("XDG_CURRENT_DESKTOP")
+                    .ok()
+                    .and_then(|current| sysproxy::Desktop::detect(&current)),
+                Os::Macos => Some(sysproxy::Desktop::Macos),
+            },
             unit_dir: directories::BaseDirs::new().map(|dirs| match Os::current() {
                 Os::Linux => dirs.config_dir().join("systemd").join("user"),
                 Os::Macos => dirs.home_dir().join("Library").join("LaunchAgents"),
