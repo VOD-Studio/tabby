@@ -14,8 +14,10 @@
 #
 # usage: scripts/dist.sh [<rust target triple>]   (default: the host's)
 # needs: cargo, cargo-about (cargo install --locked --features cli cargo-about),
-#        curl, sha256sum, gzip, GNU tar, git; gh too with GH_TOKEN set, which
-#        then fetches mihomo's release asset as a signed-in user
+#        curl, sha256sum (or shasum on macOS), gzip, GNU tar (gtar on macOS),
+#        git; gh too with GH_TOKEN set, which then fetches mihomo's release
+#        asset as a signed-in user. Linux and macOS targets are built on a
+#        machine of their own system.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -32,18 +34,51 @@ aarch64-*-linux-*)
     asset=mihomo-linux-arm64-$MIHOMO_TAG.gz
     sum=$MIHOMO_SHA256_ARM64
     ;;
+x86_64-apple-darwin)
+    asset=mihomo-darwin-amd64-v1-$MIHOMO_TAG.gz
+    sum=$MIHOMO_SHA256_DARWIN_AMD64
+    ;;
+aarch64-apple-darwin)
+    asset=mihomo-darwin-arm64-$MIHOMO_TAG.gz
+    sum=$MIHOMO_SHA256_DARWIN_ARM64
+    ;;
 *)
     echo "dist: no mihomo build for $target" >&2
     exit 1
     ;;
 esac
 
-for tool in cargo cargo-about curl sha256sum gzip tar git; do
+for tool in cargo cargo-about curl gzip git; do
     command -v "$tool" >/dev/null || {
         echo "dist: $tool is needed" >&2
         exit 1
     }
 done
+# macOS has shasum, and its tar is bsdtar: GNU tar is gtar there.
+if command -v sha256sum >/dev/null; then
+    sha256() { sha256sum "$@"; }
+elif command -v shasum >/dev/null; then
+    sha256() { shasum -a 256 "$@"; }
+else
+    echo "dist: sha256sum or shasum is needed" >&2
+    exit 1
+fi
+tar=$(command -v gtar || command -v tar || true)
+"${tar:-tar}" --version 2>/dev/null | grep -q 'GNU tar' || {
+    echo "dist: GNU tar is needed (gtar on macOS: brew install gnu-tar)" >&2
+    exit 1
+}
+case $target in
+# The oldest macOS the build runs on; mihomo's own needs 12 too.
+*-apple-darwin) export MACOSX_DEPLOYMENT_TARGET=12.0 ;;
+esac
+
+# Copies file $2 to $3 with mode $1, making its directory (BSD install has
+# no -D).
+put() {
+    mkdir -p "$(dirname "$3")"
+    install -m "$1" "$2" "$3"
+}
 
 version=$(cargo pkgid | sed 's/.*[#@]//')
 name=tabby-$version-$target
@@ -111,7 +146,7 @@ fetch_asset() {
 # Before the build: a download that fails should not cost a build.
 echo "dist: fetching mihomo $MIHOMO_TAG"
 fetch_asset "$asset"
-if ! echo "$sum  $cache/$asset" | sha256sum --check --quiet; then
+if [ "$(sha256 "$cache/$asset" | cut -d' ' -f1)" != "$sum" ]; then
     rm -f "$cache/$asset"
     echo "dist: $asset does not match the sha256 in packaging/mihomo.env" >&2
     exit 1
@@ -126,9 +161,9 @@ cargo build --release --locked --target "$target"
 
 # tabby alone.
 plain=$work/plain/$name
-install -Dm755 "target/$target/release/tabby" "$plain/bin/tabby"
-install -Dm644 README.md "$plain/share/doc/tabby/README.md"
-install -Dm644 LICENSE "$plain/share/licenses/tabby/LICENSE"
+put 755 "target/$target/release/tabby" "$plain/bin/tabby"
+put 644 README.md "$plain/share/doc/tabby/README.md"
+put 644 LICENSE "$plain/share/licenses/tabby/LICENSE"
 cargo about generate --locked --fail --target "$target" \
     --config packaging/about.toml \
     --output-file "$plain/share/licenses/tabby/THIRD-PARTY-LICENSES" \
@@ -142,7 +177,7 @@ cp -a "$plain" "$full"
 install -d "$full/lib/tabby" "$full/share/licenses/tabby/mihomo"
 gzip -dc "$cache/$asset" >"$full/lib/tabby/mihomo"
 chmod 755 "$full/lib/tabby/mihomo"
-tar -xzOf "$cache/$source_name" "mihomo-${MIHOMO_TAG#v}/LICENSE" >"$full/share/licenses/tabby/mihomo/LICENSE"
+"$tar" -xzOf "$cache/$source_name" "mihomo-${MIHOMO_TAG#v}/LICENSE" >"$full/share/licenses/tabby/mihomo/LICENSE"
 cat >"$full/share/licenses/tabby/mihomo/SOURCE" <<EOF
 lib/tabby/mihomo is mihomo $MIHOMO_TAG, unmodified, from the release asset
   $asset
@@ -160,7 +195,7 @@ chmod 644 "$full/share/licenses/tabby/mihomo/"*
 # Packs directory $name of $1 into $2. `gzip -n` keeps the time out of the
 # gzip header.
 pack() {
-    tar --create --directory "$1" \
+    "$tar" --create --directory "$1" \
         --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$epoch" \
         "$name" | gzip -n >"$2"
 }
@@ -168,6 +203,6 @@ pack "$work/plain" "dist/$name.tar.gz"
 pack "$work/full" "dist/$name-with-mihomo.tar.gz"
 cp "$cache/$source_name" "dist/$source_name"
 
-(cd dist && sha256sum -- *.tar.gz >SHA256SUMS)
+(cd dist && sha256 -- *.tar.gz >SHA256SUMS)
 echo "dist: done"
 ls -l dist
