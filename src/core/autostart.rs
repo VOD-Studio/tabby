@@ -275,12 +275,20 @@ mod tests {
     async fn a_kernel_with_a_unit_file_is_started_through_it_not_as_a_new_transient_unit() {
         let dir = scratch("login-launch");
         let port = free_port();
-        crate::core::testing::serve(
-            port,
-            crate::core::testing::Reply::Mihomo,
-            std::time::Duration::from_millis(100),
-        );
-        let recorder = manager(false);
+        // The controller comes up with the unit, not on a timer that a slow
+        // machine outruns: a kernel that already answers is never started.
+        let recorder = Recorder::new(move |cmd| match cmd.args.get(1).map(String::as_str) {
+            Some("start") => {
+                crate::core::testing::serve(
+                    port,
+                    crate::core::testing::Reply::Mihomo,
+                    std::time::Duration::ZERO,
+                );
+                answer(0, "")
+            }
+            Some("is-active") => answer(3, "inactive\n"),
+            _ => answer(0, ""),
+        });
         let core = core_at(&dir, port, &recorder, true);
         let unit = dir.join(format!("units/{}.service", crate::core::testing::UNIT));
         fs::create_dir_all(unit.parent().unwrap()).unwrap();
