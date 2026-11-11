@@ -22,7 +22,7 @@ tmp="$$(mktemp -d)"; trap 'rm -rf "$$tmp"' EXIT; \
 XDG_CONFIG_HOME="$$tmp/config" XDG_STATE_HOME="$$tmp/state" XDG_DATA_HOME="$$tmp/data" $(1)
 endef
 
-.PHONY: help build release run fmt fmt-check lint test check audit install uninstall dist cut-release aur clean
+.PHONY: help build release run fmt fmt-check lint test check audit install uninstall dist cut-release aur brew clean
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "} /^[a-zA-Z_-]+:.*## / {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
@@ -68,6 +68,9 @@ cut-release: ## Gate, bump, CHANGELOG, commit and tag VERSION=x.y.z (no push; th
 
 aur: ## Point packaging/arch/PKGBUILD at the pushed tag of Cargo.toml's version, write .SRCINFO
 	scripts/aur.sh
+
+brew: ## Point packaging/homebrew/tabby-mihomo.rb at the pushed tag of Cargo.toml's version
+	scripts/brew.sh
 
 clean: ## Remove build artifacts
 	$(CARGO) clean
