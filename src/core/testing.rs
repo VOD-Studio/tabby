@@ -114,9 +114,12 @@ pub(crate) fn core_at(
 /// Like [`core_at`], on a machine where `dir` is on a `nosuid` mount.
 pub(crate) fn core_on_nosuid_mount(dir: &Path, port: u16, recorder: &Arc<Recorder>) -> ManagedCore {
     let core = core_at(dir, port, recorder, true);
+    // The kernel's path is resolved before it is looked up: on macOS the
+    // temporary directory is under a link (`/var` is `/private/var`).
+    let real = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_owned());
     let line = format!(
         "40 1 8:1 / {} rw,nosuid,nodev - ext4 /dev/sda1 rw\n",
-        dir.display()
+        real.display()
     );
     fs::write(dir.join("mountinfo"), line).unwrap();
     core
