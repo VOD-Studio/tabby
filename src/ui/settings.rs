@@ -229,7 +229,7 @@ fn value(
         Gate::NeedsMihomo => return vec![Span::styled("需要 mihomo", muted)],
         Gate::SelfManaged => return vec![Span::styled("由你自己管理", muted)],
         Gate::MixedOnly => return vec![Span::styled("托管内核只用 Mixed 端口", muted)],
-        Gate::NeedsSystemd => return vec![Span::styled("需要 systemd", muted)],
+        Gate::NeedsServiceManager => return vec![Span::styled("需要 systemd 或 launchd", muted)],
         Gate::NoDesktopProxy => {
             return vec![Span::styled("当前桌面不支持系统代理", muted)];
         }

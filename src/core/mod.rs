@@ -207,10 +207,10 @@ pub enum CoreError {
     /// kept.
     #[error("{} is gone", .0.display())]
     SourceGone(PathBuf),
-    /// There is no systemd user manager (or home directory) to keep a unit
-    /// in.
-    #[error("the start at login needs the systemd user manager")]
-    NeedsSystemd,
+    /// There is no systemd user manager or launchd GUI domain (or home
+    /// directory) to keep a unit in.
+    #[error("the start at login needs the systemd user manager or launchd")]
+    NeedsServiceManager,
     /// The desktop has no system proxy tabby knows how to set.
     #[error("the desktop has no system proxy tabby can set")]
     NoDesktopProxy,
@@ -300,7 +300,8 @@ pub struct ManagedCore {
     tun_dropped: AtomicBool,
     /// Where the mounts are listed (`/proc/self/mountinfo`).
     mountinfo: PathBuf,
-    /// Where the systemd user manager keeps the units of the user.
+    /// Where the systemd user manager keeps the units of the user (launchd:
+    /// the launch agents).
     unit_dir: Option<PathBuf>,
     /// The desktop whose system proxy tabby can set, if it is one.
     desktop: Option<sysproxy::Desktop>,
@@ -360,8 +361,10 @@ impl ManagedCore {
             desktop: std::env::var("XDG_CURRENT_DESKTOP")
                 .ok()
                 .and_then(|current| sysproxy::Desktop::detect(&current)),
-            unit_dir: directories::BaseDirs::new()
-                .map(|dirs| dirs.config_dir().join("systemd").join("user")),
+            unit_dir: directories::BaseDirs::new().map(|dirs| match Os::current() {
+                Os::Linux => dirs.config_dir().join("systemd").join("user"),
+                Os::Macos => dirs.home_dir().join("Library").join("LaunchAgents"),
+            }),
             os: Os::current(),
             timing: Timing {
                 ready: READY_TIMEOUT,

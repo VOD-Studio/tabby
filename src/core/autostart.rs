@@ -1,5 +1,6 @@
 //! Starting the kernel when the user logs in (plan §9.1): a unit file of
-//! the systemd user manager, which `systemd-run` does not leave behind.
+//! the systemd user manager, which `systemd-run` does not leave behind, or
+//! on macOS a launch agent (plan `2026-11-11-macos.md` §4.3).
 
 use std::{
     fs, io,
@@ -7,6 +8,7 @@ use std::{
 };
 
 use super::{Action, CoreError, ManagedCore, runner::Cmd, supervisor::Mode};
+use crate::os::Os;
 
 /// `arg` as one word of an `ExecStart=` line: in double quotes, with what
 /// systemd reads in them (`\`, `"` and the `%` of its specifiers) escaped.
@@ -20,12 +22,17 @@ fn word(arg: &str) -> String {
 
 impl ManagedCore {
     /// The unit file of the login start, where the user manager looks for
-    /// the units of the user; `None` for an unknown home directory.
-    fn unit_path(&self) -> Option<PathBuf> {
+    /// the units of the user (launchd: its launch agents); `None` for an
+    /// unknown home directory.
+    pub(super) fn unit_path(&self) -> Option<PathBuf> {
+        let extension = match self.os {
+            Os::Linux => "service",
+            Os::Macos => "plist",
+        };
         Some(
             self.unit_dir
                 .as_ref()?
-                .join(format!("{}.service", self.state.unit)),
+                .join(format!("{}.{extension}", self.state.unit)),
         )
     }
 
@@ -35,9 +42,9 @@ impl ManagedCore {
     }
 
     /// Whether the login start can be had: it takes the systemd user
-    /// manager.
+    /// manager, or launchd.
     pub async fn supports_login_start(&self) -> bool {
-        self.unit_dir.is_some() && self.mode().await == Mode::Systemd
+        self.unit_dir.is_some() && matches!(self.mode().await, Mode::Systemd | Mode::Launchd(_))
     }
 
     /// The unit: the kernel as `systemd-run` starts it (plan §5.1), wanted by
@@ -64,11 +71,14 @@ impl ManagedCore {
     /// kernel that is running is left to run.
     pub async fn set_login_start(&self, on: bool) -> Result<(), CoreError> {
         if !self.supports_login_start().await {
-            return Err(CoreError::NeedsSystemd);
+            return Err(CoreError::NeedsServiceManager);
         }
         let Some(path) = self.unit_path() else {
-            return Err(CoreError::NeedsSystemd);
+            return Err(CoreError::NeedsServiceManager);
         };
+        if let Mode::Launchd(uid) = self.mode().await {
+            return self.set_launch_agent(uid, on, &path).await;
+        }
         let unit = self.state.unit.as_str();
         let io = |err: io::Error| CoreError::io("cannot write the unit file", err);
         let systemctl = |verb: &str| Cmd::new("systemctl", ["--user", verb, unit]);
@@ -106,6 +116,31 @@ impl ManagedCore {
             self.exec_checked(Action::Autostart, reload()).await?;
         }
         Ok(())
+    }
+
+    /// The login start of launchd: the job's file among the launch agents.
+    /// On, a kernel running as the job tabby started by itself is started
+    /// again from it (the two have one label); off, the file goes and the
+    /// kernel is left to run.
+    async fn set_launch_agent(&self, uid: u32, on: bool, path: &Path) -> Result<(), CoreError> {
+        let io = |err: io::Error| CoreError::io("cannot write the launch agent", err);
+        if on {
+            let binary = self.binary()?;
+            self.write_config()?;
+            fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(io)?;
+            fs::write(path, self.plist_text(&binary)).map_err(io)?;
+            if self.status().await.running() {
+                self.launchd_start(uid, path, Action::Autostart).await?;
+                self.wait_ready().await?;
+            }
+            Ok(())
+        } else {
+            match fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(err) => Err(io(err)),
+            }
+        }
     }
 }
 
@@ -231,7 +266,7 @@ mod tests {
         assert!(!core.supports_login_start().await);
         let err = core.set_login_start(true).await.unwrap_err();
 
-        assert!(matches!(err, CoreError::NeedsSystemd), "{err:?}");
+        assert!(matches!(err, CoreError::NeedsServiceManager), "{err:?}");
         assert!(!dir.join("units").exists());
         fs::remove_dir_all(dir).unwrap();
     }

@@ -70,7 +70,7 @@ pub fn core_title(err: &CoreError) -> String {
         CoreError::NoSubscription => "找不到这个订阅".to_owned(),
         CoreError::ActiveSubscription => "正在使用的订阅不能删除".to_owned(),
         CoreError::SourceGone(_) => "订阅文件已不存在".to_owned(),
-        CoreError::NeedsSystemd => "登录时启动需要 systemd".to_owned(),
+        CoreError::NeedsServiceManager => "登录时启动需要 systemd 或 launchd".to_owned(),
         CoreError::NoDesktopProxy => "当前桌面不支持系统代理".to_owned(),
         CoreError::AgeKeyNeeded => "订阅已加密，需要 age 密钥".to_owned(),
         CoreError::Age(Fault::NotAKey) => "不是 age 私钥".to_owned(),
@@ -111,7 +111,7 @@ pub fn core_detail(err: &CoreError) -> Vec<String> {
             format!("原文件已不存在：{}", path.display()),
             "沿用已导入的内容".to_owned(),
         ],
-        CoreError::NeedsSystemd => vec!["需要 systemd".to_owned()],
+        CoreError::NeedsServiceManager => vec!["需要 systemd 或 launchd".to_owned()],
         CoreError::NoDesktopProxy => vec!["支持 GNOME、MATE、Cinnamon 和 KDE".to_owned()],
         CoreError::AgeKeyNeeded => vec!["订阅已加密，需要 age 密钥".to_owned()],
         CoreError::Age(Fault::NotAKey) => {

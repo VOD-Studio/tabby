@@ -2145,10 +2145,27 @@ pub enum Gate {
     SelfManaged,
     /// A managed core listens on its Mixed port alone.
     MixedOnly,
-    /// The login start is a unit of the systemd user manager.
-    NeedsSystemd,
+    /// The login start is a unit of the systemd user manager, or a launch
+    /// agent.
+    NeedsServiceManager,
     /// The desktop has no system proxy tabby can set.
     NoDesktopProxy,
+}
+
+impl Gate {
+    /// Why the setting cannot be used, as said when it is activated;
+    /// `None` when it can.
+    fn refusal(self) -> Option<&'static str> {
+        Some(match self {
+            Self::Open => return None,
+            Self::SelfManaged => "内核由你自己管理，tabby 不更新它",
+            Self::MixedOnly => "托管内核只用 Mixed 端口",
+            Self::NeedsMihomo => "需要 mihomo",
+            Self::NoDesktopProxy => "当前桌面不支持系统代理",
+            Self::NeedsServiceManager => "登录时启动需要 systemd 或 launchd",
+            Self::Missing => "内核没有提供这一项",
+        })
+    }
 }
 
 /// A change to the running configuration, sent as `PATCH /configs`.
@@ -3787,7 +3804,7 @@ impl App {
         }
         if setting == Setting::LoginStart && self.login_start.is_some_and(|state| !state.supported)
         {
-            return Gate::NeedsSystemd;
+            return Gate::NeedsServiceManager;
         }
         if setting == Setting::SystemProxy
             && self.system_proxy.is_some_and(|state| !state.supported)
@@ -3872,35 +3889,9 @@ impl App {
             Setting::Port(port) => port.of(configs),
             _ => None,
         };
-        match gate {
-            Gate::Open => {}
-            Gate::SelfManaged => {
-                self.toast(
-                    ToastKind::Error,
-                    "内核由你自己管理，tabby 不更新它".to_owned(),
-                );
-                return;
-            }
-            Gate::MixedOnly => {
-                self.toast(ToastKind::Error, "托管内核只用 Mixed 端口".to_owned());
-                return;
-            }
-            Gate::NeedsMihomo => {
-                self.toast(ToastKind::Error, "需要 mihomo".to_owned());
-                return;
-            }
-            Gate::NoDesktopProxy => {
-                self.toast(ToastKind::Error, "当前桌面不支持系统代理".to_owned());
-                return;
-            }
-            Gate::NeedsSystemd => {
-                self.toast(ToastKind::Error, "登录时启动需要 systemd".to_owned());
-                return;
-            }
-            Gate::Missing => {
-                self.toast(ToastKind::Error, "内核没有提供这一项".to_owned());
-                return;
-            }
+        if let Some(refusal) = gate.refusal() {
+            self.toast(ToastKind::Error, refusal.to_owned());
+            return;
         }
         match (setting, change) {
             (Setting::StopCore, _) => self.ask_stop_core(),
@@ -11738,13 +11729,17 @@ secret = "b-secret"
         assert!(
             screen
                 .lines()
-                .any(|line| line.contains("登录时启动") && line.contains("需要 systemd")),
+                .any(|line| line.contains("登录时启动") && line.contains("需要 systemd 或 launchd")),
             "{screen}"
         );
 
         key_press(&mut app, KeyCode::Enter);
 
-        assert!(toasted(&app, "登录时启动需要 systemd"), "{:?}", app.toasts);
+        assert!(
+            toasted(&app, "登录时启动需要 systemd 或 launchd"),
+            "{:?}",
+            app.toasts
+        );
         assert!(!app.is_changing(Setting::LoginStart));
         assert!(!dir.join("units").exists());
         std::fs::remove_dir_all(dir).unwrap();

@@ -180,14 +180,19 @@ impl ManagedCore {
         .await
     }
 
-    /// Starts the kernel as the job tabby describes in its own directory.
+    /// Starts the kernel as the job tabby describes in its own directory,
+    /// or among the launch agents when it starts at login. The file is
+    /// written anew either way, in case the kernel changed.
     pub(super) async fn launchd_launch(
         &self,
         uid: u32,
         binary: &Path,
         action: Action,
     ) -> Result<(), CoreError> {
-        let path = self.job_path();
+        let path = match self.unit_path() {
+            Some(agent) if agent.exists() => agent,
+            _ => self.job_path(),
+        };
         let io = |err: io::Error| CoreError::io("cannot write the launchd job", err);
         fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(io)?;
         fs::write(&path, self.plist_text(binary)).map_err(io)?;
@@ -435,6 +440,74 @@ mod tests {
             launchctl(&recorder)
                 .iter()
                 .any(|run| run.starts_with("bootout"))
+        );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_login_start_is_a_launch_agent_that_takes_over_the_running_job() {
+        let dir = scratch("launchd-agent");
+        let port = free_port();
+        let recorder = launchd(port, Duration::ZERO, false);
+        let core = mac_core(&dir, port, &recorder);
+        let agent = dir.join(format!("units/{UNIT}.plist"));
+        assert!(core.supports_login_start().await);
+        core.ensure_running(|_| {}).await.unwrap();
+
+        core.set_login_start(true).await.unwrap();
+
+        assert!(core.login_start_enabled());
+        let job = dir.join(format!("core/launchd/{UNIT}.plist"));
+        assert_eq!(
+            fs::read_to_string(&agent).unwrap(),
+            fs::read_to_string(&job).unwrap()
+        );
+        let loads: Vec<String> = launchctl(&recorder)
+            .into_iter()
+            .filter(|run| !run.starts_with("print"))
+            .collect();
+        assert_eq!(
+            loads,
+            [
+                format!("bootstrap gui/501 {}", job.display()),
+                format!("bootout gui/501/{UNIT}"),
+                format!("bootstrap gui/501 {}", agent.display()),
+            ]
+        );
+        // Started again later, it is the agent that is loaded.
+        core.restart().await.unwrap();
+        assert_eq!(
+            launchctl(&recorder).last().unwrap(),
+            &format!("bootstrap gui/501 {}", agent.display())
+        );
+
+        // Off: the file goes, the kernel stays.
+        let before = launchctl(&recorder).len();
+        core.set_login_start(false).await.unwrap();
+        assert!(!agent.exists() && !core.login_start_enabled());
+        assert!(
+            launchctl(&recorder)[before..]
+                .iter()
+                .all(|run| !run.starts_with("bootout"))
+        );
+        assert!(core.alive().await);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn turned_on_while_the_kernel_is_stopped_it_only_writes_the_agent() {
+        let dir = scratch("launchd-agent-off");
+        let recorder = launchd(free_port(), Duration::ZERO, false);
+        let core = mac_core(&dir, free_port(), &recorder);
+
+        core.set_login_start(true).await.unwrap();
+
+        assert!(dir.join(format!("units/{UNIT}.plist")).exists());
+        assert!(dir.join("core/home/config.yaml").exists());
+        assert!(
+            launchctl(&recorder)
+                .iter()
+                .all(|run| run.starts_with("print"))
         );
         fs::remove_dir_all(dir).unwrap();
     }
