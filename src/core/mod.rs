@@ -8,6 +8,7 @@ mod autostart;
 mod encrypted;
 mod files;
 mod install;
+mod launchd;
 mod privilege;
 mod profiles;
 mod runner;

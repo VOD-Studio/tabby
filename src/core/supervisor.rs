@@ -1,5 +1,6 @@
 //! Keeping the kernel running: a transient systemd user unit where there is
-//! a user manager, else a process of its own (plan §5).
+//! a user manager, a launchd job on a Mac with a GUI session (`launchd.rs`),
+//! else a process of its own (plan §5).
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -19,7 +20,7 @@ use crate::os::Os;
 const LOG_LINES: usize = 20;
 
 /// How often a kernel asked to stop is looked at again.
-const STOP_POLL: Duration = Duration::from_millis(100);
+pub(super) const STOP_POLL: Duration = Duration::from_millis(100);
 
 /// A process, as it is told apart from the next one with its number.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +66,8 @@ fn ps_start_time(output: &Output) -> Option<u64> {
 pub enum Mode {
     /// A transient unit of the systemd user manager.
     Systemd,
+    /// A job of launchd in the GUI domain of user `uid` (macOS).
+    Launchd(u32),
     /// A process of its own, in a group of its own, outliving tabby.
     Fallback,
 }
@@ -131,7 +134,14 @@ impl ManagedCore {
 
     /// A user manager is there when its socket is, or when it says it
     /// runs.
+    /// On macOS, launchd is there when the user has a GUI domain.
     async fn detect_mode(&self) -> Mode {
+        if self.os == Os::Macos {
+            return self
+                .launchd_domain()
+                .await
+                .map_or(Mode::Fallback, Mode::Launchd);
+        }
         if let Some(dir) = &self.runtime_dir
             && dir.join("systemd/private").exists()
         {
@@ -166,6 +176,7 @@ impl ManagedCore {
                     Status::parse(&String::from_utf8_lossy(&output.stdout))
                 })
             }
+            Mode::Launchd(uid) => self.launchd_status(uid).await,
             Mode::Fallback => match self.stored_process() {
                 Some(process) if self.is_kernel(process).await => Status::Active,
                 _ => Status::Inactive,
@@ -199,6 +210,7 @@ impl ManagedCore {
                 self.exec_checked(Action::Start, Cmd::new("systemd-run", args))
                     .await
             }
+            Mode::Launchd(uid) => self.launchd_launch(uid, binary, Action::Start).await,
             Mode::Fallback => {
                 let pid = self
                     .spawn_detached(binary)
@@ -235,6 +247,8 @@ impl ManagedCore {
                 .await
             }
             Mode::Systemd => self.launch(binary).await,
+            // The job is described anew, in case the kernel changed.
+            Mode::Launchd(uid) => self.launchd_launch(uid, binary, Action::Restart).await,
             Mode::Fallback => {
                 self.stop().await?;
                 self.launch(binary).await
@@ -257,6 +271,7 @@ impl ManagedCore {
                 )
                 .await
             }
+            Mode::Launchd(uid) => self.launchd_stop(uid).await,
             Mode::Fallback => {
                 let Some(process) = self.stored_process() else {
                     return Ok(());
@@ -311,10 +326,9 @@ impl ManagedCore {
             .is_ok_and(|output| output.status.success())
     }
 
-    /// Starts the kernel as a process of its own: in a group of its own, so
-    /// that a ^C meant for tabby does not reach it, with its output in
-    /// `core.log` (the last one kept as `core.log.1`). Returns its pid.
-    fn spawn_detached(&self, binary: &Path) -> io::Result<u32> {
+    /// `core.log`, new and empty, private; the last one is kept as
+    /// `core.log.1`.
+    pub(super) fn fresh_log(&self) -> io::Result<File> {
         let log = self.paths.log();
         if let Some(dir) = log.parent() {
             fs::create_dir_all(dir)?;
@@ -329,7 +343,14 @@ impl ManagedCore {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
-        let out: File = options.open(&log)?;
+        options.open(&log)
+    }
+
+    /// Starts the kernel as a process of its own: in a group of its own, so
+    /// that a ^C meant for tabby does not reach it, with its output in
+    /// `core.log`. Returns its pid.
+    fn spawn_detached(&self, binary: &Path) -> io::Result<u32> {
+        let out = self.fresh_log()?;
         let err = out.try_clone()?;
         let mut command = Command::new(binary);
         command
@@ -379,7 +400,7 @@ impl ManagedCore {
                     .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
                     .unwrap_or_default()
             }
-            Mode::Fallback => {
+            Mode::Launchd(_) | Mode::Fallback => {
                 let text = fs::read_to_string(self.paths.log()).unwrap_or_default();
                 let lines: Vec<&str> = text.lines().collect();
                 lines[lines.len().saturating_sub(LOG_LINES)..]
