@@ -35,11 +35,25 @@ Enter 选组   t 测速   T 整组测速   s 排序   / 过滤   …   ? 帮助 
 
 ## 安装
 
-**发布包**（Linux x86_64 / aarch64，glibc ≥ 2.35）：从 [Releases](https://github.com/VOD-Studio/tabby/releases) 下载。`-with-mihomo` 包另带一份固定版本的 mihomo。
+**发布包**（Linux x86_64 / aarch64，glibc ≥ 2.35；macOS 12 及以上，Apple Silicon / Intel）：从 [Releases](https://github.com/VOD-Studio/tabby/releases) 下载。`-with-mihomo` 包另带一份固定版本的 mihomo。
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
 tar -xzf tabby-*-x86_64-unknown-linux-gnu-with-mihomo.tar.gz -C ~/.local --strip-components=1
+```
+
+macOS 上浏览器下载的文件带 quarantine 属性，解压前先去掉（或用下面的 Homebrew）：
+
+```sh
+shasum -a 256 --check --ignore-missing SHA256SUMS
+xattr -d com.apple.quarantine tabby-*-aarch64-apple-darwin-with-mihomo.tar.gz
+tar -xzf tabby-*-aarch64-apple-darwin-with-mihomo.tar.gz -C ~/.local --strip-components=1
+```
+
+**Homebrew**（macOS / Linux）：从源码构建，包名 `tabby-mihomo`。不附带内核：tabby 首次启动时下载，或用 `brew install mihomo` 装的那份，由 Homebrew 更新。
+
+```sh
+brew install vod-studio/tabby/tabby-mihomo
 ```
 
 **Arch Linux**：用仓库里的 `packaging/arch/PKGBUILD` 从发布源码构建，包名 `tabby-mihomo`（AUR 上的 `tabby` 是 Tabby 终端，二者都占用 `/usr/bin/tabby`，不能共存）。不附带内核：可另装 `mihomo`，由 pacman 更新。
@@ -48,7 +62,7 @@ tar -xzf tabby-*-x86_64-unknown-linux-gnu-with-mihomo.tar.gz -C ~/.local --strip
 cd packaging/arch && makepkg -si
 ```
 
-**源码**（Rust ≥ 1.95，仅在 Linux 上验证）：
+**源码**（Rust ≥ 1.95，Linux 与 macOS）：
 
 ```sh
 cargo install --path .
@@ -73,7 +87,7 @@ tabby --profile router                             # config.toml 里的 [profile
 
 ## 配置
 
-`$XDG_CONFIG_HOME/tabby/config.toml`（默认 `~/.config/tabby/`）。不存在则用默认值；内容非法时在进入全屏前报错退出并指出出错的键。
+`$XDG_CONFIG_HOME/tabby/config.toml`（默认 `~/.config/tabby/`；macOS 上默认 `~/Library/Application Support/tabby/`，设置了 `XDG_CONFIG_HOME` 时同 Linux）。不存在则用默认值；内容非法时在进入全屏前报错退出并指出出错的键。
 
 ```toml
 default = "local"            # 启动使用的 profile
@@ -128,9 +142,9 @@ binary = "/usr/bin/mihomo"   # 可选，不写则按下面的顺序找
 
 **内核来源**，依次：`[core].binary` → 数据目录里的 `bin/mihomo`（下载的，或由随包内核复制）→ 随包内核 `<前缀>/lib/tabby/mihomo` → `PATH` 里的 `mihomo` → 询问后从 GitHub 下载（校验 sha256）。`binary` 与 `PATH` 里的内核由你自己管理，tabby 不升级。
 
-**数据目录** `$XDG_DATA_HOME/tabby/core/`：内核、`home/config.yaml`、订阅 `profiles/`、`subscriptions.toml`、`settings.toml`、`state.toml`。含敏感信息的文件权限 0600。`config.yaml` 每次从订阅与设置重新生成，不要手改。
+**数据目录** `$XDG_DATA_HOME/tabby/core/`（macOS 默认 `~/Library/Application Support/tabby/core/`）：内核、`home/config.yaml`、订阅 `profiles/`、`subscriptions.toml`、`settings.toml`、`state.toml`。含敏感信息的文件权限 0600。`config.yaml` 每次从订阅与设置重新生成，不要手改。
 
-**进程**：有 systemd 用户实例时作为临时单元 `tabby-mihomo-*` 运行，崩溃自动拉起；否则作为独立进程，日志在 `core.log`，`r` 重启。`q` 只退出 tabby，内核继续运行，设置页“停止内核”才停。
+**进程**：有 systemd 用户实例时作为临时单元 `tabby-mihomo-*` 运行，崩溃自动拉起；macOS 上有图形会话时作为 launchd 任务 `gui/<uid>/tabby-mihomo-*` 运行，同样崩溃自动拉起，日志在 `core.log`；都没有时作为独立进程，日志在 `core.log`，`r` 重启。`q` 只退出 tabby，内核继续运行，设置页“停止内核”才停。
 
 **订阅**（第 8 页）：`a` 导入 URL 或文件，`Enter` 切换，`u` / `U` 更新，`t` 自动更新（默认 24 小时，`i` 改间隔），`e` 改名，`K` 更换 age 私钥，`d` 删除。支持 Clash YAML、分享链接列表、age 加密订阅（X25519）。订阅不会被重新序列化，tabby 只替换自己接管的顶层键（端口、控制器、`secret`、`tun` 等）并追加覆盖块；导入前用 `mihomo -t` 检查。下载方式（直连 / 经托管内核 / 经代理）在设置页切换，网络错误与 5xx 自动重试两次。
 
@@ -138,16 +152,18 @@ binary = "/usr/bin/mihomo"   # 可选，不写则按下面的顺序找
 
 **TUN**：用 `setcap` 授予 `CAP_NET_ADMIN` / `CAP_NET_BIND_SERVICE`，不以 root 运行。先试 `pkexec`，没有图形认证代理时临时退出全屏，在终端里 `sudo setcap`。内核所在分区为 `nosuid` 时无效，会提前报错，请用 `[core].binary` 指向别处。升级内核后能力丢失，需重新授权。
 
-**登录时启动**：写入并 `enable` `~/.config/systemd/user/tabby-mihomo-*.service`，登录后由 systemd 拉起，无需 tabby 在运行。不是开机启动，不执行 `enable-linger`。
+macOS 没有文件能力，TUN 需要 root：授权会把内核改为 root 所有并加上 setuid 位（`chown root:wheel` + `chmod 4755`），先弹系统的管理员密码框，没有图形会话时在终端里 `sudo`。**此后本机任何用户运行这个内核文件都有 root 权限**，请只在自己独用的电脑上开启。外置盘默认 `noowners`，setuid 无效，会提前报错。升级内核同样需要重新授权。
 
-**系统代理**：把桌面代理指向 `127.0.0.1:<Mixed 端口>`，关闭或停止内核时还原。支持 GNOME / MATE / Cinnamon（`gsettings`）与 KDE（`kwriteconfig`）；其他桌面置灰。
+**登录时启动**：写入并 `enable` `~/.config/systemd/user/tabby-mihomo-*.service`，登录后由 systemd 拉起，无需 tabby 在运行。不是开机启动，不执行 `enable-linger`。macOS 上写入 `~/Library/LaunchAgents/tabby-mihomo-*.plist`，系统会提示“已添加后台项目”，可在“系统设置 › 通用 › 登录项”里管理。
+
+**系统代理**：把桌面代理指向 `127.0.0.1:<Mixed 端口>`，关闭或停止内核时还原。支持 GNOME / MATE / Cinnamon（`gsettings`）、KDE（`kwriteconfig`）与 macOS（`networksetup`，设置每个启用的网络服务）；其他桌面置灰。
 
 **已知局限**
 
 - 内核在 tabby 之外退出时，系统代理仍指向已关闭的端口，下次启动会提示，在设置页关闭即可。
 - 不要让托管内核与 FlClash 等其他内核同时开 TUN auto-route，也不要共用 7890。
 - age 私钥明文存放在 `subscriptions.toml`；不支持口令加密和 SSH 密钥。
-- 已验证：systemd 单元、登录单元、订阅导入与更新、age 解密、`gsettings`（内存后端）、`kwriteconfig6`。**未验证**：真实 `pkexec` / `sudo setcap`、TUN 设备与路由、注销再登录、真实 GNOME / KDE 桌面。
+- 已验证：systemd 单元、登录单元、订阅导入与更新、age 解密、`gsettings`（内存后端）、`kwriteconfig6`。**未验证**：真实 `pkexec` / `sudo setcap`、TUN 设备与路由、注销再登录、真实 GNOME / KDE 桌面。macOS 的 launchd、登录项、`networksetup` 与 setuid 授权只有单元测试，尚未在真机上验证。
 
 ## 页面与按键
 
@@ -193,7 +209,7 @@ mihomo 全部功能可用。原版 Clash 只支持通用功能，mihomo 独有�
 
 ## 日志
 
-tabby 自身日志（含 panic）写入 `$XDG_STATE_HOME/tabby/tabby.log`，级别由 `RUST_LOG` 控制，默认 `info`。与“日志”页不同，后者显示内核日志。
+tabby 自身日志（含 panic）写入 `$XDG_STATE_HOME/tabby/tabby.log`（macOS 默认在数据目录 `~/Library/Application Support/tabby/`），级别由 `RUST_LOG` 控制，默认 `info`。与“日志”页不同，后者显示内核日志。
 
 ```sh
 RUST_LOG=tabby=debug tabby
