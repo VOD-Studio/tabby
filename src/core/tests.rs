@@ -280,6 +280,24 @@ async fn without_systemd_the_kernel_is_a_process_that_can_be_found_and_stopped()
     fs::remove_dir_all(dir).unwrap();
 }
 
+/// `core.log` once the `noisy` kernel has written both of its lines: it runs
+/// in the background and gets to them when it does, which on a loaded
+/// machine is not within any set time.
+fn log_once_written(dir: &Path) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let log = fs::read_to_string(dir.join("core/core.log")).unwrap_or_default();
+        if log.contains("started") && log.contains("oops") {
+            return log;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the log stays at {log:?}"
+        );
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
 #[tokio::test]
 async fn a_second_launch_keeps_the_previous_log_and_the_log_tail_is_the_current_one() {
     let dir = scratch("log");
@@ -296,10 +314,9 @@ async fn a_second_launch_keeps_the_previous_log_and_the_log_tail_is_the_current_
     core.binary = Some(binary.clone());
 
     core.launch(&binary).await.unwrap();
-    thread::sleep(Duration::from_millis(300));
-    let first = fs::read_to_string(dir.join("core/core.log")).unwrap();
+    let first = log_once_written(&dir);
     core.launch(&binary).await.unwrap();
-    thread::sleep(Duration::from_millis(300));
+    log_once_written(&dir);
 
     assert_eq!(
         fs::read_to_string(dir.join("core/core.log.1")).unwrap(),
