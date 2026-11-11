@@ -1,10 +1,11 @@
 # Publishes the GitHub release of every pushed v* tag (made by
 # `make cut-release`, scripts/release.sh): the gate (ci.yml) on the tagged
-# commit, `make dist` on native x86_64 and aarch64 runners, then one job that
-# checks what the builds uploaded, writes SHA256SUMS, attests the tabby
-# archives (`gh attestation verify`) and creates the release with the tag's
-# CHANGELOG.md section. Only that job can write. No cache is restored by the
-# builds: a poisoned cache must not reach a release.
+# commit, `make dist` on native x86_64 and aarch64 runners of Linux and
+# macOS, then one job that checks what the builds uploaded, writes
+# SHA256SUMS, attests the tabby archives (`gh attestation verify`) and
+# creates the release with the tag's CHANGELOG.md section. Only that job can
+# write. No cache is restored by the builds: a poisoned cache must not reach
+# a release.
 name: Release
 
 on:
@@ -43,6 +44,12 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
+          # macOS 12 and later (MACOSX_DEPLOYMENT_TARGET in scripts/dist.sh),
+          # whatever the image; its GNU tar is `gtar`.
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
