@@ -355,8 +355,10 @@ pub(crate) fn core_downloading(
     let mut core = core_in(dir, port, recorder, true, false);
     core.release_api = release_api.to_owned();
     core.target = Target {
+        os: crate::os::Os::Linux,
         arch: "x86_64".to_owned(),
-        cpuinfo: String::new(),
+        flags: vec![],
+        translated: false,
     };
     core
 }

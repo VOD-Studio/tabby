@@ -14,7 +14,11 @@ use flate2::read::GzDecoder;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use super::{Action, CoreError, ManagedCore, Probe, Step, runner::Cmd};
+use super::{
+    Action, CoreError, ManagedCore, Probe, Step,
+    runner::{Cmd, Runner},
+};
+use crate::os::Os;
 
 /// Where the releases of the kernel are looked up.
 pub const API_BASE: &str = "https://api.github.com";
@@ -105,20 +109,14 @@ fn copy_in(shipped: &Path, kept: &Path) -> io::Result<()> {
     result
 }
 
-/// The x86-64 microarchitecture level the CPU in `cpuinfo` (the text of
-/// `/proc/cpuinfo`) supports: 3, 2, or 1.
-fn amd64_level(cpuinfo: &str) -> u8 {
+/// The x86-64 microarchitecture level a CPU with `flags` (named as
+/// `/proc/cpuinfo` names them) supports: 3, 2, or 1.
+fn amd64_level(flags: &[String]) -> u8 {
     const V3: [&str; 8] = [
         "avx2", "bmi1", "bmi2", "fma", "movbe", "abm", "f16c", "xsave",
     ];
     const V2: [&str; 4] = ["sse4_2", "popcnt", "ssse3", "cx16"];
-    let flags: Vec<&str> = cpuinfo
-        .lines()
-        .find(|line| line.starts_with("flags"))
-        .and_then(|line| line.split_once(':'))
-        .map(|(_, flags)| flags.split_whitespace().collect())
-        .unwrap_or_default();
-    let has = |needed: &[&str]| needed.iter().all(|flag| flags.contains(flag));
+    let has = |needed: &[&str]| needed.iter().all(|flag| flags.iter().any(|f| f == flag));
     if has(&V2) && has(&V3) {
         3
     } else if has(&V2) {
@@ -128,32 +126,105 @@ fn amd64_level(cpuinfo: &str) -> u8 {
     }
 }
 
-/// What the machine is: its architecture as Rust names it, and its CPU as
-/// `/proc/cpuinfo` describes it.
+/// The CPU flags of `cpuinfo`, the text of `/proc/cpuinfo`.
+fn linux_flags(cpuinfo: &str) -> Vec<String> {
+    cpuinfo
+        .lines()
+        .find(|line| line.starts_with("flags"))
+        .and_then(|line| line.split_once(':'))
+        .map(|(_, flags)| flags.split_whitespace().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// The CPU flags of what `sysctl -n machdep.cpu.features
+/// machdep.cpu.leaf7_features machdep.cpu.extfeatures` prints on an Intel
+/// Mac (`SSE4.2 … AVX2 BMI1 … LZCNT`), named as `/proc/cpuinfo` names them.
+fn macos_flags(sysctl: &str) -> Vec<String> {
+    sysctl
+        .split_whitespace()
+        .map(|flag| match flag.to_ascii_lowercase().replace('.', "_") {
+            // Linux counts LZCNT under ABM.
+            flag if flag == "lzcnt" => "abm".to_owned(),
+            flag => flag,
+        })
+        .collect()
+}
+
+/// What the machine is: its system, its architecture as Rust names it, and
+/// its CPU.
 #[derive(Debug, Clone)]
 pub struct Target {
+    pub os: Os,
     pub arch: String,
-    pub cpuinfo: String,
+    /// The CPU's flags, as `/proc/cpuinfo` names them.
+    pub flags: Vec<String>,
+    /// tabby is an x86-64 build run by Rosetta on an Apple Silicon Mac,
+    /// which runs the arm64 kernel natively.
+    pub translated: bool,
 }
 
 impl Target {
-    pub fn current() -> Self {
+    /// This machine. On macOS `sysctl` (through `runner`) says what
+    /// `/proc/cpuinfo` says on Linux.
+    pub fn current(os: Os, runner: &dyn Runner) -> Self {
+        Self::of(os, std::env::consts::ARCH, runner)
+    }
+
+    /// A machine of `arch` running `os`, its CPU found out through `runner`.
+    fn of(os: Os, arch: &str, runner: &dyn Runner) -> Self {
+        let arch = arch.to_owned();
+        let sysctl = |keys: &[&str]| {
+            let mut args = vec!["-n"];
+            args.extend(keys);
+            runner
+                .run(&Cmd::new("sysctl", args))
+                .ok()
+                .filter(|output| output.status.success())
+                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
+                .unwrap_or_default()
+        };
+        let (flags, translated) = match os {
+            Os::Linux => (
+                linux_flags(&fs::read_to_string("/proc/cpuinfo").unwrap_or_default()),
+                false,
+            ),
+            Os::Macos if arch == "x86_64" => (
+                macos_flags(&sysctl(&[
+                    "machdep.cpu.features",
+                    "machdep.cpu.leaf7_features",
+                    "machdep.cpu.extfeatures",
+                ])),
+                sysctl(&["sysctl.proc_translated"]).trim() == "1",
+            ),
+            Os::Macos => (vec![], false),
+        };
         Self {
-            arch: std::env::consts::ARCH.to_owned(),
-            cpuinfo: fs::read_to_string("/proc/cpuinfo").unwrap_or_default(),
+            os,
+            arch,
+            flags,
+            translated,
         }
     }
 
     /// The file names that hold the kernel for this machine in release
     /// `tag`, best first. The `amd64-compatible` build is left out: the
-    /// build script says its name goes away.
+    /// build script says its name goes away. So are the darwin builds made
+    /// with an older Go (`-go120`, …), for systems older than tabby's.
     fn asset_names(&self, tag: &str) -> Vec<String> {
-        match self.arch.as_str() {
-            "x86_64" => (1..=amd64_level(&self.cpuinfo))
+        let os = match self.os {
+            Os::Linux => "linux",
+            Os::Macos => "darwin",
+        };
+        let arch = match self.arch.as_str() {
+            "x86_64" if self.translated => "aarch64",
+            arch => arch,
+        };
+        match arch {
+            "x86_64" => (1..=amd64_level(&self.flags))
                 .rev()
-                .map(|level| format!("mihomo-linux-amd64-v{level}-{tag}.gz"))
+                .map(|level| format!("mihomo-{os}-amd64-v{level}-{tag}.gz"))
                 .collect(),
-            "aarch64" => vec![format!("mihomo-linux-arm64-{tag}.gz")],
+            "aarch64" => vec![format!("mihomo-{os}-arm64-{tag}.gz")],
             _ => vec![],
         }
     }
@@ -468,21 +539,25 @@ mod tests {
         format!("processor : 0\nmodel name : x\nflags\t\t: fpu {flags}\n")
     }
 
+    fn level(cpuinfo: &str) -> u8 {
+        amd64_level(&linux_flags(cpuinfo))
+    }
+
     const V2: &str = "sse4_2 popcnt ssse3 cx16";
     const V3: &str = "avx2 bmi1 bmi2 fma movbe abm f16c xsave";
 
     #[test]
     fn the_cpu_level_needs_every_flag_of_its_level() {
-        assert_eq!(amd64_level(&cpu(&format!("{V2} {V3}"))), 3);
-        assert_eq!(amd64_level(&cpu(V2)), 2);
+        assert_eq!(level(&cpu(&format!("{V2} {V3}"))), 3);
+        assert_eq!(level(&cpu(V2)), 2);
         // One flag short of v3 is v2; one short of v2 is v1.
         let almost_v3 = V3.replace("movbe", "");
-        assert_eq!(amd64_level(&cpu(&format!("{V2} {almost_v3}"))), 2);
+        assert_eq!(level(&cpu(&format!("{V2} {almost_v3}"))), 2);
         let almost_v2 = V2.replace("cx16", "");
-        assert_eq!(amd64_level(&cpu(&format!("{almost_v2} {V3}"))), 1);
-        assert_eq!(amd64_level(""), 1);
+        assert_eq!(level(&cpu(&format!("{almost_v2} {V3}"))), 1);
+        assert_eq!(level(""), 1);
         // A flag in another line is not a flag of the CPU.
-        assert_eq!(amd64_level(&format!("model name : {V2}\n")), 1);
+        assert_eq!(level(&format!("model name : {V2}\n")), 1);
     }
 
     fn release(names: &[&str]) -> Release {
@@ -511,8 +586,10 @@ mod tests {
 
     fn chosen(arch: &str, flags: &str, names: &[&str]) -> Result<String, CoreError> {
         let target = Target {
+            os: Os::Linux,
             arch: arch.to_owned(),
-            cpuinfo: cpu(flags),
+            flags: linux_flags(&cpu(flags)),
+            translated: false,
         };
         choose(&release(names), &target).map(|asset| asset.name.clone())
     }
@@ -554,6 +631,97 @@ mod tests {
         }
     }
 
+    /// The darwin builds of mihomo v1.19.33, as its release lists them
+    /// (with the tag shortened), and a Linux one.
+    const DARWIN: [&str; 13] = [
+        "mihomo-darwin-amd64-compatible-v1.2.3.gz",
+        "mihomo-darwin-amd64-v1-go120-v1.2.3.gz",
+        "mihomo-darwin-amd64-v1-go124-v1.2.3.gz",
+        "mihomo-darwin-amd64-v1-v1.2.3.gz",
+        "mihomo-darwin-amd64-v1.2.3.gz",
+        "mihomo-darwin-amd64-v2-go124-v1.2.3.gz",
+        "mihomo-darwin-amd64-v2-v1.2.3.gz",
+        "mihomo-darwin-amd64-v3-go124-v1.2.3.gz",
+        "mihomo-darwin-amd64-v3-v1.2.3.gz",
+        "mihomo-darwin-arm64-go124-v1.2.3.gz",
+        "mihomo-darwin-arm64-v1.2.3.gz",
+        "mihomo-linux-amd64-v3-v1.2.3.gz",
+        "mihomo-linux-arm64-v1.2.3.gz",
+    ];
+
+    /// What `sysctl` prints on a 2019 Intel Mac (an i9-9880H), shortened.
+    const SYSCTL_V3: &str = "FPU VME SSE SSE2 SSE3 SSSE3 FMA CX16 SSE4.1 SSE4.2 MOVBE POPCNT XSAVE OSXSAVE AVX1.0 F16C\n\
+        BMI1 AVX2 SMEP BMI2 ERMS\n\
+        SYSCALL XD 1GBPAGE EM64T LAHF LZCNT PREFETCHW RDTSCP\n";
+
+    /// A Mac answering `sysctl` with `cpu` for the CPU and `translated`
+    /// for Rosetta; Apple Silicon has no `machdep.cpu.features`.
+    fn mac(cpu: Option<&'static str>, translated: Option<&'static str>) -> Arc<Recorder> {
+        Recorder::new(move |cmd| {
+            let said = match cmd.args.get(1).map(String::as_str) {
+                Some("machdep.cpu.features") => cpu,
+                Some("sysctl.proc_translated") => translated,
+                _ => None,
+            };
+            said.map_or_else(|| answer(1, ""), |text| answer(0, text))
+        })
+    }
+
+    #[test]
+    fn the_cpu_flags_of_an_intel_mac_are_read_with_their_linux_names() {
+        let flags = macos_flags(SYSCTL_V3);
+        assert_eq!(amd64_level(&flags), 3);
+        assert!(flags.contains(&"sse4_2".to_owned()) && flags.contains(&"abm".to_owned()));
+        // Without LZCNT (named ABM on Linux) it is not v3.
+        assert_eq!(
+            amd64_level(&macos_flags(&SYSCTL_V3.replace("LZCNT", ""))),
+            2
+        );
+        assert_eq!(amd64_level(&macos_flags("")), 1);
+    }
+
+    #[test]
+    fn a_mac_gets_the_darwin_build_of_its_cpu_and_rosetta_the_native_one() {
+        let target = |arch: &str, flags: &str, translated| Target {
+            os: Os::Macos,
+            arch: arch.to_owned(),
+            flags: macos_flags(flags),
+            translated,
+        };
+        let pick = |target: &Target| choose(&release(&DARWIN), target).unwrap().name.clone();
+        assert_eq!(
+            pick(&target("x86_64", SYSCTL_V3, false)),
+            "mihomo-darwin-amd64-v3-v1.2.3.gz"
+        );
+        assert_eq!(
+            pick(&target("x86_64", "", false)),
+            "mihomo-darwin-amd64-v1-v1.2.3.gz"
+        );
+        assert_eq!(
+            pick(&target("aarch64", "", false)),
+            "mihomo-darwin-arm64-v1.2.3.gz"
+        );
+        assert_eq!(
+            pick(&target("x86_64", SYSCTL_V3, true)),
+            "mihomo-darwin-arm64-v1.2.3.gz"
+        );
+    }
+
+    #[test]
+    fn a_mac_is_described_by_what_sysctl_says() {
+        let rosetta = Target::of(Os::Macos, "x86_64", &mac(Some(SYSCTL_V3), Some("1\n")));
+        assert_eq!(amd64_level(&rosetta.flags), 3);
+        assert!(rosetta.translated);
+        // An Intel Mac has no `sysctl.proc_translated`.
+        let intel = Target::of(Os::Macos, "x86_64", &mac(Some(SYSCTL_V3), None));
+        assert!(!intel.translated);
+        // On Apple Silicon there is nothing to ask.
+        let recorder = mac(None, None);
+        let arm = Target::of(Os::Macos, "aarch64", &recorder);
+        assert!(arm.flags.is_empty() && !arm.translated);
+        assert_eq!(recorder.runs("sysctl"), Vec::<String>::new());
+    }
+
     #[test]
     fn the_version_is_the_word_that_looks_like_one() {
         assert_eq!(
@@ -589,8 +757,10 @@ mod tests {
         let mut core = testing::core_without_binary(dir, free_port(), &recorder);
         core.release_api = server.uri();
         core.target = Target {
+            os: Os::Linux,
             arch: "x86_64".to_owned(),
-            cpuinfo: String::new(),
+            flags: vec![],
+            translated: false,
         };
         (core, recorder)
     }

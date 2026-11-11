@@ -337,6 +337,7 @@ impl ManagedCore {
             &format!("http://127.0.0.1:{}", state.port),
             Some(&state.secret),
         )?;
+        let target = Target::current(Os::current(), &*runner);
         Ok(Self {
             paths,
             binary,
@@ -349,7 +350,7 @@ impl ManagedCore {
             runtime_dir,
             mode: OnceCell::new(),
             release_api: install::API_BASE.to_owned(),
-            target: Target::current(),
+            target,
             lock: tokio::sync::Mutex::new(()),
             http: profiles::subscription_http(None).wrap_err("cannot build HTTP client")?,
             delay_url: crate::config::DEFAULT_DELAY_URL.to_owned(),
