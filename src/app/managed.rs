@@ -13,6 +13,7 @@ use crate::{
         CoreError, DownloadSettings, Graphical, ManagedCore, Persist, Release, Route, Step,
         SystemProxy, Upgrade, proxy_url, shown_proxy,
     },
+    os::Os,
     ui::text::core_reason,
 };
 
@@ -355,8 +356,12 @@ impl App {
             self.toast(
                 ToastKind::Error,
                 format!(
-                    "内核所在分区（{}）以 nosuid 挂载，无法授权，请在 [core].binary 指定其他位置",
-                    mount.display()
+                    "内核所在分区（{}）以 {} 挂载，无法授权，请在 [core].binary 指定其他位置",
+                    mount.display(),
+                    match core.os() {
+                        Os::Linux => "nosuid",
+                        Os::Macos => "nosuid 或 noowners",
+                    }
                 ),
             );
             return;
@@ -364,7 +369,7 @@ impl App {
         self.pending = Some(if authorized {
             Confirm::Change(change)
         } else {
-            Confirm::AuthorizeTun
+            Confirm::AuthorizeTun(core.os())
         });
         self.overlay = Some(Overlay::Confirm);
         self.dirty = true;

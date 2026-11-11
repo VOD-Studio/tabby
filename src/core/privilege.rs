@@ -1,6 +1,7 @@
 //! What TUN needs of the kernel (plan §8): permission to manage the
 //! network, which a file capability on the binary gives without a process
-//! that stays root.
+//! that stays root. macOS has no file capabilities: the kernel is made
+//! setuid root instead (plan `2026-11-11-macos.md` §6).
 
 use std::{
     fs,
@@ -11,7 +12,9 @@ use std::{
 use super::{
     Action, CoreError, ManagedCore, Persist,
     runner::{Cmd, Runner},
+    supervisor::Mode,
 };
+use crate::os::Os;
 
 /// The capabilities the kernel is given: to set up the device and routes,
 /// and to bind the ports below 1024 a DNS listener may want.
@@ -32,28 +35,79 @@ pub enum Graphical {
     NeedsTerminal,
 }
 
-/// The command that gives `binary` its capabilities, through `pkexec`.
-fn graphical_command(binary: &Path) -> Cmd {
-    Cmd::new(
-        "pkexec",
-        [
-            SETCAP.to_owned(),
-            CAPABILITIES.to_owned(),
-            binary.to_string_lossy().into_owned(),
-        ],
-    )
+/// What makes the kernel setuid root on macOS, `$1` being the kernel.
+const SETUID: &str = "/usr/sbin/chown root:wheel \"$1\" && /bin/chmod 4755 \"$1\"";
+
+/// The command that gives `binary` its capabilities, through `pkexec`; on
+/// macOS the one that makes it setuid root, through the dialog that asks
+/// for an administrator's password. The path reaches the script as an
+/// argument, quoted by `osascript`, never as part of its text.
+fn graphical_command(os: Os, binary: &Path) -> Cmd {
+    let path = binary.to_string_lossy().into_owned();
+    if os == Os::Macos {
+        return Cmd::new(
+            "osascript",
+            [
+                "-e".to_owned(),
+                "on run argv".to_owned(),
+                "-e".to_owned(),
+                "set kernel to quoted form of item 1 of argv".to_owned(),
+                "-e".to_owned(),
+                "do shell script \"/usr/sbin/chown root:wheel \" & kernel & \" && /bin/chmod 4755 \" & kernel with administrator privileges".to_owned(),
+                "-e".to_owned(),
+                "end run".to_owned(),
+                path,
+            ],
+        );
+    }
+    Cmd::new("pkexec", [SETCAP.to_owned(), CAPABILITIES.to_owned(), path])
 }
 
 /// The same through `sudo`, which asks on the terminal.
-fn terminal_command(binary: &Path) -> Cmd {
-    Cmd::new(
-        "sudo",
-        [
-            "setcap".to_owned(),
-            CAPABILITIES.to_owned(),
-            binary.to_string_lossy().into_owned(),
-        ],
-    )
+fn terminal_command(os: Os, binary: &Path) -> Cmd {
+    let path = binary.to_string_lossy().into_owned();
+    if os == Os::Macos {
+        return Cmd::new(
+            "sudo",
+            [
+                "/bin/sh".to_owned(),
+                "-c".to_owned(),
+                SETUID.to_owned(),
+                "tabby".to_owned(),
+                path,
+            ],
+        );
+    }
+    Cmd::new("sudo", ["setcap".to_owned(), CAPABILITIES.to_owned(), path])
+}
+
+/// Whether a file of owner `uid` and `mode` runs with root's rights.
+fn is_setuid_root(uid: u32, mode: u32) -> bool {
+    uid == 0 && mode & 0o4000 != 0
+}
+
+/// Whether `binary` (or the file it links to) runs with root's rights.
+fn setuid_root(binary: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let real = fs::canonicalize(binary).unwrap_or_else(|_| binary.to_owned());
+        fs::metadata(real).is_ok_and(|meta| is_setuid_root(meta.uid(), meta.mode()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = binary;
+        false
+    }
+}
+
+/// Whether `binary` may set up a TUN on `os`: `getcap` names the
+/// capability (Linux), or it is setuid root (macOS).
+fn may_manage_network(os: Os, runner: &dyn Runner, binary: &Path) -> bool {
+    match os {
+        Os::Linux => has_capability(runner, binary),
+        Os::Macos => setuid_root(binary),
+    }
 }
 
 /// Whether `getcap` says `binary` may manage the network.
@@ -89,17 +143,42 @@ fn unescape(text: &str) -> String {
 
 /// The mount point holding `path`, when it is mounted `nosuid` (as
 /// `mountinfo`, the text of `/proc/self/mountinfo`, tells), where a file
-/// capability has no effect. The innermost mount counts; of two at the
-/// same place the later one, which is on top.
+/// capability has no effect.
 fn nosuid_in(mountinfo: &str, path: &Path) -> Option<PathBuf> {
-    let mut best: Option<(PathBuf, bool)> = None;
-    for line in mountinfo.lines() {
+    let mounts = mountinfo.lines().filter_map(|line| {
         let mut fields = line.split(' ');
         // Field 5 is the mount point, field 6 the options of this mount.
         let (Some(mount_point), Some(options)) = (fields.nth(4), fields.next()) else {
-            continue;
+            return None;
         };
-        let mount_point = PathBuf::from(unescape(mount_point));
+        let nosuid = options.split(',').any(|option| option == "nosuid");
+        Some((PathBuf::from(unescape(mount_point)), nosuid))
+    });
+    refusing(mounts, path)
+}
+
+/// The same from what `mount` prints on macOS (`/dev/disk4s1 on
+/// /Volumes/My Disk (apfs, local, nosuid, noowners)`), where a volume that
+/// ignores owners (an external disk, by default) ignores setuid too.
+fn mac_nosuid_in(mount: &str, path: &Path) -> Option<PathBuf> {
+    let mounts = mount.lines().filter_map(|line| {
+        let (_, rest) = line.split_once(" on ")?;
+        let (mount_point, options) = rest.rsplit_once(" (")?;
+        let nosuid = options
+            .trim_end_matches(')')
+            .split(',')
+            .any(|option| matches!(option.trim(), "nosuid" | "noowners"));
+        Some((PathBuf::from(mount_point), nosuid))
+    });
+    refusing(mounts, path)
+}
+
+/// Of `mounts` (each a mount point, and whether it refuses setuid), the
+/// one holding `path`, when it refuses. The innermost mount counts; of two
+/// at the same place the later one, which is on top.
+fn refusing(mounts: impl Iterator<Item = (PathBuf, bool)>, path: &Path) -> Option<PathBuf> {
+    let mut best: Option<(PathBuf, bool)> = None;
+    for (mount_point, nosuid) in mounts {
         if !path.starts_with(&mount_point) {
             continue;
         }
@@ -107,7 +186,6 @@ fn nosuid_in(mountinfo: &str, path: &Path) -> Option<PathBuf> {
             .as_ref()
             .is_none_or(|(held, _)| mount_point.components().count() >= held.components().count());
         if deeper {
-            let nosuid = options.split(',').any(|option| option == "nosuid");
             best = Some((mount_point, nosuid));
         }
     }
@@ -115,50 +193,68 @@ fn nosuid_in(mountinfo: &str, path: &Path) -> Option<PathBuf> {
 }
 
 impl ManagedCore {
-    /// Whether the kernel has the capabilities TUN needs. A machine without
-    /// `getcap` has none that can be seen.
+    /// Whether the kernel has the capabilities TUN needs (on macOS: is
+    /// setuid root). A machine without `getcap` has none that can be seen.
     pub async fn tun_authorized(&self) -> bool {
         let Ok(binary) = self.binary() else {
             return false;
         };
-        let runner = Arc::clone(&self.runner);
-        tokio::task::spawn_blocking(move || has_capability(&*runner, &binary))
+        let (os, runner) = (self.os, Arc::clone(&self.runner));
+        tokio::task::spawn_blocking(move || may_manage_network(os, &*runner, &binary))
             .await
             .unwrap_or(false)
     }
 
     /// The mount point the kernel is on when it is mounted `nosuid`: a
-    /// capability set there does nothing, so asking for one is no use.
+    /// capability set there does nothing, so asking for one is no use. On
+    /// macOS `mount` says (a moment's work: it reads the kernel's table).
     pub fn nosuid_mount(&self) -> Option<PathBuf> {
         let binary = self.binary().ok()?;
         let binary = fs::canonicalize(&binary).unwrap_or(binary);
-        let mountinfo = fs::read_to_string(&self.mountinfo).ok()?;
-        nosuid_in(&mountinfo, &binary)
+        match self.os {
+            Os::Linux => nosuid_in(&fs::read_to_string(&self.mountinfo).ok()?, &binary),
+            Os::Macos => {
+                let output = self.runner.run(&Cmd::new("mount", [] as [&str; 0])).ok()?;
+                mac_nosuid_in(&String::from_utf8_lossy(&output.stdout), &binary)
+            }
+        }
     }
 
     /// Asks for the capabilities through `pkexec`: a dialog of the desktop
     /// to answer. 126 is the user saying no, and 127 that there is no one to
     /// ask.
+    ///
+    /// On macOS the dialog takes a GUI session (launchd has one for the
+    /// user), and saying no is the script error -128.
     pub async fn authorize_graphical(&self) -> Result<Graphical, CoreError> {
         let binary = self.binary()?;
         let failed = |message: String| CoreError::Command {
             action: Action::Authorize,
             message,
         };
-        let output = match self.exec(graphical_command(&binary)).await {
+        if self.os == Os::Macos && !matches!(self.mode().await, Mode::Launchd(_)) {
+            return Ok(Graphical::NeedsTerminal);
+        }
+        let output = match self.exec(graphical_command(self.os, &binary)).await {
             Ok(output) => output,
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
                 return Ok(Graphical::NeedsTerminal);
             }
             Err(err) => return Err(failed(err.to_string())),
         };
+        let said = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        if self.os == Os::Macos {
+            return match output.status.code() {
+                Some(0) => Ok(Graphical::Done),
+                _ if said.contains("(-128)") => Ok(Graphical::Cancelled),
+                _ => Err(failed(said)),
+            };
+        }
         match output.status.code() {
             Some(0) => Ok(Graphical::Done),
             Some(126) => Ok(Graphical::Cancelled),
             Some(127) => Ok(Graphical::NeedsTerminal),
-            _ => Err(failed(
-                String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            )),
+            _ => Err(failed(said)),
         }
     }
 
@@ -172,7 +268,8 @@ impl ManagedCore {
             action: Action::Authorize,
             message,
         };
-        tokio::task::spawn_blocking(move || runner.run_interactive(&terminal_command(&binary)))
+        let os = self.os;
+        tokio::task::spawn_blocking(move || runner.run_interactive(&terminal_command(os, &binary)))
             .await
             .map_err(|err| failed(err.to_string()))?
             .map(|status| status.success())
@@ -185,7 +282,7 @@ impl ManagedCore {
         if !self.tun_authorized().await {
             return Err(CoreError::Command {
                 action: Action::Authorize,
-                message: "the kernel has no capability after setcap".to_owned(),
+                message: "the kernel is not authorized after it was asked".to_owned(),
             });
         }
         self.restart().await
@@ -202,7 +299,9 @@ impl ManagedCore {
         let Ok(binary) = self.binary() else {
             return;
         };
-        if !has_capability(&*self.runner, &binary) && self.persist(Persist::Tun(false)).is_ok() {
+        if !may_manage_network(self.os, &*self.runner, &binary)
+            && self.persist(Persist::Tun(false)).is_ok()
+        {
             self.tun_dropped.store(true, Ordering::SeqCst);
         }
     }
@@ -232,7 +331,7 @@ mod tests {
     fn the_commands_ask_for_exactly_the_two_capabilities_on_the_kernel_alone() {
         let kernel = Path::new("/home/u/.local/share/tabby/core/bin/mihomo");
         assert_eq!(
-            graphical_command(kernel),
+            graphical_command(Os::Linux, kernel),
             Cmd::new(
                 "pkexec",
                 [
@@ -243,7 +342,7 @@ mod tests {
             )
         );
         assert_eq!(
-            terminal_command(kernel),
+            terminal_command(Os::Linux, kernel),
             Cmd::new(
                 "sudo",
                 [
@@ -442,6 +541,138 @@ mod tests {
         // A TUN that was off is not a TUN that was dropped.
         core.write_config().unwrap();
         assert!(!core.take_tun_dropped());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn on_macos_the_kernel_is_made_setuid_root_with_its_path_kept_out_of_the_script() {
+        let kernel =
+            Path::new("/Users/u/Library/Application Support/tabby/core/bin/mihomo\"; rm -rf ~");
+        let path = kernel.to_string_lossy().into_owned();
+        let graphical = graphical_command(Os::Macos, kernel);
+        assert_eq!(graphical.program, "osascript");
+        assert_eq!(graphical.args.last(), Some(&path));
+        let script: Vec<&String> = graphical.args[..graphical.args.len() - 1]
+            .iter()
+            .filter(|arg| *arg != "-e")
+            .collect();
+        assert!(
+            script.iter().all(|line| !line.contains("mihomo")),
+            "{script:?}"
+        );
+        assert!(
+            script
+                .iter()
+                .any(|line| line.contains("with administrator privileges"))
+        );
+        assert_eq!(
+            terminal_command(Os::Macos, kernel),
+            Cmd::new(
+                "sudo",
+                [
+                    "/bin/sh",
+                    "-c",
+                    "/usr/sbin/chown root:wheel \"$1\" && /bin/chmod 4755 \"$1\"",
+                    "tabby",
+                    &path,
+                ]
+            )
+        );
+    }
+
+    #[test]
+    fn on_macos_only_a_setuid_kernel_of_root_is_authorized() {
+        assert!(is_setuid_root(0, 0o104_755));
+        assert!(!is_setuid_root(0, 0o100_755));
+        assert!(!is_setuid_root(501, 0o104_755));
+        // The kernel of the tests is the user's own.
+        let dir = scratch("priv-setuid");
+        let recorder = machine("/x cap_net_admin=ep\n", 0);
+        let core = core_at(&dir, free_port(), &recorder, true);
+        assert!(!may_manage_network(
+            Os::Macos,
+            &recorder,
+            &core.binary().unwrap()
+        ));
+        // What getcap says does not count there.
+        assert_eq!(recorder.runs("getcap"), Vec::<String>::new());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_mac_volume_that_ignores_setuid_or_owners_holds_no_authorized_kernel() {
+        let mount = "\
+/dev/disk3s1s1 on / (apfs, sealed, local, read-only, journaled)\n\
+devfs on /dev (devfs, local, nobrowse)\n\
+/dev/disk3s5 on /System/Volumes/Data (apfs, local, journaled, nobrowse, protect, root data)\n\
+/dev/disk4s1 on /Volumes/Plextor 512 (apfs, local, nodev, nosuid, journaled, noowners)\n\
+/dev/disk6s1 on /Volumes/Shared (apfs, local, noowners)\n\
+/dev/disk7s1 on /Volumes/Shared (on top) (apfs, local)\n";
+        let on = |path: &str| mac_nosuid_in(mount, Path::new(path));
+        assert_eq!(
+            on("/Volumes/Plextor 512/tabby/mihomo"),
+            Some(PathBuf::from("/Volumes/Plextor 512"))
+        );
+        assert_eq!(
+            on("/Volumes/Shared/mihomo"),
+            Some(PathBuf::from("/Volumes/Shared"))
+        );
+        assert_eq!(on("/Users/u/Library/mihomo"), None);
+        assert_eq!(on("/opt/homebrew/bin/mihomo"), None);
+        // A mount point with " (" in its name is still read whole.
+        assert_eq!(on("/Volumes/Shared (on top)/mihomo"), None);
+    }
+
+    #[tokio::test]
+    async fn on_a_mac_the_dialog_is_asked_in_a_gui_session_and_a_no_is_no_error() {
+        let dir = scratch("priv-osascript");
+        let mac = |code: i32, said: &'static str, gui: bool| {
+            Recorder::new(move |cmd| match cmd.program.as_str() {
+                "id" => answer(0, "501\n"),
+                "launchctl" if gui => answer(0, ""),
+                "launchctl" => answer(113, ""),
+                "osascript" => {
+                    let mut output = answer(code, "");
+                    output.stderr = said.as_bytes().to_vec();
+                    output
+                }
+                _ => answer(0, ""),
+            })
+        };
+        let core_of = |recorder: &Arc<Recorder>| {
+            let mut core = core_at(&dir, free_port(), recorder, false);
+            core.os = Os::Macos;
+            core
+        };
+        for (code, said, expected) in [
+            (0, "", Graphical::Done),
+            (
+                1,
+                "0:150: execution error: User canceled. (-128)\n",
+                Graphical::Cancelled,
+            ),
+        ] {
+            let recorder = mac(code, said, true);
+            assert_eq!(
+                core_of(&recorder).authorize_graphical().await.unwrap(),
+                expected
+            );
+            assert_eq!(recorder.runs("osascript").len(), 1);
+        }
+        let recorder = mac(
+            1,
+            "execution error: The administrator user name or password was incorrect. (-60005)",
+            true,
+        );
+        let err = core_of(&recorder).authorize_graphical().await.unwrap_err();
+        assert!(err.to_string().contains("-60005"), "{err}");
+        // Over SSH there is no one to show a dialog to: the terminal asks.
+        let recorder = mac(0, "", false);
+        assert_eq!(
+            core_of(&recorder).authorize_graphical().await.unwrap(),
+            Graphical::NeedsTerminal
+        );
+        assert_eq!(recorder.runs("osascript"), Vec::<String>::new());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

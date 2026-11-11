@@ -29,6 +29,7 @@ use crate::{
     config::{self, Origin, Profiles, Settings},
     core::{ManagedCore, Release, SystemProxy},
     format::natural_cmp,
+    os::Os,
     themes::{self, Entry, Picker},
     ui::{
         components::help,
@@ -1845,8 +1846,9 @@ pub enum Confirm {
     /// `重载配置` on a managed core: the config is made again from the
     /// subscription in use, then read.
     RegenerateConfig,
-    /// `开启 TUN` on a managed core whose kernel has no capabilities yet.
-    AuthorizeTun,
+    /// `开启 TUN` on a managed core whose kernel has no capabilities yet
+    /// (on macOS: is not setuid root yet).
+    AuthorizeTun(Os),
     /// The kernel to download, on first start (`upgrade` false) or as an
     /// upgrade of the installed one.
     InstallCore {
@@ -1864,7 +1866,7 @@ impl Confirm {
             Self::DeleteSubscription { .. } => "删除订阅",
             Self::StopCore => "停止内核",
             Self::RegenerateConfig => "重载配置",
-            Self::AuthorizeTun => "开启 TUN",
+            Self::AuthorizeTun(_) => "开启 TUN",
             Self::InstallCore { upgrade: true, .. } => "升级内核",
             Self::InstallCore { .. } => "下载内核",
             Self::Change(change) => change.title(),
@@ -1885,7 +1887,11 @@ impl Confirm {
             }
             Self::StopCore => "停止托管内核？经由它的连接都会断开。".to_owned(),
             Self::RegenerateConfig => "用当前订阅重新生成配置？".to_owned(),
-            Self::AuthorizeTun => {
+            Self::AuthorizeTun(Os::Macos) => {
+                "开启 TUN 需要授权：tabby 会把内核改为 root 所有并加上 setuid 位，此后本机任何用户运行它都有 root 权限。"
+                    .to_owned()
+            }
+            Self::AuthorizeTun(Os::Linux) => {
                 "开启 TUN 需要授权：tabby 会用 setcap 给内核加上 CAP_NET_ADMIN 和 CAP_NET_BIND_SERVICE。"
                     .to_owned()
             }
@@ -1914,7 +1920,7 @@ impl Confirm {
             Self::UpdateProviders { .. } | Self::UpdateSubscriptions { .. } => "更新",
             Self::StopCore => "停止",
             Self::RegenerateConfig => "重载",
-            Self::AuthorizeTun => "授权",
+            Self::AuthorizeTun(_) => "授权",
             Self::DeleteSubscription { .. } => "删除",
             Self::InstallCore { upgrade: true, .. } => "升级",
             Self::InstallCore { .. } => "下载",
@@ -4189,7 +4195,7 @@ impl App {
             Confirm::Change(change) => self.send_change(change),
             Confirm::StopCore => self.stop_core(),
             Confirm::RegenerateConfig => self.regenerate_config(),
-            Confirm::AuthorizeTun => self.begin_authorization(),
+            Confirm::AuthorizeTun(_) => self.begin_authorization(),
             Confirm::UpdateSubscriptions { ids, .. } => self.update_subscriptions(ids),
             Confirm::DeleteSubscription { id, .. } => self.delete_subscription(id),
             Confirm::InstallCore { release, upgrade } => {

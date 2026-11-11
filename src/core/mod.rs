@@ -379,6 +379,11 @@ impl ManagedCore {
         })
     }
 
+    /// The system the kernel is managed on.
+    pub fn os(&self) -> Os {
+        self.os
+    }
+
     /// Where the managed kernel's controller listens.
     pub fn url(&self) -> String {
         format!("http://127.0.0.1:{}", self.state.port)
