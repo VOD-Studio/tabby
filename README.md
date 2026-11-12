@@ -4,6 +4,10 @@
 
 基于 [ratatui](https://ratatui.rs)，通过 External Controller 的 REST 与 WebSocket 接口工作：实时流量、代理切换与测速、规则、连接、日志、内核设置，无需浏览器。也能自己托管内核：下载、订阅、TUN、系统代理。界面为中文，键盘与鼠标均可操作。
 
+![概览页](docs/screenshots/overview.png)
+
+代理页：
+
 ```text
 ◆ tabby  mihomo v1.19.33   RULE             ↑      0 B/s   ↓      0 B/s   ● test
 1  2  3  4  5  6  7  8
