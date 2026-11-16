@@ -132,8 +132,9 @@ fn linux_flags(cpuinfo: &str) -> Vec<String> {
         .lines()
         .find(|line| line.starts_with("flags"))
         .and_then(|line| line.split_once(':'))
-        .map(|(_, flags)| flags.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_default()
+        .map_or_else(Vec::new, |(_, flags)| {
+            flags.split_whitespace().map(str::to_owned).collect()
+        })
 }
 
 /// The CPU flags of what `sysctl -n machdep.cpu.features
@@ -180,8 +181,9 @@ impl Target {
                 .run(&Cmd::new("sysctl", args))
                 .ok()
                 .filter(|output| output.status.success())
-                .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
-                .unwrap_or_default()
+                .map_or_else(String::new, |output| {
+                    String::from_utf8_lossy(&output.stdout).into_owned()
+                })
         };
         let (flags, translated) = match os {
             Os::Linux => (

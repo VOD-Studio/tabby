@@ -396,9 +396,10 @@ impl ManagedCore {
                         ],
                     ))
                     .await;
-                asked
-                    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
-                    .unwrap_or_default()
+                asked.map_or_else(
+                    |_| String::new(),
+                    |output| String::from_utf8_lossy(&output.stdout).trim().to_owned(),
+                )
             }
             Mode::Launchd(_) | Mode::Fallback => {
                 let text = fs::read_to_string(self.paths.log()).unwrap_or_default();

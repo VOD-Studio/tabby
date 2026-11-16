@@ -113,8 +113,7 @@ impl App {
     /// The `[dns]` keys the managed core sets over its subscription's.
     pub fn dns_overrides(&self) -> std::collections::BTreeMap<String, toml::Value> {
         self.managed_core()
-            .map(|core| core.settings().dns)
-            .unwrap_or_default()
+            .map_or_else(Default::default, |core| core.settings().dns)
     }
 
     /// The key under the popup's cursor.
@@ -160,7 +159,7 @@ impl App {
         let kind = DnsKind::of(key);
         let current = self.dns_overrides().remove(key);
         if matches!(kind, DnsKind::Text | DnsKind::List) {
-            let text = current.as_ref().map(show).unwrap_or_default();
+            let text = current.as_ref().map_or_else(String::new, show);
             self.dns_view.editing = Some(Input::new(text));
             return;
         }

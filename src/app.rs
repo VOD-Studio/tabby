@@ -3922,8 +3922,7 @@ impl App {
                 // Off is typed as nothing rather than as a 0 to delete first.
                 let typed = current_port
                     .filter(|number| *number != 0)
-                    .map(|number| number.to_string())
-                    .unwrap_or_default();
+                    .map_or_else(String::new, |number| number.to_string());
                 self.settings_view.editing = Some((Field::Port(port), Input::new(typed)));
                 self.dirty = true;
             }

@@ -788,13 +788,14 @@ mod tests {
     }
 
     fn files_in(dir: &Path) -> Vec<String> {
-        let mut names: Vec<String> = fs::read_dir(dir)
-            .map(|entries| {
+        let mut names: Vec<String> = fs::read_dir(dir).map_or_else(
+            |_| Vec::new(),
+            |entries| {
                 entries
                     .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
                     .collect()
-            })
-            .unwrap_or_default();
+            },
+        );
         names.sort();
         names
     }
