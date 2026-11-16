@@ -1,5 +1,9 @@
 # tabby
 
+<p align="center">
+  <img src="docs/mascot.png" alt="tabby 吉祥物：抱着终端的橘猫" width="240">
+</p>
+
 终端里的 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash.Meta）控制台。
 
 基于 [ratatui](https://ratatui.rs)，通过 External Controller 的 REST 与 WebSocket 接口工作：实时流量、代理切换与测速、规则、连接、日志、内核设置，无需浏览器。也能自己托管内核：下载、订阅、TUN、系统代理。界面为中文，键盘与鼠标均可操作。
