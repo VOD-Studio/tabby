@@ -1,4 +1,4 @@
-use std::collections::{HashMap, hash_map::Entry};
+use std::collections::{HashMap, HashSet, hash_map::Entry};
 
 use jiff::Timestamp;
 use serde::{Deserialize, Deserializer};
@@ -514,10 +514,11 @@ impl From<RawProxies> for Proxies {
             .filter(|name| *name != GLOBAL && is_group(name))
             .cloned()
             .collect();
+        let listed: HashSet<&str> = group_order.iter().map(String::as_str).collect();
         let mut unlisted: Vec<&str> = by_name
             .values()
             .filter(|proxy| {
-                proxy.all.is_some() && proxy.name != GLOBAL && !group_order.contains(&proxy.name)
+                proxy.all.is_some() && proxy.name != GLOBAL && !listed.contains(proxy.name.as_str())
             })
             .map(|proxy| proxy.name.as_str())
             .collect();
@@ -1111,6 +1112,21 @@ mod tests {
         let members = selector.all.as_ref().unwrap();
         assert!(members.iter().any(|name| name == "a/b#c%d e?f"));
         assert!(members.iter().any(|name| name == "🚀 emoji 节点"));
+    }
+
+    #[test]
+    fn global_members_keep_duplicates_and_unlisted_groups_come_after_them() {
+        let proxies: Proxies = serde_json::from_str(
+            r#"{"proxies":{
+                "GLOBAL":{"name":"GLOBAL","all":["Z","node","Z","missing","GLOBAL"]},
+                "Z":{"name":"Z","all":[]},
+                "B":{"name":"B","all":[]},
+                "A":{"name":"A","all":[]},
+                "node":{"name":"node"}
+            }}"#,
+        )
+        .unwrap();
+        assert_eq!(group_names(&proxies), ["Z", "Z", "A", "B", "GLOBAL"]);
     }
 
     #[test]
