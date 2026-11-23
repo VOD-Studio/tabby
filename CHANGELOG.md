@@ -5,6 +5,16 @@ All notable changes to tabby are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1] - 2026-11-23
+
+The `-with-mihomo` archives ship mihomo v1.19.33.
+
+This release includes the [0.3.0 changes](https://github.com/VOD-Studio/tabby/blob/v0.3.1/CHANGELOG.md#030---2026-11-23); 0.3.0's release build did not complete.
+
+### Fixed
+
+- ci: install cargo-about on intel macos
+
 ## [0.3.0] - 2026-11-23
 
 The `-with-mihomo` archives ship mihomo v1.19.33.
