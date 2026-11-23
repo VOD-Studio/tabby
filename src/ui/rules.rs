@@ -221,8 +221,8 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
     let theme = app.theme;
     let view = &app.rules_view;
     let visible = view.visible();
-    let filter = view.filter.value();
-    let needle = fold(filter);
+    let filter = view.filter().value();
+    let needle = view.needle();
 
     let count = if filter.is_empty() {
         format!("  {} ", rows.len())
@@ -307,7 +307,7 @@ pub fn render(frame: &mut Frame, area: Rect, app: &App, rows: &[RuleRow]) {
         } else {
             Style::new()
         };
-        Row::new(cells(&theme, visible[index], &needle, widths)).style(style)
+        Row::new(cells(&theme, &visible[index], needle, widths)).style(style)
     });
     let constraints = widths.map(|width| Constraint::Length(u16::try_from(width).unwrap_or(0)));
     // The highlight goes on after the cells, as `Theme::paint_cursor` does.

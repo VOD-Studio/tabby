@@ -635,6 +635,35 @@ impl RuleRow {
     }
 }
 
+/// A view of the rules in kernel order, with optional indices into the full list.
+pub struct VisibleRules<'a> {
+    rows: &'a [RuleRow],
+    matches: Option<&'a [usize]>,
+}
+
+impl VisibleRules<'_> {
+    pub fn len(&self) -> usize {
+        self.matches.map_or(self.rows.len(), <[usize]>::len)
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &RuleRow> {
+        (0..self.len()).map(|index| &self[index])
+    }
+}
+
+impl std::ops::Index<usize> for VisibleRules<'_> {
+    type Output = RuleRow;
+
+    fn index(&self, index: usize) -> &RuleRow {
+        let index = self.matches.map_or_else(|| index, |matches| matches[index]);
+        &self.rows[index]
+    }
+}
+
 /// List, cursor and filter of the rules page.
 #[derive(Debug, Default)]
 pub struct RulesView {
@@ -644,21 +673,48 @@ pub struct RulesView {
     pub cursor: usize,
     pub scroll: Scroll,
     /// Case-insensitive substring the type, payload or target must contain.
-    pub filter: Input,
+    filter: Input,
     /// The filter box has the keyboard.
     pub typing: bool,
+    needle: String,
+    matches: Vec<usize>,
 }
 
 impl RulesView {
+    fn all(&self) -> &[RuleRow] {
+        self.rows
+            .as_ref()
+            .and_then(|rows| rows.as_deref().ok())
+            .unwrap_or_default()
+    }
+
     /// The rules that pass the filter, in the kernel's order.
-    pub fn visible(&self) -> Vec<&RuleRow> {
-        let Some(Ok(rows)) = &self.rows else {
-            return vec![];
-        };
-        let needle = rules::fold(self.filter.value());
-        rows.iter()
-            .filter(|row| needle.is_empty() || row.matches(&needle))
-            .collect()
+    pub fn visible(&self) -> VisibleRules<'_> {
+        VisibleRules {
+            rows: self.all(),
+            matches: (!self.needle.is_empty()).then_some(&self.matches),
+        }
+    }
+
+    pub fn filter(&self) -> &Input {
+        &self.filter
+    }
+
+    pub fn needle(&self) -> &str {
+        &self.needle
+    }
+
+    fn reindex(&mut self) {
+        self.matches.clear();
+        if let Some(Ok(rows)) = &self.rows
+            && !self.needle.is_empty()
+        {
+            self.matches.extend(
+                rows.iter()
+                    .enumerate()
+                    .filter_map(|(index, row)| row.matches(&self.needle).then_some(index)),
+            );
+        }
     }
 
     /// The number and position of the rule under the cursor. Rules have no
@@ -695,16 +751,25 @@ impl RulesView {
                     .map(|(index, rule)| RuleRow::new(index + 1, rule))
                     .collect();
                 self.rows = Some(Ok(rows));
+                self.reindex();
                 self.restore(anchor);
             }
             Err(_) if refetch && matches!(self.rows, Some(Ok(_))) => {}
-            Err(err) => self.rows = Some(Err(err)),
+            Err(err) => {
+                self.rows = Some(Err(err));
+                self.matches.clear();
+            }
         }
     }
 
     /// Changes the filter; the cursor goes to the first rule that passes.
     fn edit_filter(&mut self, edit: impl FnOnce(&mut Input)) {
         edit(&mut self.filter);
+        let needle = rules::fold(self.filter.value());
+        if self.needle != needle {
+            self.needle = needle;
+            self.reindex();
+        }
         self.cursor = 0;
     }
 
@@ -713,6 +778,8 @@ impl RulesView {
     fn clear_filter(&mut self) {
         let anchor = self.anchor();
         self.filter.reset();
+        self.needle.clear();
+        self.matches.clear();
         self.typing = false;
         self.restore(anchor);
     }
@@ -5725,7 +5792,8 @@ mod tests {
         let payload = app
             .rules_view
             .visible()
-            .first()
+            .iter()
+            .next()
             .map(|row| row.payload.clone());
         (delay_of(app, "a"), delay_of(app, "p"), payload)
     }
@@ -5861,6 +5929,32 @@ mod tests {
     }
 
     #[test]
+    fn a_rule_refetch_rebuilds_the_filter_matches_in_kernel_order() {
+        let mut view = RulesView::default();
+        view.edit_filter(|input| *input = Input::new("aPI".into()));
+        view.apply(false, Ok(rules_of(&["api-a", "other", "api-b"])));
+        let matched = |view: &RulesView| {
+            view.visible()
+                .iter()
+                .map(|row| row.number)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(matched(&view), [1, 3]);
+
+        view.apply(true, Err(http(503)));
+        assert_eq!(matched(&view), [1, 3]);
+        view.apply(true, Ok(rules_of(&["other", "api-b", "api-b"])));
+        assert_eq!(matched(&view), [2, 3]);
+
+        view.apply(false, Err(http(500)));
+        assert_eq!(matched(&view), [] as [usize; 0]);
+        view.apply(false, Ok(rules_of(&["api-c", "other"])));
+        assert_eq!(matched(&view), [1]);
+        view.clear_filter();
+        assert_eq!(matched(&view), [1, 2]);
+    }
+
+    #[test]
     fn the_rule_cursor_goes_to_the_first_match_and_back_to_its_rule() {
         let (mut app, _rx) = app_without_controller();
         app.page = Page::Rules;
@@ -5886,7 +5980,7 @@ mod tests {
         let mut view = RulesView::default();
         view.apply(false, Ok(rules_of(&["q1", "b", "q3", "q4"])));
         // Only in payloads: not in `DOMAIN-SUFFIX` nor in `DIRECT`.
-        view.filter = Input::new("q".to_owned());
+        view.edit_filter(|input| *input = Input::new("q".to_owned()));
         // On number 4, third of the matches 1, 3, 4.
         view.cursor = 2;
         // Now 1 to 4 all match: number 4 is fourth.
