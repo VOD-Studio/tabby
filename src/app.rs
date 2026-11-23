@@ -4560,14 +4560,13 @@ impl App {
         }
         // What a managed kernel is changed to is what it is started with
         // next time.
-        if let Change::Patch(patch) = change {
-            self.persist_patch(patch);
+        if let Change::Patch(patch) = change
+            && self.persist_patch(patch)
+        {
+            return;
         }
         match change {
-            Change::Patch(_) | Change::Reload => {
-                let seq = self.fetch_configs(true);
-                self.changing.insert(setting, Stage::Refetching(seq));
-            }
+            Change::Patch(_) | Change::Reload => self.refetch_setting(setting),
             Change::FlushFakeIp | Change::UpdateGeo | Change::Restart | Change::Upgrade => {
                 self.changing.remove(&setting);
             }
@@ -4578,6 +4577,11 @@ impl App {
             }
             self.reload_visited();
         }
+    }
+
+    fn refetch_setting(&mut self, setting: Setting) {
+        let seq = self.fetch_configs(true);
+        self.changing.insert(setting, Stage::Refetching(seq));
     }
 
     /// Takes in the reply to `/rules` fetch `seq`. One older than a reply
@@ -11249,8 +11253,9 @@ secret = "b-secret"
         let port = testing::free_port();
         let recorder = updating_systemd(port, true, "");
         let core = Arc::new(testing::core_at(&dir, port, &recorder, true));
-        let (mut app, _rx) =
+        let (mut app, mut rx) =
             managed_settings_on(Arc::clone(&core), Setting::SubscriptionDownload).await;
+        let saved = |app: &App| !app.is_changing(Setting::SubscriptionDownload);
         let row = |app: &App| {
             draw(app)
                 .lines()
@@ -11261,6 +11266,7 @@ secret = "b-secret"
         assert!(row(&app).contains("直连"), "{}", row(&app));
 
         key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, saved).await;
         assert_eq!(core.settings().subscription_download.via, Route::Core);
         assert!(
             row(&app).contains("经托管内核  127.0.0.1:7890"),
@@ -11291,6 +11297,7 @@ secret = "b-secret"
         type_text(&mut app, "socks5://me:pw@127.0.0.1:1080");
         key_press(&mut app, KeyCode::Enter);
         assert!(!app.typing());
+        pump_until(&mut app, &mut rx, saved).await;
         let download = core.settings().subscription_download;
         assert_eq!(
             (download.via, download.proxy.as_str()),
@@ -11306,9 +11313,11 @@ secret = "b-secret"
 
         // Then directly again; the proxy is kept for next time.
         key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, saved).await;
         let download = core.settings().subscription_download;
         assert_eq!(download.via, Route::Direct);
         key_press(&mut app, KeyCode::Enter);
+        pump_until(&mut app, &mut rx, saved).await;
         key_press(&mut app, KeyCode::Enter);
         assert!(
             row(&app).contains("socks5://me:pw@127.0.0.1:1080"),
@@ -12167,7 +12176,7 @@ secret = "b-secret"
         })
         .await;
 
-        app.persist_patch(Patch::Port(Port::Mixed, 18000));
+        assert!(app.persist_patch(Patch::Port(Port::Mixed, 18000)));
         pump_until(&mut app, &mut rx, |_| {
             recorder
                 .runs("gsettings")

@@ -86,7 +86,7 @@ impl ManagedCore {
         if on {
             let binary = self.binary()?;
             // What the unit starts the kernel with has to be there.
-            self.write_config()?;
+            self.regenerate().await?;
             fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(io)?;
             fs::write(&path, self.unit_text(&binary)).map_err(io)?;
             // A unit `systemd-run` made cannot be enabled while it is loaded
@@ -126,7 +126,7 @@ impl ManagedCore {
         let io = |err: io::Error| CoreError::io("cannot write the launch agent", err);
         if on {
             let binary = self.binary()?;
-            self.write_config()?;
+            self.regenerate().await?;
             fs::create_dir_all(path.parent().unwrap_or(Path::new("."))).map_err(io)?;
             fs::write(path, self.plist_text(&binary)).map_err(io)?;
             if self.status().await.running() {

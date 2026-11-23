@@ -12,6 +12,27 @@ async fn ensure(core: &ManagedCore) -> (Result<(), CoreError>, Vec<Step>) {
 }
 
 #[tokio::test]
+async fn a_background_setting_save_waits_for_config_work_and_reports_dns_from_the_written_file() {
+    let dir = scratch("persist-in-background");
+    let port = free_port();
+    let recorder = systemd(port, Duration::ZERO);
+    let core = Arc::new(core_at(&dir, port, &recorder, true));
+    core.regenerate().await.unwrap();
+    let before = fs::read_to_string(core.paths.config()).unwrap();
+
+    let current_config_work = core.lock.lock().await;
+    let save = Arc::clone(&core).persist_background(Persist::Tun(true));
+    assert_eq!(fs::read_to_string(core.paths.config()).unwrap(), before);
+    drop(current_config_work);
+
+    assert!(save.await.unwrap());
+    let config = fs::read_to_string(core.paths.config()).unwrap();
+    assert!(config.contains(r#""dns": {"enable":true}"#), "{config}");
+    assert!(core.settings().tun.enable);
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
 async fn a_kernel_that_already_answers_is_used_and_nothing_is_started() {
     let dir = scratch("attach");
     let port = free_port();

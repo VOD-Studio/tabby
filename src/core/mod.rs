@@ -405,19 +405,41 @@ impl ManagedCore {
     /// time.
     ///
     /// The config file is made again too: a kernel started by the session
-    /// at login runs from it as it is, with no tabby to write it.
-    pub fn persist(&self, change: Persist) -> Result<(), CoreError> {
-        {
+    /// at login runs from it as it is, with no tabby to write it. Returns
+    /// whether enabling TUN also turned on DNS and needs a controller reload.
+    pub fn persist(&self, change: Persist) -> Result<bool, CoreError> {
+        let enabling_tun = change == Persist::Tun(true);
+        let settings = {
             let mut settings = self.settings.lock().unwrap_or_else(PoisonError::into_inner);
             settings.set(change);
-            settings
-                .save(&self.paths.settings())
-                .map_err(|err| CoreError::io("cannot write settings.toml", err))?;
+            settings.clone()
+        };
+        settings
+            .save(&self.paths.settings())
+            .map_err(|err| CoreError::io("cannot write settings.toml", err))?;
+        let dns_turned_on = if self.paths.config().exists() {
+            self.write_config_for(&self.subscriptions()?)?
+        } else {
+            enabling_tun && self.tun_turns_dns_on()
+        };
+        Ok(enabling_tun && dns_turned_on)
+    }
+
+    /// Queues a save immediately, so it can finish even if the UI exits.
+    /// The blocking worker serializes the save with subscription mutations.
+    pub fn persist_background(
+        self: Arc<Self>,
+        change: Persist,
+    ) -> impl Future<Output = Result<bool, CoreError>> {
+        let save = tokio::task::spawn_blocking(move || {
+            let _guard = self.lock.blocking_lock();
+            self.persist(change)
+        });
+        async move {
+            save.await.map_err(|err| {
+                CoreError::io("cannot save the kernel's settings", io::Error::other(err))
+            })?
         }
-        if self.paths.config().exists() {
-            self.write_config_for(&self.subscriptions()?)?;
-        }
-        Ok(())
     }
 
     /// Sets `key` of the `[dns]` overrides (or, with `None`, lets the
@@ -522,7 +544,7 @@ impl ManagedCore {
         progress(Step::Starting);
         self.seed().await?;
         let binary = self.binary()?;
-        self.write_config()?;
+        self.regenerate().await?;
         self.launch(&binary).await?;
         progress(Step::WaitingController);
         self.wait_ready().await
@@ -533,7 +555,7 @@ impl ManagedCore {
     pub async fn restart(&self) -> Result<(), CoreError> {
         self.seed().await?;
         let binary = self.binary()?;
-        self.write_config()?;
+        self.regenerate().await?;
         self.relaunch(&binary).await?;
         self.wait_ready().await
     }
@@ -547,7 +569,7 @@ impl ManagedCore {
         // A kernel without the capabilities cannot run a TUN, whatever the
         // settings say.
         self.drop_tun_without_authority();
-        self.write_config_for(&self.subscriptions()?)
+        self.write_config_for(&self.subscriptions()?).map(|_| ())
     }
 
     async fn probe(&self) -> Probe {

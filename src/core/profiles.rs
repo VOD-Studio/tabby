@@ -113,18 +113,20 @@ impl ManagedCore {
     }
 
     /// Writes the kernel's config file from the subscription `store` says is
-    /// in use.
-    pub(super) fn write_config_for(&self, store: &Store) -> Result<(), CoreError> {
-        let text = runtime::render(&self.base_profile(store)?, &self.settings(), &self.state)
-            .map_err(|_| CoreError::UnsupportedProfile)?;
+    /// in use. Returns whether the generated config turned on its DNS for TUN.
+    pub(super) fn write_config_for(&self, store: &Store) -> Result<bool, CoreError> {
+        let (text, dns_turned_on) =
+            runtime::render_with_dns(&self.base_profile(store)?, &self.settings(), &self.state)
+                .map_err(|_| CoreError::UnsupportedProfile)?;
         write_private(&self.paths.config(), &text)
-            .map_err(|err| CoreError::io("cannot write the kernel's config", err))
+            .map_err(|err| CoreError::io("cannot write the kernel's config", err))?;
+        Ok(dns_turned_on)
     }
 
     /// Whether turning TUN on also turns the DNS of the kernel's config on
     /// ([`runtime::tun_turns_dns_on`]): the subscription in use has none of
     /// its own on. A running kernel then has to read its config again.
-    pub fn tun_turns_dns_on(&self) -> bool {
+    pub(super) fn tun_turns_dns_on(&self) -> bool {
         self.subscriptions()
             .and_then(|store| self.base_profile(&store))
             .is_ok_and(|base| runtime::tun_turns_dns_on(&base, &self.settings()).unwrap_or(false))

@@ -69,6 +69,16 @@ pub enum CoreEvent {
     Upgraded(Result<String, CoreError>),
     /// The config file was made again, for `重载配置`.
     Regenerated(Result<(), CoreError>),
+    /// A controller setting was also written to the managed configuration.
+    PatchSaved {
+        patch: Patch,
+        result: Result<bool, CoreError>,
+    },
+    /// How subscriptions should be downloaded was saved.
+    DownloadSaved {
+        message: String,
+        result: Result<bool, CoreError>,
+    },
     /// A DNS key was set (or cleared) in the DNS popup, if the kernel took
     /// it.
     Dns {
@@ -237,6 +247,14 @@ impl App {
             | CoreEvent::LoginStart(_)
             | CoreEvent::LoginStarted(_) => self.on_session(event),
             CoreEvent::Dns { key, result } => self.on_dns(key, result),
+            CoreEvent::PatchSaved { patch, result } => self.on_patch_saved(patch, result),
+            CoreEvent::DownloadSaved { message, result } => {
+                self.changing.remove(&Setting::SubscriptionDownload);
+                match result {
+                    Ok(_) => self.toast(ToastKind::Success, message),
+                    Err(err) => self.toast(ToastKind::Error, failure("没能保存", &err)),
+                }
+            }
             CoreEvent::Regenerated(Ok(())) => {
                 // The reload itself is the one every other kernel has.
                 self.changing.remove(&Setting::Reload);
@@ -577,10 +595,10 @@ impl App {
     /// What a managed kernel is changed to, written down for its next
     /// start. The change has taken effect either way: failing to keep it
     /// is a thing to say, not to undo.
-    pub(super) fn persist_patch(&mut self, patch: Patch) {
-        let Some(core) = self.managed_core() else {
-            return;
-        };
+    pub(super) fn persist_patch(&self, patch: Patch) -> bool {
+        if !self.is_managed() {
+            return false;
+        }
         let change = match patch {
             Patch::Mode(mode) => Persist::Mode(mode.name().to_owned()),
             Patch::AllowLan(on) => Persist::AllowLan(on),
@@ -588,16 +606,27 @@ impl App {
             Patch::Ipv6(on) => Persist::Ipv6(on),
             Patch::Port(Port::Mixed, number) => Persist::MixedPort(number),
             // A managed kernel has no other ports.
-            Patch::Port(..) => return,
+            Patch::Port(..) => return false,
             Patch::Tun(on) => Persist::Tun(on),
         };
-        if let Err(err) = core.persist(change) {
-            self.toast(ToastKind::Error, failure("已生效，但没能保存", &err));
-        } else if patch == Patch::Tun(true) && core.tun_turns_dns_on() {
-            // The TUN hands the DNS queries to a kernel whose DNS is off:
-            // the config just written turns it on, but only once the kernel
-            // reads it (`PATCH /configs` has no `dns`).
-            self.send_change(Change::Reload);
+        self.spawn_core(move |core, _| {
+            let save = core.persist_background(change);
+            async move {
+                CoreEvent::PatchSaved {
+                    patch,
+                    result: save.await,
+                }
+            }
+        });
+        true
+    }
+
+    fn on_patch_saved(&mut self, patch: Patch, result: Result<bool, CoreError>) {
+        match result {
+            // The kernel needs to read the saved config to enable its DNS.
+            Ok(true) => self.send_change(Change::Reload),
+            Ok(false) => {}
+            Err(err) => self.toast(ToastKind::Error, failure("已生效，但没能保存", &err)),
         }
         // The desktop was pointed at the port it was; it follows the kernel.
         if let Patch::Port(Port::Mixed, number) = patch
@@ -608,11 +637,15 @@ impl App {
                 CoreEvent::SystemProxySet(core.set_system_proxy(on, number).await.map(|()| on))
             });
         }
+        self.refetch_setting(patch.setting());
     }
 
     /// `订阅下载`: directly, then through the managed kernel, then through
     /// a proxy (the box asks which), then directly again.
     pub(super) fn cycle_subscription_download(&mut self) {
+        if self.is_changing(Setting::SubscriptionDownload) {
+            return;
+        }
         let Some(core) = self.managed_core() else {
             return;
         };
@@ -666,18 +699,22 @@ impl App {
 
     /// Writes down how subscriptions are downloaded, and says so.
     fn set_subscription_download(&mut self, download: DownloadSettings) {
-        let Some(core) = self.managed_core() else {
-            return;
-        };
-        let said = match download.via {
+        let message = match download.via {
             Route::Direct => "订阅改为直连下载".to_owned(),
             Route::Core => "订阅改为经托管内核下载".to_owned(),
             Route::Proxy => format!("订阅改为经 {} 下载", shown_proxy(&download.proxy)),
         };
-        match core.persist(Persist::SubscriptionDownload(download)) {
-            Ok(()) => self.toast(ToastKind::Success, said),
-            Err(err) => self.toast(ToastKind::Error, failure("没能保存", &err)),
-        }
+        self.changing
+            .insert(Setting::SubscriptionDownload, Stage::Sending);
+        self.spawn_core(move |core, _| {
+            let save = core.persist_background(Persist::SubscriptionDownload(download));
+            async move {
+                CoreEvent::DownloadSaved {
+                    message,
+                    result: save.await,
+                }
+            }
+        });
         self.dirty = true;
     }
 

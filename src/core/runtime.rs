@@ -308,6 +308,14 @@ pub fn tun_turns_dns_on(base: &str, settings: &CoreSettings) -> Result<bool, Uns
 /// twice: [`edit`] takes them out first. A profile that is not a block
 /// mapping at the top is [`Unsupported`].
 pub fn render(base: &str, settings: &CoreSettings, state: &State) -> Result<String, Unsupported> {
+    render_with_dns(base, settings, state).map(|(text, _)| text)
+}
+
+pub fn render_with_dns(
+    base: &str,
+    settings: &CoreSettings,
+    state: &State,
+) -> Result<(String, bool), Unsupported> {
     let edited = edit(base, &TAKEN, &dns_overrides(settings), settings.tun.enable)?;
     let tun = &settings.tun;
     let overrides: [(&str, Value); 8] = [
@@ -350,7 +358,7 @@ pub fn render(base: &str, settings: &CoreSettings, state: &State) -> Result<Stri
         }
         let _ = writeln!(text, "\"dns\": {}", Value::Object(section));
     }
-    Ok(text)
+    Ok((text, edited.dns_turned_on))
 }
 
 #[cfg(test)]
