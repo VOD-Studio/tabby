@@ -263,8 +263,10 @@ impl ConnectionRow {
 
     /// Whether any field the filter looks at contains `needle`, which is
     /// lowercase already.
-    fn matches(&self, needle: &str) -> bool {
-        let connection = &self.connection;
+    fn matches(connection: &models::Connection, needle: &str) -> bool {
+        if needle.is_empty() {
+            return true;
+        }
         let metadata = &connection.metadata;
         [
             &metadata.host,
@@ -429,6 +431,19 @@ pub struct Detail {
     pub closed: bool,
 }
 
+#[derive(Debug)]
+struct ConnectionFrame {
+    frame: ConnectionSnapshot,
+    rates: Vec<Option<Rate>>,
+    at: Timestamp,
+}
+
+#[derive(Debug)]
+struct DeferredConnections {
+    latest: ConnectionFrame,
+    anchor: (String, usize),
+}
+
 /// Table, cursor, order, filter and pause state of the connections page.
 #[derive(Debug, Default)]
 pub struct ConnectionsView {
@@ -457,6 +472,9 @@ pub struct ConnectionsView {
     baseline: Baseline,
     /// Frames of highlight left, for the connections that are still new.
     fresh: HashMap<String, u8>,
+    /// Off-screen frames whose cursor id still matches the filter can skip
+    /// sorting. Only the latest frame is needed while that id stays visible.
+    deferred: Option<DeferredConnections>,
 }
 
 impl ConnectionsView {
@@ -464,9 +482,20 @@ impl ConnectionsView {
     /// (and the popup's connection with it) unless it is paused. The first
     /// frame after (re)connecting is let through even then: a table that was
     /// never filled has nothing to freeze.
-    fn apply(&mut self, frame: ConnectionSnapshot, now: Timestamp) {
+    fn apply(&mut self, frame: ConnectionSnapshot, now: Timestamp, shown: bool) {
+        let defer = !shown && !self.paused && self.detail.is_none();
+        let keeps_deferred_anchor = defer
+            && self
+                .deferred
+                .as_ref()
+                .is_some_and(|deferred| self.keeps_anchor(&frame, &deferred.anchor.0));
+        if !keeps_deferred_anchor {
+            // If the id disappears, the previous frame's sorted position
+            // determines which row takes its place.
+            self.present_deferred();
+        }
         // Everything is new then; lighting up the whole table says nothing.
-        let first = self.rows.is_none();
+        let first = self.rows.is_none() && self.deferred.is_none();
         let (rates, baseline) = frame.rates(&self.baseline);
         let mut fresh = HashMap::new();
         for connection in &frame.connections {
@@ -485,7 +514,45 @@ impl ConnectionsView {
             return;
         }
 
-        let anchor = self.anchor();
+        let anchor = self
+            .deferred
+            .take()
+            .map(|deferred| deferred.anchor)
+            .or_else(|| self.anchor());
+        let latest = ConnectionFrame {
+            frame,
+            rates,
+            at: now,
+        };
+        match anchor {
+            Some(anchor)
+                if defer
+                    && (keeps_deferred_anchor || self.keeps_anchor(&latest.frame, &anchor.0)) =>
+            {
+                self.rows = None;
+                self.deferred = Some(DeferredConnections { latest, anchor });
+            }
+            anchor => self.present_frame(latest, anchor),
+        }
+    }
+
+    fn keeps_anchor(&self, frame: &ConnectionSnapshot, id: &str) -> bool {
+        let needle = self.filter.value().to_lowercase();
+        frame
+            .connections
+            .iter()
+            .any(|connection| connection.id == id && ConnectionRow::matches(connection, &needle))
+    }
+
+    /// Sorts the latest off-screen frame before the table is shown or edited.
+    fn present_deferred(&mut self) {
+        if let Some(deferred) = self.deferred.take() {
+            self.present_frame(deferred.latest, Some(deferred.anchor));
+        }
+    }
+
+    fn present_frame(&mut self, latest: ConnectionFrame, anchor: Option<(String, usize)>) {
+        let ConnectionFrame { frame, rates, at } = latest;
         let mut rows: Vec<ConnectionRow> = frame
             .connections
             .into_iter()
@@ -504,14 +571,14 @@ impl ConnectionsView {
             {
                 Some(row) => {
                     detail.row = row.clone();
-                    detail.as_of = Some(now);
+                    detail.as_of = Some(at);
                 }
                 // What it last had stays up, its clock stopped there.
                 None => detail.closed = true,
             }
         }
         self.rows = Some(rows);
-        self.as_of = Some(now);
+        self.as_of = Some(at);
         self.restore(anchor);
     }
 
@@ -522,7 +589,7 @@ impl ConnectionsView {
         };
         let needle = self.filter.value().to_lowercase();
         rows.iter()
-            .filter(|row| needle.is_empty() || row.matches(&needle))
+            .filter(|row| ConnectionRow::matches(&row.connection, &needle))
             .collect()
     }
 
@@ -583,6 +650,7 @@ impl ConnectionsView {
     /// its row, or its position when that row went. The baseline is left
     /// alone; the next frame lines up with it by itself.
     fn remove(&mut self, closed: impl Fn(&str) -> bool) {
+        self.present_deferred();
         let anchor = self.anchor();
         if let Some(rows) = &mut self.rows {
             rows.retain(|row| !closed(&row.connection.id));
@@ -4971,7 +5039,11 @@ impl App {
                 let stats = frame.stats();
                 self.connections = Some(stats);
                 push_sample(&mut self.connection_history, stats.active);
-                self.connections_view.apply(frame, Timestamp::now());
+                self.connections_view.apply(
+                    frame,
+                    Timestamp::now(),
+                    self.page == Page::Connections,
+                );
             }
             // The first frame after connecting reports 0: no process uses
             // none, it is the kernel having sampled nothing yet.
@@ -5242,6 +5314,9 @@ impl App {
         let entering = page != self.page;
         self.page = page;
         self.dirty = true;
+        if entering && page == Page::Connections {
+            self.connections_view.present_deferred();
+        }
         // A page waiting for the managed kernel loads once it is up.
         if entering && self.controller_up() {
             self.load_page(page);
@@ -6305,12 +6380,13 @@ mod tests {
         // The table and what it is measured against live and die with the
         // stream; the user's pause outlasts it.
         app.connections_view.paused = true;
-        assert!(app.connections_view.rows.is_some());
+        assert!(app.connections_view.deferred.is_some());
         assert!(!app.connections_view.baseline.is_empty());
         disconnect(&mut app, Stream::Connections);
         assert!(app.connections.is_none() && app.connection_history.is_empty());
         let view = &app.connections_view;
-        assert!(view.rows.is_none() && view.baseline.is_empty() && view.fresh.is_empty());
+        assert!(view.rows.is_none() && view.deferred.is_none());
+        assert!(view.baseline.is_empty() && view.fresh.is_empty());
         assert!(view.paused);
     }
 
@@ -6646,6 +6722,7 @@ mod tests {
     #[tokio::test]
     async fn new_connections_light_up_for_three_frames_except_in_the_first_frame() {
         let (mut app, _rx) = app_without_controller();
+        app.update(Action::SelectPage(Page::Connections));
         let (a, b) = (flow("a", "01", 0, 0), flow("b", "02", 0, 0));
         connect(&mut app, Stream::Connections);
         feed(&mut app, vec![a.clone()]);
@@ -6687,6 +6764,57 @@ mod tests {
         app.size = Size::new(100, 40);
         app.update(Action::Cursor(Move::HalfDown));
         assert_eq!(app.connections_view.cursor, 6 + 16);
+    }
+
+    #[test]
+    fn a_hidden_connections_page_sorts_only_the_latest_frame_for_a_stable_cursor() {
+        let (mut app, _) = app_without_controller();
+        app.update(Action::SelectPage(Page::Connections));
+        let a = flow("a", "01", 0, 0);
+        let mut b = flow("b", "02", 0, 0);
+        feed(&mut app, vec![a.clone(), b.clone()]);
+        app.update(Action::Cursor(Move::Down));
+        app.update(Action::SelectPage(Page::Overview));
+
+        b.download = 10;
+        feed(&mut app, vec![b.clone(), a.clone()]);
+        b.download = 35;
+        let c = flow("c", "03", 0, 0);
+        feed(&mut app, vec![a.clone(), b, c]);
+        assert!(app.connections_view.deferred.is_some());
+        assert_eq!(app.connections.unwrap().active, 3);
+
+        app.update(Action::SelectPage(Page::Connections));
+        assert_eq!(table_ids(&app), ["c", "b", "a"]);
+        assert_eq!(app.connections_view.cursor, 2);
+        assert_eq!(row(&app, "b").rate, Some(Rate { up: 0, down: 25 }));
+        assert!(is_fresh(&app, "c"));
+        assert!(app.connections_view.deferred.is_none());
+    }
+
+    #[test]
+    fn a_hidden_selection_that_stops_matching_uses_its_previous_frame_position() {
+        let (mut app, _) = app_without_controller();
+        app.update(Action::SelectPage(Page::Connections));
+        let a = named("a", "03", "match-a", "");
+        let mut b = named("b", "02", "match-b", "");
+        let d = named("d", "01", "match-d", "");
+        feed(&mut app, vec![a.clone(), b.clone(), d.clone()]);
+        type_filter(&mut app, "match");
+        app.update(Action::FilterAccept);
+        app.update(Action::Cursor(Move::Down));
+        assert_eq!(app.connections_view.cursor, 1);
+        app.update(Action::SelectPage(Page::Overview));
+
+        let c = named("c", "04", "match-c", "");
+        feed(&mut app, vec![a.clone(), b.clone(), c.clone(), d.clone()]);
+        assert!(app.connections_view.deferred.is_some());
+        b.metadata.host = "other".to_owned();
+        feed(&mut app, vec![a, b, c, d]);
+
+        app.update(Action::SelectPage(Page::Connections));
+        assert_eq!(visible_ids(&app), ["c", "a", "d"]);
+        assert_eq!(app.connections_view.cursor, 2);
     }
 
     /// A connection that started `secs` past 10:00:00 UTC, going to `host`
@@ -6795,6 +6923,7 @@ mod tests {
     #[test]
     fn equal_values_go_by_id_in_either_direction() {
         let (mut app, _rx) = app_without_controller();
+        app.update(Action::SelectPage(Page::Connections));
         let same = |id| named(id, "01", "same.example", "curl");
         let frame = vec![same("y"), same("x"), same("z")];
         feed(&mut app, frame.clone());
