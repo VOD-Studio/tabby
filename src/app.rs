@@ -11710,6 +11710,9 @@ secret = "b-secret"
                 })
                 .await;
                 assert_eq!(app.tun_authorized, Some(true));
+                // The PATCH can arrive before the background settings save
+                // finishes; wait for it before removing the directory.
+                pump_until(&mut app, &mut rx, |app| !app.is_changing(Setting::Tun)).await;
             } else {
                 assert!(toasted(&app, "授权没有完成"), "{:?}", app.toasts);
                 assert!(!app.is_changing(Setting::Tun));
