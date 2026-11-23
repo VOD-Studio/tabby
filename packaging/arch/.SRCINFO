@@ -1,6 +1,6 @@
 pkgbase = tabby-mihomo
 	pkgdesc = Terminal UI for the mihomo (Clash.Meta) kernel
-	pkgver = 0.2.1
+	pkgver = 0.3.0
 	pkgrel = 1
 	url = https://github.com/VOD-Studio/tabby
 	arch = x86_64
@@ -15,7 +15,7 @@ pkgbase = tabby-mihomo
 	conflicts = tabby
 	conflicts = tabby-bin
 	options = !lto
-	source = tabby-0.2.1.tar.gz::https://github.com/VOD-Studio/tabby/archive/refs/tags/v0.2.1.tar.gz
-	sha256sums = 990bfdc1487835c8cfea22413654deb3f2cab39fcf0470d6574446f8de2d163a
+	source = tabby-0.3.0.tar.gz::https://github.com/VOD-Studio/tabby/archive/refs/tags/v0.3.0.tar.gz
+	sha256sums = 0a82828d1369cd212cf71131629e1110035f1ebaeb9198d6d1062e796856cb07
 
 pkgname = tabby-mihomo

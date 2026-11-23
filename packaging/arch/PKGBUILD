@@ -7,8 +7,8 @@
 # the Tabby terminal emulator on the AUR.
 pkgname=tabby-mihomo
 _name=tabby
-_tag=v0.2.1
-pkgver=0.2.1
+_tag=v0.3.0
+pkgver=0.3.0
 pkgrel=1
 pkgdesc='Terminal UI for the mihomo (Clash.Meta) kernel'
 arch=('x86_64' 'aarch64')
@@ -25,7 +25,7 @@ conflicts=('tabby' 'tabby-bin')
 # objects, which rust-lld cannot link (undefined aws_lc_* symbols).
 options=('!lto')
 source=("$_name-${_tag#v}.tar.gz::$url/archive/refs/tags/$_tag.tar.gz")
-sha256sums=('990bfdc1487835c8cfea22413654deb3f2cab39fcf0470d6574446f8de2d163a')
+sha256sums=('0a82828d1369cd212cf71131629e1110035f1ebaeb9198d6d1062e796856cb07')
 
 prepare() {
   cd "$_name-${_tag#v}"
