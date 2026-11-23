@@ -8,8 +8,8 @@
 class TabbyMihomo < Formula
   desc "Terminal UI for the mihomo (Clash.Meta) kernel"
   homepage "https://github.com/VOD-Studio/tabby"
-  url "https://github.com/VOD-Studio/tabby/archive/refs/tags/v0.2.2.tar.gz"
-  sha256 "e6571969e169e2c0ff1fdf081db1bd47aa5c71ec5b21dd904c7a62d5855568d4"
+  url "https://github.com/VOD-Studio/tabby/archive/refs/tags/v0.3.0.tar.gz"
+  sha256 "0a82828d1369cd212cf71131629e1110035f1ebaeb9198d6d1062e796856cb07"
   license "MIT"
 
   depends_on "rust" => :build
