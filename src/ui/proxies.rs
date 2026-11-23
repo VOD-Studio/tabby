@@ -501,7 +501,7 @@ fn render_nodes(frame: &mut Frame, area: Rect, app: &App, proxies: &Proxies, gro
     let card_width = inner.width / columns;
     let columns = usize::from(columns);
     let total_rows = members.len().div_ceil(columns);
-    let cursor = app.node_cursor();
+    let cursor = app.node_cursor(&members);
     let rows = view
         .node_scroll
         .window(cursor / columns, total_rows, grid_rows(inner));

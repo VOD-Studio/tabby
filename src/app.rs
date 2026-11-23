@@ -3117,11 +3117,12 @@ impl App {
             }
             Pane::Nodes => {
                 let fit = self.proxies_fit();
-                let current = self.node_cursor();
+                let nodes = self.visible_nodes();
+                let current = self.node_cursor(&nodes);
                 if movement == Move::Left && current.is_multiple_of(fit.columns) {
                     self.proxies_view.focus = Pane::Groups;
                 } else {
-                    let len = self.visible_nodes().len();
+                    let len = nodes.len();
                     let half_rows = (fit.rows / 2).max(1);
                     self.proxies_view.node =
                         Some(movement.apply_grid(current, len, fit.columns, half_rows));
@@ -3682,18 +3683,16 @@ impl App {
         nodes
     }
 
-    /// Where the node cursor is in [`App::visible_nodes`]: wherever it was
-    /// moved to, else on the group's current node.
-    pub fn node_cursor(&self) -> usize {
-        let nodes = self.visible_nodes();
-        let resting = self
-            .selected_group()
-            .and_then(|group| group.now.as_deref())
-            .and_then(|now| nodes.iter().position(|name| *name == now))
-            .unwrap_or(0);
+    /// The node cursor in the visible list, defaulting to the group's current node.
+    pub fn node_cursor(&self, nodes: &[&str]) -> usize {
         self.proxies_view
             .node
-            .unwrap_or(resting)
+            .unwrap_or_else(|| {
+                self.selected_group()
+                    .and_then(|group| group.now.as_deref())
+                    .and_then(|now| nodes.iter().position(|name| *name == now))
+                    .unwrap_or(0)
+            })
             .min(nodes.len().saturating_sub(1))
     }
 
@@ -3971,7 +3970,7 @@ impl App {
             return;
         }
         let nodes = self.visible_nodes();
-        let Some(node) = nodes.get(self.node_cursor()) else {
+        let Some(node) = nodes.get(self.node_cursor(&nodes)) else {
             return;
         };
         let (group, node) = (group.name.clone(), (*node).to_owned());
@@ -5029,8 +5028,9 @@ impl App {
     /// The group, position and name the node cursor is on.
     fn node_anchor(&self) -> Option<(String, usize, String)> {
         let group = self.selected_group()?.name.clone();
-        let index = self.node_cursor();
-        let name = (*self.visible_nodes().get(index)?).to_owned();
+        let nodes = self.visible_nodes();
+        let index = self.node_cursor(&nodes);
+        let name = (*nodes.get(index)?).to_owned();
         Some((group, index, name))
     }
 
@@ -5060,10 +5060,12 @@ impl App {
         };
         let target = match self.proxies_view.focus {
             Pane::Groups => group.now.clone(),
-            Pane::Nodes => self
-                .visible_nodes()
-                .get(self.node_cursor())
-                .map(|name| (*name).to_owned()),
+            Pane::Nodes => {
+                let nodes = self.visible_nodes();
+                nodes
+                    .get(self.node_cursor(&nodes))
+                    .map(|name| (*name).to_owned())
+            }
         };
         let Some(name) = target else {
             return;
@@ -5466,7 +5468,8 @@ mod tests {
     }
 
     fn cursor_name(app: &App) -> String {
-        app.visible_nodes()[app.node_cursor()].to_owned()
+        let nodes = app.visible_nodes();
+        nodes[app.node_cursor(&nodes)].to_owned()
     }
 
     fn delay_of(app: &App, name: &str) -> Option<Delay> {
@@ -5912,7 +5915,7 @@ mod tests {
             reply(&[("x", &[]), ("y", &[]), ("a", &[]), ("b", &[]), ("c", &[])]),
         ));
         assert_eq!(cursor_name(&app), "b");
-        assert_eq!(app.node_cursor(), 3);
+        assert_eq!(app.node_cursor(&app.visible_nodes()), 3);
     }
 
     #[tokio::test]
@@ -5983,6 +5986,22 @@ mod tests {
             app.visible_nodes(),
             ["香港 1", "香港 2", "香港 10", "香港 100"]
         );
+    }
+
+    #[test]
+    fn the_node_cursor_uses_the_filtered_and_sorted_grid_order() {
+        let mut app = app_with(reply(&[("node10", &[]), ("node2", &[]), ("other", &[])]));
+        app.proxies_view.sort = Sort::Name;
+        app.proxies_view.filter = Input::new("NODE".into());
+        let nodes = app.visible_nodes();
+        assert_eq!(nodes, ["node2", "node10"]);
+        assert_eq!(app.node_cursor(&nodes), 1);
+
+        app.proxies_view.node = Some(0);
+        assert_eq!(cursor_name(&app), "node2");
+        app.proxies_view.filter = Input::new("10".into());
+        app.proxies_view.node = Some(1);
+        assert_eq!(app.node_cursor(&app.visible_nodes()), 0);
     }
 
     #[test]
@@ -9475,10 +9494,10 @@ secret = "b-secret"
             .position(|group| group.name == "节点选择")
             .unwrap();
         app.proxies_view.group = eight;
-        let cursor = app.node_cursor();
+        let cursor = app.node_cursor(&app.visible_nodes());
         mouse(&mut app, MouseEventKind::ScrollDown, 60, 10);
         assert_eq!(app.proxies_view.focus, Pane::Nodes);
-        assert_eq!(app.node_cursor(), cursor + 3);
+        assert_eq!(app.node_cursor(&app.visible_nodes()), cursor + 3);
         let group = app.proxies_view.group;
         mouse(&mut app, MouseEventKind::ScrollDown, 10, 10);
         assert_eq!(app.proxies_view.focus, Pane::Groups);
@@ -9565,7 +9584,10 @@ secret = "b-secret"
         let (x, y) = locate(&screen, "dead", 28..100);
         click(&mut app, x, y);
         assert_eq!(app.proxies_view.focus, Pane::Nodes);
-        assert_eq!(app.visible_nodes()[app.node_cursor()], "dead");
+        assert_eq!(
+            app.visible_nodes()[app.node_cursor(&app.visible_nodes())],
+            "dead"
+        );
         double_click(&mut app, x, y);
         assert_eq!(
             selections(app, rx).await,
@@ -9580,7 +9602,10 @@ secret = "b-secret"
         let (x, y) = locate(&screen, "香港 01", 0..60);
         click(&mut app, x, y);
         assert_eq!(app.proxies_view.focus, Pane::Nodes);
-        assert_eq!(app.visible_nodes()[app.node_cursor()], "香港 01");
+        assert_eq!(
+            app.visible_nodes()[app.node_cursor(&app.visible_nodes())],
+            "香港 01"
+        );
     }
 
     #[tokio::test]
