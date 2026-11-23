@@ -5,6 +5,49 @@ All notable changes to tabby are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-23
+
+The `-with-mihomo` archives ship mihomo v1.19.33.
+
+### Added
+
+- logs: show a scrollbar on the log panel
+- rules: show a scrollbar beside the table rows
+- connections: show a scrollbar beside the table rows
+- providers: show a scrollbar on the provider list
+- subscriptions: show a scrollbar on the subscription list
+- settings: show a scrollbar on the settings list
+- proxies: show scrollbars on the groups, the node grid and the picker
+- **Breaking:** ui: go to the top with gg, as in vim
+- ui: show scrollbars on the help, profile, theme and dns popups
+- ui: click or drag a scrollbar to scroll there
+- **Breaking:** logs: put a cursor on log lines
+- logs: show the whole line under the cursor on enter
+- logs: copy the line under the cursor with y
+- config: honor xdg directories on macos
+- core: download the darwin kernel on macos
+- core: run the kernel under launchd on macos
+- core: start the kernel at login through a launch agent
+- core: set the macos system proxy with networksetup
+- core: authorize tun on macos with a setuid kernel
+
+### Fixed
+
+- ui: never split a grapheme when wrapping or truncating
+- ui: pad help keys by display width
+- ui: shorten help descriptions so none is cut at 80 columns
+- core: tell the fallback kernel from a reused pid on macos
+- core: turn the kernel's dns on with tun
+- ci: satisfy rust 1.100 clippy checks
+
+### Changed
+
+- proxies: reuse visible nodes for cursor lookups
+- rules: reuse rule filter matches across frames
+- connections: defer sorting hidden snapshots
+- api: index listed proxy groups during conversion
+- core: save managed settings in the background
+
 ## [0.2.2] - 2026-11-10
 
 The `-with-mihomo` archives ship mihomo v1.19.33.
