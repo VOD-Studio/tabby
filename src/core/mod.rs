@@ -6,7 +6,7 @@
 
 mod autostart;
 mod encrypted;
-mod files;
+pub(crate) mod files;
 mod install;
 mod launchd;
 mod privilege;

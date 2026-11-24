@@ -4274,7 +4274,15 @@ impl App {
                 self.start();
                 // The page loads what it loads on a first visit.
                 self.set_page(page);
-                self.toast(ToastKind::Success, format!("已切换到 {label}"));
+                if let Err(err) = self.profiles.remember_current() {
+                    tracing::warn!("cannot remember controller: {err:#}");
+                    self.toast(
+                        ToastKind::Error,
+                        format!("已切换到 {label}，但未能保存下次启动的选择"),
+                    );
+                } else {
+                    self.toast(ToastKind::Success, format!("已切换到 {label}"));
+                }
             }
             Err(err) => self.toast(ToastKind::Error, format!("无法切换到 {label}：{err}")),
         }
@@ -8469,6 +8477,58 @@ secret = "b-secret"
         app.toasts.iter().map(|toast| toast.text.as_str()).collect()
     }
 
+    #[tokio::test]
+    async fn switching_remembers_the_profile_but_not_the_temporary_launch_connection() {
+        use crate::{
+            config::{Config, Overrides},
+            core::testing,
+        };
+
+        let dir = testing::scratch("controller-picker-state");
+        let path = dir.join("last-controller.toml");
+        let overrides = Overrides {
+            url: Some("http://127.0.0.1:3".to_owned()),
+            secret: Some("launch-secret".to_owned()),
+            ..Overrides::default()
+        };
+        let (mut app, _rx) = profiles_app(&overrides);
+        app.profiles.last_controller_path = Some(path.clone());
+        switch_to(&mut app, 2);
+        let saved = std::fs::read_to_string(&path).unwrap();
+        assert!(!saved.contains("http://") && !saved.contains("secret"));
+
+        switch_to(&mut app, 0);
+        assert_eq!(app.settings.url, "http://127.0.0.1:3");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), saved);
+
+        let edited = PROFILES.replace("http://127.0.0.1:2", "http://127.0.0.1:4");
+        let edited = edited.replace("b-secret", "new-secret");
+        let mut config: Config = toml::from_str(&edited).unwrap();
+        config.load_last_controller(&path);
+        let ordinary = Overrides::default();
+        let settings = config.resolve(&ordinary).unwrap();
+        assert_eq!(settings.profile, "b");
+        assert_eq!(settings.url, "http://127.0.0.1:4");
+        assert_eq!(settings.secret.as_deref(), Some("new-secret"));
+        let profiles = config.profiles(&ordinary, &settings);
+        let active = profiles.current_choice().unwrap();
+        assert_eq!(active.origin, Origin::Profile);
+        assert_eq!(active.name, "b");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_controller_state_write_keeps_the_new_connection_selected() {
+        let dir = crate::core::testing::scratch("controller-picker-unwritable");
+        let (mut app, _rx) = profiles_app(&crate::config::Overrides::default());
+        // The state destination is a directory, which a file cannot replace.
+        app.profiles.last_controller_path = Some(dir.clone());
+        switch_to(&mut app, 1);
+        assert_eq!(app.settings.profile, "b");
+        assert_eq!(toast_texts(&app), ["已切换到 b，但未能保存下次启动的选择"]);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// One of every reply and stream event the app takes in.
     fn every_kind_of_msg() -> Vec<Msg> {
         let provider = ProviderRef {
@@ -10173,6 +10233,7 @@ secret = "b-secret"
             choices: vec![managed_choice(&core)],
             current: 0,
             path: None,
+            last_controller_path: None,
             core: Some(core),
         };
         (launch(settings, tx, profiles, Picker::default()), rx)
@@ -10421,6 +10482,7 @@ secret = "b-secret"
             ],
             current: 0,
             path: None,
+            last_controller_path: None,
             core: Some(core),
         };
         let mut app = launch(settings, tx, profiles, Picker::default());

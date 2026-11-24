@@ -47,11 +47,11 @@ macOS 用 `shasum -a 256 --check --ignore-missing SHA256SUMS` 校验；浏览器
 ## 快速开始
 
 ```sh
-tabby                                              # 连接 http://127.0.0.1:9090
+tabby                                              # 首次无配置时连接 http://127.0.0.1:9090
 TABBY_SECRET=your-secret tabby --url http://192.168.1.1:9090
 ```
 
-用 `--profile` 选择配置、`--theme` 指定主题，完整参数见 `tabby --help`。配置优先级：命令行 > 对应的 `TABBY_*` 环境变量 > 配置文件 > 默认值。
+用 `--profile` 选择配置、`--theme` 指定主题，完整参数见 `tabby --help`。命令行参数优先于对应的 `TABBY_*` 环境变量。未指定控制器参数时，启动会优先恢复上次在 `P` 菜单确认切换的控制器，再使用配置文件的 `default` 或内置地址。
 
 命令行中的 `--secret` 会暴露在进程列表中，建议使用环境变量或配置文件。连接控制器时忽略 `HTTP_PROXY` 等代理变量。
 
@@ -68,7 +68,7 @@ url = "http://127.0.0.1:9090"
 secret = "your-secret"       # 明文保存
 ```
 
-添加多个 `[profiles.<名称>]` 可连接不同控制器。
+添加多个 `[profiles.<名称>]` 可连接不同控制器。按 `P` 并回车切换后，tabby 在状态目录的 `last-controller.toml` 中记住选项。下次启动会读取该选项当前的地址与密钥。对应的配置已删除或改名时，回退到 `default` 或内置地址。`P` 菜单里的「启动参数指定」仅用于当前会话。
 
 <details>
 <summary>主题与交互配置</summary>

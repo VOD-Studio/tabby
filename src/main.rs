@@ -42,8 +42,12 @@ async fn main() -> Result<()> {
     let dirs = config::Dirs::current();
     init_logging(dirs.as_ref())?;
     let path = dirs.as_ref().map(config::Dirs::config_file);
+    let last_controller_path = dirs.as_ref().map(config::Dirs::last_controller_file);
     let mut file = Config::load(path.as_deref())?;
     file.open_core(dirs.as_ref().map(|dirs| dirs.data.as_path()))?;
+    if let Some(path) = &last_controller_path {
+        file.load_last_controller(path);
+    }
     let settings = file.resolve(&cli.overrides)?;
     let picker = themes::Picker {
         dir: dirs.as_ref().map(config::Dirs::themes),
@@ -53,6 +57,7 @@ async fn main() -> Result<()> {
     let theme = themes::load(&settings.theme, picker.dir.as_deref())?;
     let profiles = Profiles {
         path,
+        last_controller_path,
         ..file.profiles(&cli.overrides, &settings)
     };
     tracing::info!(

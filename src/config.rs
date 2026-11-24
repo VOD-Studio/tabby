@@ -13,9 +13,12 @@ use color_eyre::{
 };
 use directories::ProjectDirs;
 use ratatui::style::Color;
-use serde::{Deserialize, Deserializer, de};
+use serde::{Deserialize, Deserializer, Serialize, de};
 
-use crate::{core::ManagedCore, os::Os};
+use crate::{
+    core::{ManagedCore, files::write_private},
+    os::Os,
+};
 
 pub const DEFAULT_URL: &str = "http://127.0.0.1:9090";
 
@@ -259,6 +262,9 @@ pub struct Config {
     /// The managed core, once [`Config::open_core`] has made it.
     #[serde(skip)]
     managed: Option<Arc<ManagedCore>>,
+    /// The last explicit choice in the controller picker, loaded separately.
+    #[serde(skip)]
+    last_controller: Option<RememberedController>,
 }
 
 /// Reads `[theme_overrides]`, naming the key in every error: the position
@@ -311,6 +317,12 @@ pub struct Overrides {
     pub theme: Option<String>,
 }
 
+impl Overrides {
+    fn has_endpoint_override(&self) -> bool {
+        non_empty(self.url.as_ref()).is_some() || non_empty(self.secret.as_ref()).is_some()
+    }
+}
+
 /// The connection and look tabby will use, after applying all overrides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Settings {
@@ -342,8 +354,29 @@ pub enum Origin {
     /// The `--url` / `--secret` overrides (or their variables) tabby was
     /// started with.
     Overrides,
-    /// No profile was chosen at start: the built-in address.
+    /// The built-in address.
     Default,
+}
+
+/// The picker choice that can be reconstructed at a later launch.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+enum RememberedController {
+    Profile { name: String },
+    Managed,
+    Default,
+}
+
+impl RememberedController {
+    fn load(path: &Path) -> Result<Option<Self>> {
+        match fs::read_to_string(path) {
+            Ok(text) => toml::from_str(&text)
+                .map(Some)
+                .wrap_err_with(|| format!("invalid controller state {}", path.display())),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(err) => Err(err).wrap_err_with(|| format!("cannot read {}", path.display())),
+        }
+    }
 }
 
 /// One connection the profile popup offers.
@@ -371,14 +404,15 @@ impl Choice {
 /// The connections tabby can switch between at runtime.
 #[derive(Debug, Clone, Default)]
 pub struct Profiles {
-    /// The connection tabby started with first, when no profile describes
-    /// it as written; then the managed core, if there is one; then every
-    /// profile, by name.
+    /// The startup overrides or built-in address, if offered, then the
+    /// managed core, if present, then every profile, by name.
     pub choices: Vec<Choice>,
     /// Index into `choices` of the connection in use.
     pub current: usize,
     /// `config.toml`, for the popup to point at when it defines no profile.
     pub path: Option<PathBuf>,
+    /// Where to remember the chosen controller for the next launch.
+    pub last_controller_path: Option<PathBuf>,
     /// The managed core the `Managed` choice stands for.
     pub core: Option<Arc<ManagedCore>>,
 }
@@ -396,6 +430,23 @@ impl Profiles {
     pub fn current_choice(&self) -> Option<&Choice> {
         self.choices.get(self.current)
     }
+
+    /// Records reconstructible choices only. Startup overrides are temporary.
+    pub fn remember_current(&self) -> Result<()> {
+        let (Some(path), Some(choice)) = (&self.last_controller_path, self.current_choice()) else {
+            return Ok(());
+        };
+        let remembered = match choice.origin {
+            Origin::Profile => RememberedController::Profile {
+                name: choice.name.clone(),
+            },
+            Origin::Managed => RememberedController::Managed,
+            Origin::Default => RememberedController::Default,
+            Origin::Overrides => return Ok(()),
+        };
+        write_private(path, &toml::to_string(&remembered)?)
+            .wrap_err_with(|| format!("cannot write {}", path.display()))
+    }
 }
 
 /// Where tabby keeps its files.
@@ -405,7 +456,7 @@ pub struct Dirs {
     pub config: PathBuf,
     /// The managed core's files.
     pub data: PathBuf,
-    /// `tabby.log`.
+    /// `tabby.log` and the last controller choice.
     pub state: PathBuf,
 }
 
@@ -446,6 +497,10 @@ impl Dirs {
     /// Where `config.toml` lives.
     pub fn config_file(&self) -> PathBuf {
         self.config.join("config.toml")
+    }
+
+    pub fn last_controller_file(&self) -> PathBuf {
+        self.state.join("last-controller.toml")
     }
 
     /// Where user themes live, next to `config.toml`.
@@ -511,13 +566,15 @@ pub fn save_theme(path: &Path, id: &str) -> Result<()> {
         .wrap_err_with(|| format!("cannot write {}", path.display()))
 }
 
-/// What a profile name picks.
+/// The base connection before URL and secret overrides.
 #[derive(Debug, Clone, Copy)]
 enum Chosen<'a> {
     /// A `[profiles.<name>]` table.
     Profile(&'a str, &'a Profile),
     /// The managed core.
     Core,
+    /// The built-in address.
+    Default,
 }
 
 impl<'a> Chosen<'a> {
@@ -525,6 +582,7 @@ impl<'a> Chosen<'a> {
         match self {
             Self::Profile(name, _) => name,
             Self::Core => CORE_PROFILE,
+            Self::Default => FALLBACK_PROFILE,
         }
     }
 }
@@ -563,6 +621,17 @@ impl Config {
         }
     }
 
+    /// Restores optional state without making it a startup dependency.
+    pub fn load_last_controller(&mut self, path: &Path) {
+        self.last_controller = match RememberedController::load(path) {
+            Ok(remembered) => remembered,
+            Err(err) => {
+                tracing::warn!("cannot restore last controller: {err:#}");
+                None
+            }
+        };
+    }
+
     /// Makes the managed core when the file has a `[core]` table, with its
     /// files in `data_dir`.
     pub fn open_core(&mut self, data_dir: Option<&Path>) -> Result<()> {
@@ -581,39 +650,56 @@ impl Config {
         Ok(())
     }
 
-    /// The profile `overrides` pick: `overrides.profile`, else the file's
-    /// `default`, else none.
-    fn chosen(&self, overrides: &Overrides) -> Result<Option<Chosen<'_>>> {
-        let name = non_empty(overrides.profile.as_ref()).or(self.default.as_deref());
-        name.map(|name| {
-            if name == CORE_PROFILE {
-                return self.managed.as_ref().map(|_| Chosen::Core).ok_or_else(|| {
-                    eyre!("profile `{CORE_PROFILE}` needs a [core] table in config.toml")
-                });
-            }
-            self.profiles
-                .get_key_value(name)
-                .map(|(name, profile)| Chosen::Profile(name.as_str(), profile))
-                .ok_or_else(|| eyre!("profile `{name}` is not defined in config.toml"))
-        })
-        .transpose()
+    fn named_profile(&self, name: &str) -> Option<Chosen<'_>> {
+        self.profiles
+            .get_key_value(name)
+            .map(|(name, profile)| Chosen::Profile(name.as_str(), profile))
+    }
+
+    fn remembered_choice(&self) -> Option<Chosen<'_>> {
+        match self.last_controller.as_ref()? {
+            RememberedController::Profile { name } => self.named_profile(name),
+            RememberedController::Managed => self.managed.as_ref().map(|_| Chosen::Core),
+            RememberedController::Default => Some(Chosen::Default),
+        }
+    }
+
+    /// Explicit controller overrides bypass the last choice, so even a URL
+    /// or secret on its own still uses the same base as before.
+    fn chosen(&self, overrides: &Overrides) -> Result<Chosen<'_>> {
+        let profile = non_empty(overrides.profile.as_ref());
+        if profile.is_none()
+            && !overrides.has_endpoint_override()
+            && let Some(chosen) = self.remembered_choice()
+        {
+            return Ok(chosen);
+        }
+        let Some(name) = profile.or(self.default.as_deref()) else {
+            return Ok(Chosen::Default);
+        };
+        if name == CORE_PROFILE {
+            return self.managed.as_ref().map(|_| Chosen::Core).ok_or_else(|| {
+                eyre!("profile `{CORE_PROFILE}` needs a [core] table in config.toml")
+            });
+        }
+        self.named_profile(name)
+            .ok_or_else(|| eyre!("profile `{name}` is not defined in config.toml"))
     }
 
     /// Merges `overrides` over the file over the built-in defaults.
     ///
-    /// The profile is `overrides.profile`, else the file's `default`, else none;
-    /// an explicit `url` / `secret` override beats the profile's own value.
+    /// Without a controller override, a remembered choice takes priority
+    /// over the file's `default`. Explicit `url` / `secret` overrides beat
+    /// the chosen profile's own values.
     /// An empty override (`TABBY_SECRET=`) counts as unset. A theme path is
     /// made absolute: against the current directory when it is an
     /// override, against the file's directory when the file names it.
     pub fn resolve(&self, overrides: &Overrides) -> Result<Settings> {
         let chosen = self.chosen(overrides)?;
         let (chosen_url, chosen_secret) = match chosen {
-            None => (None, None),
-            Some(Chosen::Profile(_, profile)) => {
-                (Some(profile.url.clone()), profile.secret.clone())
-            }
-            Some(Chosen::Core) => {
+            Chosen::Default => (None, None),
+            Chosen::Profile(_, profile) => (Some(profile.url.clone()), profile.secret.clone()),
+            Chosen::Core => {
                 let core = self.managed.as_deref();
                 // The secret of the managed core is for its own controller
                 // only, not for the address an override put in its place.
@@ -635,7 +721,7 @@ impl Config {
             ),
         };
         Ok(Settings {
-            profile: chosen.map_or(FALLBACK_PROFILE, Chosen::name).to_owned(),
+            profile: chosen.name().to_owned(),
             url: non_empty(overrides.url.as_ref())
                 .map(str::to_owned)
                 .or(chosen_url)
@@ -663,24 +749,32 @@ impl Config {
     ///
     /// The overrides only shaped the connection tabby started with: a
     /// profile switched to connects with its own url and secret. So that
-    /// first connection is offered on its own, ahead of the profiles,
-    /// whenever a `url` or `secret` override shaped it, or no profile did.
+    /// first connection is offered on its own when shaped by a `url` or
+    /// `secret` override. Retain the built-in address when restoring a
+    /// choice for a configuration with no default profile.
     pub fn profiles(&self, overrides: &Overrides, settings: &Settings) -> Profiles {
         // `resolve` has already failed on an unknown profile.
-        let chosen = self.chosen(overrides).ok().flatten();
-        let overridden = non_empty(overrides.url.as_ref()).is_some()
-            || non_empty(overrides.secret.as_ref()).is_some();
-        let launch = match (overridden, chosen) {
-            (true, _) => Some(Origin::Overrides),
-            (false, None) => Some(Origin::Default),
-            (false, Some(_)) => None,
-        }
-        .map(|origin| Choice {
-            origin,
-            name: settings.profile.clone(),
-            url: settings.url.clone(),
-            secret: settings.secret.clone(),
-        });
+        let chosen = self.chosen(overrides).unwrap_or(Chosen::Default);
+        let overridden = overrides.has_endpoint_override();
+        let launch = if overridden {
+            Some(Choice {
+                origin: Origin::Overrides,
+                name: settings.profile.clone(),
+                url: settings.url.clone(),
+                secret: settings.secret.clone(),
+            })
+        } else if matches!(chosen, Chosen::Default)
+            || (self.default.is_none() && non_empty(overrides.profile.as_ref()).is_none())
+        {
+            Some(Choice {
+                origin: Origin::Default,
+                name: FALLBACK_PROFILE.to_owned(),
+                url: DEFAULT_URL.to_owned(),
+                secret: None,
+            })
+        } else {
+            None
+        };
         let managed = self.managed.as_deref().map(|core| Choice {
             origin: Origin::Managed,
             name: CORE_PROFILE.to_owned(),
@@ -688,17 +782,18 @@ impl Config {
             secret: Some(core.secret().to_owned()),
         });
         // The profiles come after the launch connection and the core.
-        let before = usize::from(launch.is_some()) + usize::from(managed.is_some());
-        let current = match (&launch, chosen) {
-            (None, Some(Chosen::Core)) => Some(0),
-            (None, Some(Chosen::Profile(name, _))) => self
+        let before_core = usize::from(launch.is_some());
+        let before_profiles = before_core + usize::from(managed.is_some());
+        let current = match chosen {
+            _ if overridden => 0,
+            Chosen::Default => 0,
+            Chosen::Core => before_core,
+            Chosen::Profile(name, _) => self
                 .profiles
                 .keys()
                 .position(|key| key == name)
-                .map(|index| index + before),
-            _ => None,
-        }
-        .unwrap_or(0);
+                .map_or(0, |index| index + before_profiles),
+        };
         let choices = launch
             .into_iter()
             .chain(managed)
@@ -713,6 +808,7 @@ impl Config {
             choices,
             current,
             path: None,
+            last_controller_path: None,
             core: self.managed.clone(),
         }
     }
@@ -1162,6 +1258,67 @@ c4 = "gray"
     }
 
     #[test]
+    fn explicit_controller_overrides_bypass_the_remembered_profile() {
+        let mut config = file();
+        config.last_controller = Some(RememberedController::Profile {
+            name: "router".to_owned(),
+        });
+        for overrides in [
+            Overrides {
+                profile: Some("local".to_owned()),
+                ..Overrides::default()
+            },
+            Overrides {
+                url: Some("http://cli:9090".to_owned()),
+                ..Overrides::default()
+            },
+            Overrides {
+                secret: Some("cli-secret".to_owned()),
+                ..Overrides::default()
+            },
+        ] {
+            assert_eq!(
+                config.resolve(&overrides).unwrap(),
+                file().resolve(&overrides).unwrap()
+            );
+            assert_eq!(
+                offered(&config, &overrides).choices,
+                offered(&file(), &overrides).choices
+            );
+        }
+
+        let empty = Overrides {
+            profile: Some(String::new()),
+            url: Some(String::new()),
+            secret: Some(String::new()),
+            theme: Some("nord".to_owned()),
+        };
+        assert_eq!(config.resolve(&empty).unwrap().profile, "router");
+    }
+
+    #[test]
+    fn missing_or_unreadable_remembered_choices_use_the_normal_startup_default() {
+        let dir = scratch("last-controller-fallback");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("last-controller.toml");
+        for text in [
+            "kind = 'profile'\nname = 'deleted'\n",
+            "kind = 'managed'\n",
+            "broken[",
+        ] {
+            fs::write(&path, text).unwrap();
+            let mut config = file();
+            config.load_last_controller(&path);
+            let profiles = offered(&config, &Overrides::default());
+            assert_eq!(profiles.current_choice().unwrap().name, "local");
+            config.default = None;
+            let profiles = offered(&config, &Overrides::default());
+            assert_eq!(profiles.current_choice().unwrap().origin, Origin::Default);
+        }
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn the_built_in_address_is_not_mistaken_for_a_profile_named_default() {
         let config: Config = toml::from_str(
             r#"
@@ -1179,6 +1336,33 @@ url = "http://elsewhere:9090"
             ]
         );
         assert_eq!(profiles.current, 0);
+    }
+
+    #[test]
+    fn the_remembered_built_in_address_remains_distinct_from_a_profile_named_default() {
+        let dir = scratch("remembered-built-in");
+        let path = dir.join("last-controller.toml");
+        let overrides = Overrides::default();
+        let mut config: Config =
+            toml::from_str("[profiles.default]\nurl = 'http://elsewhere:9090'\n").unwrap();
+        config.last_controller = Some(RememberedController::Profile {
+            name: "default".to_owned(),
+        });
+        let mut profiles = offered(&config, &overrides);
+        assert_eq!(profiles.current_choice().unwrap().origin, Origin::Profile);
+        assert_eq!(profiles.choices[0].origin, Origin::Default);
+        profiles.current = 0;
+        profiles.last_controller_path = Some(path.clone());
+        profiles.remember_current().unwrap();
+
+        config.default = Some("default".to_owned());
+        config.load_last_controller(&path);
+        let profiles = offered(&config, &overrides);
+        let current = profiles.current_choice().unwrap();
+        assert_eq!(current.origin, Origin::Default);
+        assert_eq!(current.url, DEFAULT_URL);
+        assert_eq!(config.resolve(&overrides).unwrap().url, DEFAULT_URL);
+        fs::remove_dir_all(dir).unwrap();
     }
 
     /// `FILE` with a `[core]` table, the core's files in a scratch
@@ -1211,6 +1395,27 @@ url = "http://elsewhere:9090"
         assert_eq!(shown[2].1, "http://local:9090");
         assert_eq!(profiles.current, 0);
         assert!(profiles.core.is_some());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn remembering_the_managed_core_restores_its_actual_menu_choice() {
+        let (mut config, dir) = with_core("remembered-core", None);
+        let path = dir.join("last-controller.toml");
+        let overrides = Overrides::default();
+        let mut profiles = offered(&config, &overrides);
+        profiles.current = 1;
+        profiles.last_controller_path = Some(path.clone());
+        profiles.remember_current().unwrap();
+
+        config.load_last_controller(&path);
+        let settings = config.resolve(&overrides).unwrap();
+        let profiles = config.profiles(&overrides, &settings);
+        let current = profiles.current_choice().unwrap();
+        assert_eq!(profiles.choices[0].origin, Origin::Default);
+        assert_eq!(current.origin, Origin::Managed);
+        assert_eq!(settings.url, current.url);
+        assert_eq!(settings.secret, current.secret);
         fs::remove_dir_all(dir).unwrap();
     }
 
