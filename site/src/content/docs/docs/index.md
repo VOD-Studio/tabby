@@ -7,10 +7,16 @@ Tabby 是适用于 Linux 和 macOS 的中文 mihomo 终端控制台。已经在�
 
 本手册以稳定版 **v0.3.1** 为准。
 
-## 连接已有内核
+## 安装后从这里开始
 
-确认 mihomo 已启用外部控制器，再用 `tabby --url http://127.0.0.1:9090` 连接。这里的地址是示例，使用带密钥的控制器时，在启动前设置 `TABBY_SECRET`。
+先按系统完成[安装](./install/)。启动后可按 `?` 打开当前页面的帮助。
 
-## 托管 mihomo
+- [连接已有内核](./quick-start/connect/)。已有本机或远程 mihomo，准备好外部控制器的地址和密钥即可。
+- [托管 mihomo](./quick-start/managed/)。让 Tabby 安装和管理内核，适合希望在终端里管理订阅的用户。
 
-在 `config.toml` 设置 `default = "core"` 并添加 `[core]` 表。启动 Tabby 后，进入「订阅」页按 `a` 导入 URL 或文件，再按 `Enter` 切换。
+## 使用手册
+
+- [从概览页开始](./use/overview/)，或查看[全局快捷键](./reference/keys/)。
+- [托管内核的启停与升级](./manage/kernel/)，以及[订阅格式与更新方式](./manage/subscriptions/)。
+- [配置参考](./reference/configuration/)包括文件位置、参数优先级和完整示例。
+- [故障排查](./troubleshooting/)从连接失败、认证失败、端口冲突等常见现象入手。
