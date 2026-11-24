@@ -1,0 +1,101 @@
+---
+import '@fontsource-variable/geist';
+import '../styles/tokens.css';
+import '../styles/site.css';
+import { Icon } from '@astrojs/starlight/components';
+import mascot from '../assets/mascot.webp';
+import overview from '../assets/overview.webp';
+import { repository, sitePath } from '../links';
+
+interface Props {
+  title: string;
+  description: string;
+  noindex?: boolean;
+}
+
+const { title, description, noindex = false } = Astro.props;
+const canonical = new URL(Astro.url.pathname, Astro.site);
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="description" content={description} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    {!noindex && <meta property="og:url" content={canonical} />}
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content={new URL(overview.src, Astro.site)} />
+    {noindex ? <meta name="robots" content="noindex" /> : <link rel="canonical" href={canonical} />}
+    <link rel="icon" href={sitePath('/favicon.png')} type="image/png" />
+    <title>{title}</title>
+    <script is:inline>
+      (() => {
+        const system = matchMedia('(prefers-color-scheme: light)');
+        let preference = 'auto';
+        try {
+          const saved = localStorage.getItem('starlight-theme');
+          if (saved === 'light' || saved === 'dark') preference = saved;
+        } catch {}
+
+        const updateTheme = () => {
+          document.documentElement.dataset.theme =
+            preference === 'auto' ? (system.matches ? 'light' : 'dark') : preference;
+        };
+        updateTheme();
+        system.addEventListener('change', updateTheme);
+        document.addEventListener('DOMContentLoaded', () => {
+          const select = document.getElementById('site-theme');
+          select.value = preference;
+          select.addEventListener('change', () => {
+            preference = select.value;
+            updateTheme();
+            try {
+              localStorage.setItem('starlight-theme', preference === 'auto' ? '' : preference);
+            } catch {}
+          });
+        });
+      })();
+    </script>
+  </head>
+  <body>
+    <a href="#content" class="skip-link">跳转到正文</a>
+    <header class="site-header">
+      <div class="site-width header-inner">
+        <a href={sitePath('/')} class="site-brand" aria-label="Tabby 首页">
+          <img src={mascot.src} alt="" width="37" height="37" />
+          <span>Tabby</span>
+        </a>
+        <nav aria-label="主导航">
+          <a href={sitePath('/docs/')}>文档</a>
+          <a href={sitePath('/download/')} aria-current={Astro.url.pathname === sitePath('/download/') ? 'page' : undefined}>下载</a>
+          <a href={repository}>GitHub</a>
+        </nav>
+        <div class="theme-picker">
+          <Icon name="sun" class="sun-icon" />
+          <Icon name="moon" class="moon-icon" />
+          <select id="site-theme" aria-label="颜色主题" title="颜色主题">
+            <option value="auto">跟随系统</option>
+            <option value="light">浅色</option>
+            <option value="dark">深色</option>
+          </select>
+        </div>
+      </div>
+    </header>
+
+    <main id="content" tabindex="-1"><slot /></main>
+
+    <footer class="site-footer">
+      <div class="site-width footer-inner">
+        <span>Tabby <span class="footer-license">· MIT</span></span>
+        <nav aria-label="页脚导航">
+          <a href={sitePath('/docs/')}>文档</a>
+          <a href={`${repository}/blob/main/CHANGELOG.md`}>更新日志</a>
+          <a href={`${repository}/issues`}>反馈问题</a>
+        </nav>
+      </div>
+    </footer>
+  </body>
+</html>

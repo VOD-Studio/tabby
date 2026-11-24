@@ -1,0 +1,21 @@
+---
+import SiteLayout from '../layouts/SiteLayout.astro';
+import { sitePath } from '../links';
+---
+
+<SiteLayout title="页面未找到 · Tabby" description="返回 Tabby 首页或访问中文文档。" noindex>
+  <div class="site-width not-found">
+    <h1>页面未找到</h1>
+    <p>你可以回到首页，或在文档中搜索需要的内容。</p>
+    <div class="actions">
+      <a class="action primary" href={sitePath('/docs/')}>文档首页</a>
+      <a class="action" href={sitePath('/')}>Tabby 首页</a>
+    </div>
+  </div>
+</SiteLayout>
+
+<style>
+  .not-found { padding-block: clamp(3rem, 10vw, 8rem); }
+  h1 { margin: 0; font-size: clamp(2rem, 7vw, 4rem); line-height: 1.2; letter-spacing: -0.05em; }
+  p { margin: 0.8rem 0 1.4rem; color: var(--tabby-muted); }
+</style>

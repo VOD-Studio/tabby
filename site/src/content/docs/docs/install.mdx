@@ -1,0 +1,94 @@
+---
+title: 安装 Tabby
+description: 在 Linux 或 macOS 上安装 Tabby 并校验发布包。
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components';
+
+## 系统要求
+
+| 系统 | 架构 | 最低要求 |
+| --- | --- | --- |
+| Linux | x86_64、aarch64 | glibc 2.35 |
+| macOS | Apple Silicon、Intel | macOS 12 |
+
+用 `uname -m` 查看当前架构。终端至少需要 50 列 × 15 行，缩小窗口时布局会自动简化。
+
+## 使用 GitHub 发布包
+
+打开[下载页](../../download/)，从最新稳定版下载对应架构的压缩包和同一版本的 `SHA256SUMS`。带 `with-mihomo` 后缀的包附带内核，适合托管模式。普通包可连接已有的内核，也可以在启用托管后下载内核。
+
+<Tabs>
+<TabItem label="Linux">
+
+在下载目录运行下列命令。例子使用 x86_64 的带内核发布包，其他变体替换 `archive` 的值。
+
+```sh
+archive='tabby-0.3.1-x86_64-unknown-linux-gnu-with-mihomo.tar.gz'
+sha256sum --check --ignore-missing SHA256SUMS
+mkdir -p "$HOME/.local"
+tar -xzf "$archive" -C "$HOME/.local" --strip-components=1
+```
+
+校验输出应包含所选文件和 `OK`。校验通过后再解压。
+
+</TabItem>
+<TabItem label="macOS">
+
+在下载目录运行下列命令。例子使用 Apple Silicon 的带内核发布包，Intel Mac 选择文件名包含 `x86_64-apple-darwin` 的包。
+
+```sh
+archive='tabby-0.3.1-aarch64-apple-darwin-with-mihomo.tar.gz'
+shasum -a 256 --check --ignore-missing SHA256SUMS
+mkdir -p "$HOME/.local"
+tar -xzf "$archive" -C "$HOME/.local" --strip-components=1
+```
+
+校验输出应包含所选文件和 `OK`。如果已校验的浏览器下载文件因隔离属性而无法运行，按发布包说明在解压前对该压缩包执行 `xattr -d com.apple.quarantine "$archive"`，再重新解压。
+
+</TabItem>
+</Tabs>
+
+确认 `~/.local/bin` 在 `PATH` 里。使用带内核发布包时，保留解压得到的 `lib/tabby/mihomo` 与 `bin/tabby` 的目录关系，Tabby 才能找到随包内核。
+
+```sh
+tabby --version
+```
+
+如果出现 `command not found`，先用 `"$HOME/.local/bin/tabby" --version` 确认安装文件，再把 `$HOME/.local/bin` 加到 shell 的 `PATH`。
+
+## 包管理器与源码
+
+**Homebrew**
+
+```sh
+brew install vod-studio/tabby/tabby-mihomo
+```
+
+**Arch Linux**
+
+使用仓库的 [PKGBUILD](https://github.com/VOD-Studio/tabby/blob/main/packaging/arch/PKGBUILD) 构建 `tabby-mihomo` 包。
+
+```sh
+git clone https://github.com/VOD-Studio/tabby.git
+cd tabby/packaging/arch
+makepkg -si
+```
+
+Arch 中的 Tabby 终端也使用 `/usr/bin/tabby`，这两个包存在文件冲突。
+
+**源码**
+
+使用 Rust 1.95 或更新版本，选择与本手册匹配的标签。
+
+```sh
+git clone --branch v0.3.1 https://github.com/VOD-Studio/tabby.git
+cd tabby
+cargo install --locked --path .
+```
+
+Homebrew、Arch 和源码方式安装的 Tabby 可以直接连接已有的内核。需要托管时，可在首次启动安装内核。
+
+## 下一步
+
+[连接已有内核](../quick-start/connect/)或[托管 mihomo](../quick-start/managed/)。

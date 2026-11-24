@@ -1,0 +1,26 @@
+:root,
+:root[data-theme='light'] {
+  --sl-font: var(--tabby-font);
+  --sl-font-mono: var(--tabby-mono);
+  --sl-color-bg: var(--tabby-bg);
+  --sl-color-bg-nav: var(--tabby-surface);
+  --sl-color-bg-sidebar: var(--tabby-bg);
+  --sl-color-text: var(--tabby-muted);
+  --sl-color-text-accent: var(--tabby-accent);
+  --sl-color-hairline-light: var(--tabby-border);
+  --sl-color-hairline-shade: var(--tabby-border);
+  --sl-color-accent: var(--tabby-accent);
+  --sl-color-accent-low: var(--tabby-glow);
+  --sl-color-accent-high: var(--tabby-accent);
+  --sl-color-white: var(--tabby-ink);
+  --sl-content-width: 47rem;
+  --sl-text-base: 1.0625rem;
+}
+
+.sidebar-content [aria-current='page'] {
+  color: var(--tabby-on-accent);
+}
+
+.sl-markdown-content a {
+  text-underline-offset: 0.17em;
+}

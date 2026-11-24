@@ -1,0 +1,25 @@
+:root {
+  --tabby-font: 'Geist Variable', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC', system-ui, sans-serif;
+  --tabby-mono: ui-monospace, 'SFMono-Regular', Consolas, monospace;
+  --tabby-bg: #191715;
+  --tabby-surface: #221e1a;
+  --tabby-ink: #fff2e3;
+  --tabby-muted: #cabaaa;
+  --tabby-border: #4a3c31;
+  --tabby-accent: #ffad86;
+  --tabby-on-accent: #2d190e;
+  --tabby-glow: #432b1f;
+  --tabby-shadow: #0008;
+}
+
+:root[data-theme='light'] {
+  --tabby-bg: #faf7f1;
+  --tabby-surface: #fffdf9;
+  --tabby-ink: #241c16;
+  --tabby-muted: #655549;
+  --tabby-border: #e4d7ca;
+  --tabby-accent: #a43f21;
+  --tabby-on-accent: #fffaf6;
+  --tabby-glow: #f7e0c9;
+  --tabby-shadow: #60361345;
+}
