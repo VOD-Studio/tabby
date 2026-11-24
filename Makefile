@@ -72,7 +72,7 @@ cut-release: ## Gate, bump, CHANGELOG, commit and tag VERSION=x.y.z (no push; th
 aur: ## Point packaging/arch/PKGBUILD at the pushed tag of Cargo.toml's version, write .SRCINFO
 	scripts/aur.sh
 
-brew: ## Point packaging/homebrew/tabby-mihomo.rb at the pushed tag of Cargo.toml's version
+brew: ## Point packaging/homebrew/tabby-mihomo.rb at the published binaries for Cargo.toml's version
 	scripts/brew.sh
 
 clean: ## Remove build artifacts

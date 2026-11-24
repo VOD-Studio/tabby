@@ -24,7 +24,7 @@
 | 方式 | 安装 |
 | ---- | ---- |
 | 发布包 | 从 [Releases](https://github.com/VOD-Studio/tabby/releases) 下载；`-with-mihomo` 包附带内核 |
-| Homebrew | `brew install vod-studio/tabby/tabby-mihomo` |
+| Homebrew | `brew install vod-studio/tabby/tabby-mihomo`，自动安装对应平台的预编译包 |
 | Arch Linux | 使用 [`PKGBUILD`](packaging/arch/PKGBUILD)：`cd packaging/arch && makepkg -si` |
 | 源码 | Rust ≥ 1.95，克隆仓库后执行 `cargo install --path .` |
 
