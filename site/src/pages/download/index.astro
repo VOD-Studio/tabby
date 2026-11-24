@@ -1,0 +1,69 @@
+---
+import SiteLayout from '../../layouts/SiteLayout.astro';
+import { latestRelease, sitePath } from '../../links';
+
+const platforms = [
+  { name: 'Linux', requirement: 'glibc 2.35 或更高版本', targets: [['x86_64', 'x86_64-unknown-linux-gnu'], ['aarch64', 'aarch64-unknown-linux-gnu']] },
+  { name: 'macOS', requirement: 'macOS 12 或更高版本', targets: [['Apple Silicon', 'aarch64-apple-darwin'], ['Intel', 'x86_64-apple-darwin']] },
+];
+---
+
+<SiteLayout title="下载 Tabby" description="为 Linux 或 macOS 下载 Tabby 稳定版，选择架构并校验安装包。">
+  <div class="site-width download">
+    <header class="download-header">
+      <h1>下载 Tabby</h1>
+      <p>为你的系统选择预编译发布包。带 <code>with-mihomo</code> 后缀的包附带内核。普通包适合已经在使用 mihomo 的用户。</p>
+      <div class="actions">
+        <a href={latestRelease} class="action primary">前往最新稳定版</a>
+        <a href="#verify" class="action">校验发布包</a>
+      </div>
+    </header>
+
+    <section class="platform-grid" aria-label="发布包架构">
+      {platforms.map(({ name, requirement, targets }) => (
+        <article>
+          <h2>{name}</h2>
+          <p>{requirement}</p>
+          <dl>{targets.map(([arch, target]) => <><dt>{arch}</dt><dd><code>{target}</code></dd></>)}</dl>
+        </article>
+      ))}
+    </section>
+
+    <section class="download-section" id="verify">
+      <h2>校验发布包</h2>
+      <p>从同一发布版本下载 <code>SHA256SUMS</code> 和所选压缩包，放在同一目录。校验输出应显示该文件为 <code>OK</code>。</p>
+      <pre><code>sha256sum --check --ignore-missing SHA256SUMS  # Linux<br />shasum -a 256 --check --ignore-missing SHA256SUMS  # macOS</code></pre>
+    </section>
+
+    <section class="download-section">
+      <h2>其他安装方式</h2>
+      <dl class="methods">
+        <dt>Homebrew</dt><dd><code>brew install vod-studio/tabby/tabby-mihomo</code></dd>
+        <dt>Arch Linux</dt><dd>从 AUR 安装 <code>tabby-mihomo</code>，或用仓库的 PKGBUILD 构建。</dd>
+        <dt>源码</dt><dd>使用 Rust 1.95 或更高版本，在仓库根目录运行 <code>cargo install --locked --path .</code>。</dd>
+      </dl>
+      <p><a href={sitePath('/docs/')}>阅读文档</a></p>
+    </section>
+  </div>
+</SiteLayout>
+
+<style>
+  .download { max-width: 64rem; padding-block: clamp(2.7rem, 7vw, 5.6rem); }
+  .download-header { max-width: 40rem; }
+  h1 { margin: 0; font-size: clamp(2.4rem, 6vw, 4.5rem); line-height: 1.14; letter-spacing: -0.07em; }
+  h2 { margin: 0; font-size: 1.35rem; letter-spacing: -0.025em; }
+  p { margin: 0.42rem 0 0; color: var(--tabby-muted); }
+  .download-header p { margin-top: 1rem; font-size: 1.1rem; }
+  .actions { margin-top: 1.5rem; }
+  .platform-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1rem; margin-top: 2.7rem; }
+  article { padding: clamp(1.05rem, 3vw, 1.65rem); border: 1px solid var(--tabby-border); border-radius: 0.8rem; background: var(--tabby-surface); }
+  dl { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0.5rem 0.9rem; margin: 1rem 0 0; }
+  dt { font-weight: 620; }
+  dd { min-width: 0; margin: 0; color: var(--tabby-muted); overflow-wrap: anywhere; }
+  dd code { font-size: 0.9em; }
+  .download-section { margin-top: 2.5rem; }
+  pre { overflow-x: auto; border: 1px solid var(--tabby-border); border-radius: 0.65rem; background: var(--tabby-surface); color: var(--tabby-ink); padding: 0.8rem 1rem; font-size: 0.86rem; }
+  .methods + p { margin-top: 1rem; }
+  p a { color: var(--tabby-accent); }
+  @media (max-width: 42rem) { .platform-grid { grid-template-columns: minmax(0, 1fr); } }
+</style>
