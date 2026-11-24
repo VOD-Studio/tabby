@@ -5,7 +5,7 @@
 - 前置：主方案 `2026-11-05-tabby-tui.md`（M0–M6）。本方案取代其 §1 中“不管理内核进程”“不编辑订阅或 YAML 配置文件”两条非目标。
 - 参照：FlClash（`chen08209/FlClash`，2026-11-06 的 main 分支），下文引用的路径都相对于它的仓库根目录。
 
-FlClash 源码还留在 /tmp/flclash-src，实现时可以直接对照
+本文记录 Linux 托管功能的设计与实施。当前操作参见[内核生命周期](https://vod-studio.github.io/tabby/docs/manage/kernel/)。macOS 的进程管理、权限和系统集成见 [macOS 方案](2026-11-11-macos.md)。
 
 ## 1. 目标与范围
 
@@ -78,19 +78,20 @@ flowchart LR
 
 ```
 <data>/core/
-├── bin/mihomo                # tabby 下载的内核（[core].binary 未设置时）
+├── bin/mihomo                # tabby 下载或从随包内核复制的二进制
+├── bin/mihomo.shipped        # 随包内核的复制记录（大小与修改时间）
 ├── home/                     # mihomo -d；geo 数据、cache.db 也在这里
 │   ├── config.yaml           # 生成的运行配置，0600（含 secret）
 │   └── providers/<id>.txt    # 分享链接订阅包装成的 provider 文件
-├── profiles/<id>.yaml        # 订阅原文（下载或导入的原样内容）
+├── profiles/<id>.yaml        # YAML 订阅原文或分享链接生成的外层配置，0600
 ├── subscriptions.toml        # 订阅列表与元数据，0600（含 URL token 与 age 密钥）
 ├── settings.toml             # 托管内核的设置（§7.3）
 ├── state.toml                # 控制器地址、secret、unit 名、后备模式下的 pid，0600
-└── core.log                  # 仅后备模式（§5.3）：内核的 stdout/stderr
+└── core.log                  # 后备模式或 macOS launchd 下内核的 stdout/stderr
 ```
 
 - `state.toml` 第一次使用时生成：控制器端口取 `bind 127.0.0.1:0` 拿到的空闲端口；secret 是从 `/dev/urandom` 读的 32 字节，转成十六进制（不引入随机数 crate）；unit 名 `tabby-mihomo-<8 位十六进制随机后缀>`，因此不同数据目录（例如测试时的临时目录）互不冲突。
-- secret 只写进 `config.yaml`，不出现在命令行（`/proc/<pid>/cmdline` 对所有用户可见）和 unit 属性里。
+- 控制器密钥存于 `state.toml` 和 `config.yaml`。启动参数和单元属性里没有密钥。
 - 这些文件都是 tabby 自己写的，不放进 `config.toml`。
 
 ## 5. 进程管理
@@ -127,13 +128,13 @@ flowchart LR
 没有 systemd 用户实例时使用：
 
 - `std::process::Command` 设 `process_group(0)`，stdin 接 null，stdout / stderr 写入 `core.log`（启动前把旧日志改名为 `core.log.1`），pid 记进 `state.toml`。
-- 存活检查：Linux 读 `/proc/<pid>/cmdline`，确认进程存在而且确实是这个内核；其他平台执行 `kill -0 <pid>`。
+- 存活检查：Linux 比对 `/proc/<pid>/stat` 中的启动时间和 `state.toml` 中的记录。macOS 比对 `ps -o lstart=` 输出的哈希。这样可以识别 PID 是否已被其他进程复用。
 - 停止：`kill -TERM`，5 s 后进程还在就 `kill -KILL`。
 - 不会自动拉起崩溃的内核。tabby 在运行时发现内核退出，会在横幅里写 `内核已退出`，按 `r` 重新拉起。
 
 ### 5.4 tabby 退出
 
-`q` 只退出界面，内核继续运行。停止内核放在设置页的“维护”组：`停止内核`，需要确认；停掉后 tabby 仍在托管内核这一项上，显示 `内核未运行` 和 `r 启动`。
+按 `q` 退出界面后，内核继续运行。到「设置 → 托管内核 → 停止内核」，确认后可以停止进程。停掉后仍选中托管内核，可按 `r` 重新启动。
 
 ## 6. 内核安装与更新
 
@@ -250,7 +251,7 @@ flowchart LR
 default = "core"            # 可选：启动时直接用托管内核
 
 [core]                      # 有这一段才在 P 弹窗里显示“托管内核”
-binary = "/usr/bin/mihomo"  # 可选；不写则由 tabby 下载到数据目录并负责更新
+# binary = "/usr/bin/mihomo" # 可选。省略时按 §6 查找内核
 ```
 
 覆盖优先级照旧（主方案 §5）。`--profile core` / `TABBY_PROFILE=core` 选中托管内核；`--url` 与 `core` 同时给出时以 `--url` 为准，与现在相同：命令行指定的地址优先于 profile。
