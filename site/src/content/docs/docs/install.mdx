@@ -16,7 +16,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ## 使用 GitHub 发布包
 
-打开[下载页](../../download/)，从最新稳定版下载对应架构的压缩包和同一版本的 `SHA256SUMS`。带 `with-mihomo` 后缀的包附带内核，适合托管模式。普通包可连接已有的内核，也可以在启用托管后下载内核。
+打开[下载页](../../download/)，下载对应架构的压缩包和同一版本的 `SHA256SUMS`，放在同一目录。文件名以 `-with-mihomo.tar.gz` 结尾的包附带内核，适合托管模式。普通包可连接已有内核，也可以在启用托管后下载内核。
 
 <Tabs>
 <TabItem label="Linux">
@@ -25,12 +25,10 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 ```sh
 archive='tabby-0.3.1-x86_64-unknown-linux-gnu-with-mihomo.tar.gz'
-sha256sum --check --ignore-missing SHA256SUMS
-mkdir -p "$HOME/.local"
-tar -xzf "$archive" -C "$HOME/.local" --strip-components=1
+awk -v archive="$archive" '$2 == archive' SHA256SUMS | sha256sum --check -
 ```
 
-校验输出应包含所选文件和 `OK`。校验通过后再解压。
+校验输出应包含所选文件和 `OK`。
 
 </TabItem>
 <TabItem label="macOS">
@@ -39,15 +37,20 @@ tar -xzf "$archive" -C "$HOME/.local" --strip-components=1
 
 ```sh
 archive='tabby-0.3.1-aarch64-apple-darwin-with-mihomo.tar.gz'
-shasum -a 256 --check --ignore-missing SHA256SUMS
-mkdir -p "$HOME/.local"
-tar -xzf "$archive" -C "$HOME/.local" --strip-components=1
+awk -v archive="$archive" '$2 == archive' SHA256SUMS | shasum -a 256 --check -
 ```
 
-校验输出应包含所选文件和 `OK`。如果已校验的浏览器下载文件因隔离属性而无法运行，按发布包说明在解压前对该压缩包执行 `xattr -d com.apple.quarantine "$archive"`，再重新解压。
+校验输出应包含所选文件和 `OK`。从浏览器下载的压缩包如果带有 `com.apple.quarantine` 属性，校验通过后、解压前可运行 `xattr -d com.apple.quarantine "$archive"`。
 
 </TabItem>
 </Tabs>
+
+确认所选包校验通过后，用同一 `archive` 变量解压。
+
+```sh
+mkdir -p "$HOME/.local"
+tar -xzf "$archive" -C "$HOME/.local" --strip-components=1
+```
 
 确认 `~/.local/bin` 在 `PATH` 里。使用带内核发布包时，保留解压得到的 `lib/tabby/mihomo` 与 `bin/tabby` 的目录关系，Tabby 才能找到随包内核。
 
@@ -79,7 +82,7 @@ Arch 中的 Tabby 终端也使用 `/usr/bin/tabby`，这两个包存在文件冲
 
 **源码**
 
-使用 Rust 1.95 或更新版本，选择与本手册匹配的标签。
+使用当前稳定版 Rust，选择与本手册匹配的标签。
 
 ```sh
 git clone --branch v0.3.1 https://github.com/VOD-Studio/tabby.git
@@ -87,7 +90,7 @@ cd tabby
 cargo install --locked --path .
 ```
 
-Homebrew、Arch 和源码方式安装的 Tabby 可以直接连接已有的内核。需要托管时，可在首次启动安装内核。
+Homebrew、Arch 和源码安装均可直接连接已有内核。启用托管模式后，Tabby 会查找本机的 `mihomo`，找不到时会询问是否下载。
 
 ## 下一步
 
