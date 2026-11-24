@@ -24,7 +24,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 在下载目录运行下列命令。例子使用 x86_64 的带内核发布包，其他变体替换 `archive` 的值。
 
 ```sh
-archive='tabby-0.3.1-x86_64-unknown-linux-gnu-with-mihomo.tar.gz'
+archive='tabby-0.4.0-x86_64-unknown-linux-gnu-with-mihomo.tar.gz'
 awk -v archive="$archive" '$2 == archive' SHA256SUMS | sha256sum --check -
 ```
 
@@ -36,7 +36,7 @@ awk -v archive="$archive" '$2 == archive' SHA256SUMS | sha256sum --check -
 在下载目录运行下列命令。例子使用 Apple Silicon 的带内核发布包，Intel Mac 选择文件名包含 `x86_64-apple-darwin` 的包。
 
 ```sh
-archive='tabby-0.3.1-aarch64-apple-darwin-with-mihomo.tar.gz'
+archive='tabby-0.4.0-aarch64-apple-darwin-with-mihomo.tar.gz'
 awk -v archive="$archive" '$2 == archive' SHA256SUMS | shasum -a 256 --check -
 ```
 
@@ -85,7 +85,7 @@ Arch 中的 Tabby 终端也使用 `/usr/bin/tabby`，这两个包存在文件冲
 使用当前稳定版 Rust，选择与本手册匹配的标签。
 
 ```sh
-git clone --branch v0.3.1 https://github.com/VOD-Studio/tabby.git
+git clone --branch v0.4.0 https://github.com/VOD-Studio/tabby.git
 cd tabby
 cargo install --locked --path .
 ```

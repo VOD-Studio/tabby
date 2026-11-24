@@ -37,7 +37,7 @@ Homebrew 与 Arch 包不附带内核，可由 tabby 下载或另行安装 `mihom
 
 ```sh
 # Linux x86_64，带 mihomo
-archive='tabby-0.3.1-x86_64-unknown-linux-gnu-with-mihomo.tar.gz'
+archive='tabby-0.4.0-x86_64-unknown-linux-gnu-with-mihomo.tar.gz'
 awk -v archive="$archive" '$2 == archive' SHA256SUMS | sha256sum --check -
 ```
 
@@ -74,7 +74,7 @@ url = "http://127.0.0.1:9090"
 secret = "your-secret"       # 明文保存
 ```
 
-添加多个 `[profiles.<名称>]` 可连接不同控制器，按 `P` 选择，再按 `Enter` 切换。`main` 上的版本会将选择记录在状态目录的 `last-controller.toml`。下次启动时，未显式指定配置名、地址或密钥就会恢复该选择。对应的配置已删除或改名时，回退到 `default` 或内置地址。`P` 菜单里的「启动参数指定」仅用于当前会话。
+添加多个 `[profiles.<名称>]` 可连接不同控制器，按 `P` 选择，再按 `Enter` 切换。Tabby 会将选择记录在状态目录的 `last-controller.toml`。下次启动时，未显式指定配置名、地址或密钥就会恢复该选择。对应的配置已删除或改名时，回退到 `default` 或内置地址。`P` 菜单里的「启动参数指定」仅用于当前会话。
 
 <details>
 <summary>主题与交互配置</summary>
