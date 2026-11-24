@@ -6,6 +6,8 @@
 
 终端里的 [mihomo](https://github.com/MetaCubeX/mihomo)（Clash.Meta）中文控制台。支持 Linux 与 macOS，可连接现有内核，也可托管 mihomo。
 
+[官网](https://vod-studio.github.io/tabby/) · [中文文档](https://vod-studio.github.io/tabby/docs/)
+
 ![概览页](docs/screenshots/overview.png)
 
 ## 特性
@@ -144,6 +146,8 @@ default = "core"
 make check     # fmt + clippy -D warnings + test（测试在临时 XDG 目录下运行）
 make help      # 全部目标：dist、audit、cut-release …
 ```
+
+官网和文档在 `site/`。使用该目录 `package.json` 声明的 Bun 版本，运行 `make site-check` 检查并构建，或在 `site/` 执行 `bun install --frozen-lockfile` 和 `bun run dev` 开启本地预览。网站相关改动合入 `main` 后由 GitHub Actions 部署到 GitHub Pages。
 
 - 设计文档：[TUI](docs/plans/2026-11-05-tabby-tui.md)、[托管内核](docs/plans/2026-11-06-managed-core.md)、[macOS](docs/plans/2026-11-11-macos.md)
 - 贡献约定：[AGENTS.md](AGENTS.md) · 版本记录：[CHANGELOG.md](CHANGELOG.md)
