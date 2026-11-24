@@ -7,7 +7,7 @@ class TabbyMihomo < Formula
   homepage "https://github.com/VOD-Studio/tabby"
   license "MIT"
 
-  release = "0.3.1"
+  release = "0.4.0"
   version release
   release_url = "#{homepage}/releases/download/v#{release}/tabby-#{release}"
 
@@ -16,22 +16,22 @@ class TabbyMihomo < Formula
 
     on_arm do
       url "#{release_url}-aarch64-apple-darwin.tar.gz"
-      sha256 "2cd6b303b40871f5b4c6026862a5ca494bb13bb640dc4a52fc62d9e7fd59b1bf"
+      sha256 "d1d530d8095261f7f75981811cde590d7b54b848d29564233acd3d8187c0556e"
     end
     on_intel do
       url "#{release_url}-x86_64-apple-darwin.tar.gz"
-      sha256 "d346a8a0a108611e80f4604ae4fb443578f9f2855ce253b6748f5e349880553c"
+      sha256 "f524403f86cd8d5137286b2a81530836154c6df44bb0c1d4f57a410aa1001530"
     end
   end
 
   on_linux do
     on_arm do
       url "#{release_url}-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "66f300952e4e887f890741a78fa9a83389b405b0c9be28a0a40089fb8f665213"
+      sha256 "c636e149832a01bdcb08bd8314019edc6936840e447b276d3637ef5092634765"
     end
     on_intel do
       url "#{release_url}-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "774641f383073943c83ab2287720d9372c37e72751445615bb755b968c546d38"
+      sha256 "be0dfd441b140e67d2b73343b49d315475916b69168009db0fdd686e4ad694f3"
     end
   end
 
